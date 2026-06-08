@@ -371,3 +371,6 @@ Cliente paga
 - **Eventos**: `PullEvents()` en el agregado los entrega y los limpia; el caso de uso los pasa al `EventPublisher`
 - **Idempotencia**: toda operación que mueve dinero acepta una `idempotency_key`
 - **Tests**: el dominio y la capa de application son testeables sin base de datos ni NATS
+
+
+------------------------------
