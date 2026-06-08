@@ -15,7 +15,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	auditapp "github.com/juantevez/cobros-platform/context/audit/application"
+	auditnats "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/inbound/nats"
+	auditcrypto "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/crypto"
+	auditpg "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/postgres"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -76,6 +81,14 @@ func main() {
 		outbox.WithLogger(logger.With("component", "outbox_relay")),
 	)
 
+	// ── Audit: consumers de eventos ───────────────────────────────────────────
+
+	auditRepo := auditpg.NewAuditLogRepository(pool)
+	auditHasher := auditcrypto.NewSHA256Hasher()
+	recordAction := auditapp.NewRecordActionUseCase(auditRepo, auditHasher, realClock{})
+	natsConsumer := eventbus.NewConsumer(natsClient, logger.With("component", "audit_consumer"))
+	auditConsumer := auditnats.NewEventConsumer(natsConsumer, recordAction, logger.With("component", "audit"))
+
 	// ── Graceful shutdown ─────────────────────────────────────────────────────
 
 	quit := make(chan os.Signal, 1)
@@ -85,6 +98,18 @@ func main() {
 		if err := relay.Start(ctx); err != nil {
 			logger.Error("relay: stopped with error", "error", err)
 			cancel()
+		}
+	}()
+
+	go func() {
+		if err := auditConsumer.StartAuthConsumer(ctx); err != nil {
+			logger.Error("audit auth consumer: stopped with error", "error", err)
+		}
+	}()
+
+	go func() {
+		if err := auditConsumer.StartLedgerConsumer(ctx); err != nil {
+			logger.Error("audit ledger consumer: stopped with error", "error", err)
 		}
 	}()
 
@@ -98,3 +123,7 @@ func main() {
 	cancel()
 	logger.Info("worker: stopped")
 }
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now().UTC() }

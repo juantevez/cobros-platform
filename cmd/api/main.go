@@ -21,6 +21,10 @@ import (
 	authevents "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/events"
 	authpg "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/postgres"
 	authtoken "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/token"
+	auditapp "github.com/juantevez/cobros-platform/context/audit/application"
+	audithttp "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/inbound/http"
+	auditcrypto "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/crypto"
+	auditpg "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/postgres"
 	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
 	ledgerhttp "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/http"
 	ledgerevents "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/events"
@@ -162,6 +166,15 @@ func main() {
 	protected := router.Group("/api/v1")
 	protected.Use(authttp.JWTMiddleware(jwtIssuer))
 	ledgerhttp.RegisterRoutes(protected, accountHandler, entryHandler)
+
+	// ── Audit: handlers HTTP ──────────────────────────────────────────────────
+
+	auditRepo := auditpg.NewAuditLogRepository(pool)
+	auditHasher := auditcrypto.NewSHA256Hasher()
+	listLogs := auditapp.NewListLogsUseCase(auditRepo)
+	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
+	auditHandler := audithttp.NewAuditHandler(listLogs, verifyChain)
+	audithttp.RegisterRoutes(protected, auditHandler)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 
