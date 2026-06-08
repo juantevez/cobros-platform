@@ -372,5 +372,3 @@ Cliente paga
 - **Idempotencia**: toda operación que mueve dinero acepta una `idempotency_key`
 - **Tests**: el dominio y la capa de application son testeables sin base de datos ni NATS
 
-
-------------------------------
