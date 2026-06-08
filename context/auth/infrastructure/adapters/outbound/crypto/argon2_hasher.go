@@ -1,3 +1,11 @@
+// Package crypto implementa el puerto PasswordHasher usando argon2id.
+//
+// argon2id es el algoritmo recomendado actualmente por OWASP para hash de
+// contraseñas: resistente a ataques de GPU y side-channel.
+//
+// Formato del hash almacenado (PHC string format):
+//
+//	$argon2id$v=19$m=65536,t=3,p=2$<salt_b64>$<hash_b64>
 package crypto
 
 import (
