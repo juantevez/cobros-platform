@@ -21,6 +21,10 @@ import (
 	authevents "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/events"
 	authpg "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/postgres"
 	authtoken "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/token"
+	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
+	ledgerhttp "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/http"
+	ledgerevents "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/events"
+	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -125,7 +129,7 @@ func main() {
 	userHandler := authttp.NewUserHandler(registerUser, assignRole)
 	apiKeyHandler := authttp.NewApiKeyHandler(issueApiKey, revokeApiKey)
 
-	// ── Router ────────────────────────────────────────────────────────────────
+	// ── Router base (Auth) ────────────────────────────────────────────────────
 
 	router := authttp.NewRouter(
 		jwtIssuer,
@@ -136,6 +140,28 @@ func main() {
 		userHandler,
 		apiKeyHandler,
 	)
+
+	// ── Ledger: repositorios y casos de uso ───────────────────────────────────
+
+	ledgerEventPub := ledgerevents.NewEventPublisher(outboxStore)
+	accountRepo := ledgerpg.NewAccountRepository(pool)
+	entryRepo := ledgerpg.NewEntryRepository(pool)
+	balanceRepo := ledgerpg.NewBalanceRepository(pool)
+
+	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txManager, ledgerEventPub)
+	postEntry := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPub, ledgerapp.RealClock())
+	reverseEntry := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPub)
+	getBalance := ledgerapp.NewGetBalanceUseCase(accountRepo, balanceRepo)
+
+	// ── Ledger: handlers HTTP (se registran en el grupo protegido) ────────────
+
+	accountHandler := ledgerhttp.NewAccountHandler(createAccount, getBalance)
+	entryHandler := ledgerhttp.NewEntryHandler(postEntry, reverseEntry)
+
+	// Registrar rutas del Ledger en el grupo /api/v1 protegido por JWT.
+	protected := router.Group("/api/v1")
+	protected.Use(authttp.JWTMiddleware(jwtIssuer))
+	ledgerhttp.RegisterRoutes(protected, accountHandler, entryHandler)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

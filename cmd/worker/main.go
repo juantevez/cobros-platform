@@ -1,3 +1,12 @@
+// cmd/worker arranca el relay del Transactional Outbox.
+//
+// Responsabilidades:
+//   - Lee mensajes pendientes de outbox_messages.
+//   - Los publica en NATS JetStream (con deduplicación por Nats-Msg-Id).
+//   - Marca cada mensaje como publicado.
+//
+// Puede correr en múltiples instancias (SKIP LOCKED + deduplicación de JetStream
+// garantizan que no haya publicaciones duplicadas).
 package main
 
 import (
