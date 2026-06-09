@@ -1,8 +1,4 @@
 // cmd/api arranca el servidor HTTP de la plataforma.
-//
-// Este archivo es el punto de ensamblaje (composition root): instancia las
-// dependencias concretas y las inyecta en los casos de uso. Ninguna otra
-// capa conoce las implementaciones concretas; solo conoce interfaces.
 package main
 
 import (
@@ -15,16 +11,16 @@ import (
 	"syscall"
 	"time"
 
+	auditapp "github.com/juantevez/cobros-platform/context/audit/application"
+	audithttp "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/inbound/http"
+	auditcrypto "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/crypto"
+	auditpg "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/postgres"
 	"github.com/juantevez/cobros-platform/context/auth/application"
 	authdomain "github.com/juantevez/cobros-platform/context/auth/domain"
 	authttp "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/inbound/http"
 	authcrypto "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/crypto"
 	authpg "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/postgres"
 	authtoken "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/token"
-	auditapp "github.com/juantevez/cobros-platform/context/audit/application"
-	audithttp "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/inbound/http"
-	auditcrypto "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/crypto"
-	auditpg "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/postgres"
 	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
 	ledgerdomain "github.com/juantevez/cobros-platform/context/ledger/domain"
 	ledgerhttp "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/http"
@@ -33,6 +29,13 @@ import (
 	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
 	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
 	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	paymentapp "github.com/juantevez/cobros-platform/context/payment/application"
+	paymentdomain "github.com/juantevez/cobros-platform/context/payment/domain"
+	paymenthttp "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/inbound/http"
+	paymentpg "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/postgres"
+	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/fees"
+	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/psp"
+	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/risk"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -42,9 +45,7 @@ import (
 func main() {
 	cfg := config.Load()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -62,7 +63,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
-	logger.Info("postgres: connected")
 
 	// ── NATS JetStream ────────────────────────────────────────────────────────
 
@@ -72,7 +72,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer natsClient.Close()
-	logger.Info("nats: connected")
 
 	if err := eventbus.EnsureStreams(ctx, natsClient, eventbus.AppStreams()); err != nil {
 		logger.Error("nats: ensure streams failed", "error", err)
@@ -84,123 +83,99 @@ func main() {
 	txManager := postgres.NewTxManager(pool)
 	outboxStore := outbox.NewPostgresStore(pool)
 
-	// ── Auth: implementaciones concretas ──────────────────────────────────────
+	// ── Publishers tipados por contexto ───────────────────────────────────────
+	// Go no tiene covarianza en variadics: NewEventPublisher[T] resuelve esto.
+	authPub        := outbox.NewEventPublisher[authdomain.Event](outboxStore)
+	ledgerPub      := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
+	onboardingPub  := outbox.NewEventPublisher[onboardingdomain.Event](outboxStore)
+	paymentPub     := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
+
+	// ── Auth ──────────────────────────────────────────────────────────────────
 
 	hasher := authcrypto.NewArgon2Hasher()
-
 	jwtIssuer, err := authtoken.NewJWTIssuer(cfg.JWTSecret)
 	if err != nil {
 		logger.Error("jwt: invalid config", "error", err)
 		os.Exit(1)
 	}
 
-	// ── Publishers por contexto ───────────────────────────────────────────────
-	// Go no permite covarianza en variadics, por lo que cada contexto necesita
-	// su propio EventPublisher tipado sobre su domain.Event.
-	authEventPublisher := outbox.NewEventPublisher[authdomain.Event](outboxStore)
-	ledgerEventPublisher := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
-	onboardingEventPublisher := outbox.NewEventPublisher[onboardingdomain.Event](outboxStore)
-
-	// Repositorios
-	tenantRepo := authpg.NewTenantRepository(pool)
-	userRepo := authpg.NewUserRepository(pool)
+	tenantRepo     := authpg.NewTenantRepository(pool)
+	userRepo       := authpg.NewUserRepository(pool)
 	membershipRepo := authpg.NewMembershipRepository(pool)
-	apiKeyRepo := authpg.NewApiKeyRepository(pool)
-	refreshRepo := authpg.NewRefreshTokenRepository(pool)
+	apiKeyRepo     := authpg.NewApiKeyRepository(pool)
+	refreshRepo    := authpg.NewRefreshTokenRepository(pool)
+	clock          := realClock{}
 
-	// ── Auth: casos de uso ────────────────────────────────────────────────────
-
-	clock := realClock{}
-
-	registerTenant := application.NewRegisterTenantUseCase(tenantRepo, txManager, authEventPublisher)
-	activateTenant := application.NewActivateTenantUseCase(tenantRepo, txManager, authEventPublisher)
-	suspendTenant := application.NewSuspendTenantUseCase(tenantRepo, txManager, authEventPublisher)
-
-	registerUser := application.NewRegisterUserUseCase(
-		tenantRepo, userRepo, membershipRepo, hasher, txManager, authEventPublisher,
-	)
-	authenticate := application.NewAuthenticateUseCase(
-		tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock,
-	)
-	refreshTokenUC := application.NewRefreshTokenUseCase(
-		userRepo, membershipRepo, tenantRepo, refreshRepo, hasher, jwtIssuer, clock,
-	)
-	logoutUC := application.NewLogoutUseCase(refreshRepo, hasher)
-
-	issueApiKey := application.NewIssueApiKeyUseCase(
-		tenantRepo, apiKeyRepo, hasher, txManager, authEventPublisher,
-	)
-	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authEventPublisher)
-	assignRole := application.NewAssignRoleUseCase(
-		tenantRepo, userRepo, membershipRepo, txManager, authEventPublisher,
-	)
-
-	// ── Auth: handlers HTTP ───────────────────────────────────────────────────
+	registerTenant  := application.NewRegisterTenantUseCase(tenantRepo, txManager, authPub)
+	activateTenant  := application.NewActivateTenantUseCase(tenantRepo, txManager, authPub)
+	suspendTenant   := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
+	registerUser    := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
+	authenticate    := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock)
+	refreshTokenUC  := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, hasher, jwtIssuer, clock)
+	logoutUC        := application.NewLogoutUseCase(refreshRepo, hasher)
+	issueApiKey     := application.NewIssueApiKeyUseCase(tenantRepo, apiKeyRepo, hasher, txManager, authPub)
+	revokeApiKey    := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)
+	assignRole      := application.NewAssignRoleUseCase(tenantRepo, userRepo, membershipRepo, txManager, authPub)
 
 	tenantHandler := authttp.NewTenantHandler(registerTenant, activateTenant, suspendTenant)
-	authHandler := authttp.NewAuthHandler(authenticate, refreshTokenUC, logoutUC)
-	userHandler := authttp.NewUserHandler(registerUser, assignRole)
+	authHandler   := authttp.NewAuthHandler(authenticate, refreshTokenUC, logoutUC)
+	userHandler   := authttp.NewUserHandler(registerUser, assignRole)
 	apiKeyHandler := authttp.NewApiKeyHandler(issueApiKey, revokeApiKey)
 
-	// ── Router base (Auth) ────────────────────────────────────────────────────
+	router := authttp.NewRouter(jwtIssuer, apiKeyRepo, hasher, tenantHandler, authHandler, userHandler, apiKeyHandler)
 
-	router := authttp.NewRouter(
-		jwtIssuer,
-		apiKeyRepo,
-		hasher,
-		tenantHandler,
-		authHandler,
-		userHandler,
-		apiKeyHandler,
-	)
-
-	// ── Ledger: repositorios y casos de uso ───────────────────────────────────
-
-	accountRepo := ledgerpg.NewAccountRepository(pool)
-	entryRepo := ledgerpg.NewEntryRepository(pool)
-	balanceRepo := ledgerpg.NewBalanceRepository(pool)
-
-	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txManager, ledgerEventPublisher)
-	postEntry := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPublisher, ledgerapp.RealClock())
-	reverseEntry := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPublisher)
-	getBalance := ledgerapp.NewGetBalanceUseCase(accountRepo, balanceRepo)
-
-	// ── Ledger: handlers HTTP (se registran en el grupo protegido) ────────────
-
-	accountHandler := ledgerhttp.NewAccountHandler(createAccount, getBalance)
-	entryHandler := ledgerhttp.NewEntryHandler(postEntry, reverseEntry)
-
-	// Registrar rutas del Ledger en el grupo /api/v1 protegido por JWT.
 	protected := router.Group("/api/v1")
 	protected.Use(authttp.JWTMiddleware(jwtIssuer))
-	ledgerhttp.RegisterRoutes(protected, accountHandler, entryHandler)
 
-	// ── Audit: handlers HTTP ──────────────────────────────────────────────────
+	// ── Ledger ────────────────────────────────────────────────────────────────
 
-	auditRepo := auditpg.NewAuditLogRepository(pool)
-	auditHasher := auditcrypto.NewSHA256Hasher()
-	listLogs := auditapp.NewListLogsUseCase(auditRepo)
-	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
-	auditHandler := audithttp.NewAuditHandler(listLogs, verifyChain)
-	audithttp.RegisterRoutes(protected, auditHandler)
+	accountRepo := ledgerpg.NewAccountRepository(pool)
+	entryRepo   := ledgerpg.NewEntryRepository(pool)
+	balanceRepo := ledgerpg.NewBalanceRepository(pool)
+
+	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txManager, ledgerPub)
+	postEntry     := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txManager, ledgerPub, ledgerapp.RealClock())
+	reverseEntry  := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerPub)
+	getBalance    := ledgerapp.NewGetBalanceUseCase(accountRepo, balanceRepo)
+
+	ledgerhttp.RegisterRoutes(protected, ledgerhttp.NewAccountHandler(createAccount, getBalance), ledgerhttp.NewEntryHandler(postEntry, reverseEntry))
+
+	// ── Audit ─────────────────────────────────────────────────────────────────
+
+	auditRepo    := auditpg.NewAuditLogRepository(pool)
+	auditHasher  := auditcrypto.NewSHA256Hasher()
+	listLogs     := auditapp.NewListLogsUseCase(auditRepo)
+	verifyChain  := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
+	audithttp.RegisterRoutes(protected, audithttp.NewAuditHandler(listLogs, verifyChain))
 
 	// ── Onboarding ────────────────────────────────────────────────────────────
 
-	appRepo := onboardingpg.NewApplicationRepository(pool)
+	appRepo         := onboardingpg.NewApplicationRepository(pool)
+	submitApp       := onboardingapp.NewSubmitApplicationUseCase(appRepo, txManager, onboardingPub)
+	uploadDoc       := onboardingapp.NewUploadDocumentUseCase(appRepo, txManager)
+	addPerson       := onboardingapp.NewAddPersonUseCase(appRepo, txManager)
+	setBankAcct     := onboardingapp.NewSetBankAccountUseCase(appRepo, txManager)
+	submitForReview := onboardingapp.NewSubmitForReviewUseCase(appRepo, txManager, onboardingPub)
+	reviewApp       := onboardingapp.NewReviewApplicationUseCase(appRepo, txManager, onboardingPub)
+	getApp          := onboardingapp.NewGetApplicationUseCase(appRepo)
 
-	submitApp := onboardingapp.NewSubmitApplicationUseCase(appRepo, txManager, onboardingEventPublisher)
-	uploadDoc := onboardingapp.NewUploadDocumentUseCase(appRepo, txManager)
-	addPerson := onboardingapp.NewAddPersonUseCase(appRepo, txManager)
-	setBankAcct := onboardingapp.NewSetBankAccountUseCase(appRepo, txManager)
-	submitForReview := onboardingapp.NewSubmitForReviewUseCase(appRepo, txManager, onboardingEventPublisher)
-	reviewApp := onboardingapp.NewReviewApplicationUseCase(appRepo, txManager, onboardingEventPublisher)
-	getApp := onboardingapp.NewGetApplicationUseCase(appRepo)
-
-	obHandler := onboardinghttp.NewOnboardingHandler(
-		submitApp, uploadDoc, addPerson, setBankAcct, submitForReview, getApp,
+	onboardinghttp.RegisterRoutes(protected,
+		onboardinghttp.NewOnboardingHandler(submitApp, uploadDoc, addPerson, setBankAcct, submitForReview, getApp),
+		onboardinghttp.NewReviewHandler(reviewApp),
 	)
-	reviewHandler := onboardinghttp.NewReviewHandler(reviewApp)
-	onboardinghttp.RegisterRoutes(protected, obHandler, reviewHandler)
+
+	// ── Payment Processing ────────────────────────────────────────────────────
+
+	paymentRepo    := paymentpg.NewPaymentRepository(pool)
+	pspRouter      := psp.NewRouter()
+	riskEvaluator  := risk.NewPermissiveEvaluator()
+	feeCalculator  := fees.NewFixedRateCalculator(300) // 3% por defecto
+
+	processPayment := paymentapp.NewProcessPaymentUseCase(paymentRepo, pspRouter, riskEvaluator, feeCalculator, txManager, paymentPub)
+	refundPayment  := paymentapp.NewRefundPaymentUseCase(paymentRepo, pspRouter, txManager, paymentPub)
+	getPayment     := paymentapp.NewGetPaymentUseCase(paymentRepo)
+
+	paymenthttp.RegisterRoutes(protected, paymenthttp.NewPaymentHandler(processPayment, refundPayment, getPayment))
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 
@@ -223,22 +198,15 @@ func main() {
 		}
 	}()
 
-	// Bloquear hasta señal de apagado o error crítico.
 	<-quit
 	logger.Info("shutting down...")
-
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
-
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("http server shutdown error", "error", err)
+		logger.Error("http shutdown error", "error", err)
 	}
-
 	logger.Info("server stopped")
 }
 
-// realClock implementa application.Clock con time.Now() real.
-// En tests se usa un mock que retorna tiempo fijo.
 type realClock struct{}
-
 func (realClock) Now() time.Time { return time.Now().UTC() }

@@ -1,12 +1,4 @@
-// cmd/worker arranca el relay del Transactional Outbox.
-//
-// Responsabilidades:
-//   - Lee mensajes pendientes de outbox_messages.
-//   - Los publica en NATS JetStream (con deduplicación por Nats-Msg-Id).
-//   - Marca cada mensaje como publicado.
-//
-// Puede correr en múltiples instancias (SKIP LOCKED + deduplicación de JetStream
-// garantizan que no haya publicaciones duplicadas).
+// cmd/worker arranca el relay del Outbox + todos los consumers de NATS.
 package main
 
 import (
@@ -21,12 +13,14 @@ import (
 	auditnats "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/inbound/nats"
 	auditcrypto "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/crypto"
 	auditpg "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/postgres"
-	authnats "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/inbound/nats"
 	authapp "github.com/juantevez/cobros-platform/context/auth/application"
+	authdomain "github.com/juantevez/cobros-platform/context/auth/domain"
+	authnats "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/inbound/nats"
 	authpg "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/postgres"
 	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
-	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
+	ledgerdomain "github.com/juantevez/cobros-platform/context/ledger/domain"
 	ledgernats "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/nats"
+	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -36,15 +30,13 @@ import (
 func main() {
 	cfg := config.Load()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ── PostgreSQL ────────────────────────────────────────────────────────────
+	// ── Infraestructura ───────────────────────────────────────────────────────
 
 	pgCfg := postgres.DefaultConfig(cfg.DatabaseURL)
 	pgCfg.MaxConns = cfg.DBMaxConns
@@ -56,9 +48,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
-	logger.Info("postgres: connected")
-
-	// ── NATS JetStream ────────────────────────────────────────────────────────
 
 	natsClient, err := eventbus.New(eventbus.DefaultConfig(cfg.NatsURL))
 	if err != nil {
@@ -66,9 +55,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer natsClient.Close()
-	logger.Info("nats: connected")
 
-	// Provisionar streams antes de que el relay empiece a publicar.
 	if err := eventbus.EnsureStreams(ctx, natsClient, eventbus.AppStreams()); err != nil {
 		logger.Error("nats: ensure streams failed", "error", err)
 		os.Exit(1)
@@ -77,81 +64,94 @@ func main() {
 	// ── Outbox relay ──────────────────────────────────────────────────────────
 
 	outboxStore := outbox.NewPostgresStore(pool)
-	publisher := eventbus.NewPublisher(natsClient)
-
 	relay := outbox.NewRelay(
 		outboxStore,
-		publisher,
+		eventbus.NewPublisher(natsClient),
 		outbox.WithInterval(cfg.OutboxInterval),
 		outbox.WithBatchSize(cfg.OutboxBatchSize),
 		outbox.WithLogger(logger.With("component", "outbox_relay")),
 	)
 
-	// ── Audit: consumers de eventos ───────────────────────────────────────────
+	// ── Publishers tipados (usados por consumers que también producen eventos) ─
 
-	auditRepo := auditpg.NewAuditLogRepository(pool)
-	auditHasher := auditcrypto.NewSHA256Hasher()
-	recordAction := auditapp.NewRecordActionUseCase(auditRepo, auditHasher, realClock{})
-	natsConsumer := eventbus.NewConsumer(natsClient, logger.With("component", "audit_consumer"))
-	auditConsumer := auditnats.NewEventConsumer(natsConsumer, recordAction, logger.With("component", "audit"))
+	authPub   := outbox.NewEventPublisher[authdomain.Event](outboxStore)
+	ledgerPub := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
 
-	// ── Graceful shutdown ─────────────────────────────────────────────────────
+	// ── Audit consumers ───────────────────────────────────────────────────────
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		if err := relay.Start(ctx); err != nil {
-			logger.Error("relay: stopped with error", "error", err)
-			cancel()
-		}
-	}()
-
-	go func() {
-		if err := auditConsumer.StartAuthConsumer(ctx); err != nil {
-			logger.Error("audit auth consumer: stopped with error", "error", err)
-		}
-	}()
-
-	// ── Auth consumer: reacciona a onboarding aprobado ───────────────────────
-
-	tenantRepo := authpg.NewTenantRepository(pool)
-	activateTenant := authapp.NewActivateTenantUseCase(
-		tenantRepo,
-		postgres.NewTxManager(pool),
-		// eventPublisher para auth (outbox ya inicializado arriba)
-		nil, // placeholder: en producción inyectar el publisher de auth
+	auditRepo    := auditpg.NewAuditLogRepository(pool)
+	recordAction := auditapp.NewRecordActionUseCase(auditRepo, auditcrypto.NewSHA256Hasher(), realClock{})
+	auditConsumer := auditnats.NewEventConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "audit")),
+		recordAction,
+		logger.With("component", "audit"),
 	)
+
+	// ── Auth consumer: activa tenant al aprobarse el KYC ─────────────────────
+
+	tenantRepo     := authpg.NewTenantRepository(pool)
+	activateTenant := authapp.NewActivateTenantUseCase(tenantRepo, postgres.NewTxManager(pool), authPub)
 	authOnboardingConsumer := authnats.NewOnboardingConsumer(
 		eventbus.NewConsumer(natsClient, logger.With("component", "auth_onboarding")),
 		activateTenant,
 		logger.With("component", "auth_onboarding"),
 	)
 
-	// ── Ledger consumer: crea cuentas al aprobarse el KYC ────────────────────
+	// ── Ledger consumers ──────────────────────────────────────────────────────
 
 	accountRepo := ledgerpg.NewAccountRepository(pool)
-	// El outbox del ledger necesita su propio publisher; usamos el mismo store.
-	createAccount := ledgerapp.NewCreateAccountUseCase(
-		accountRepo,
-		postgres.NewTxManager(pool),
-		nil, // placeholder: en producción inyectar el publisher de ledger
-	)
+	entryRepo   := ledgerpg.NewEntryRepository(pool)
+	balanceRepo := ledgerpg.NewBalanceRepository(pool)
+	txMgr       := postgres.NewTxManager(pool)
+
+	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txMgr, ledgerPub)
+	postEntry     := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txMgr, ledgerPub, ledgerapp.RealClock())
+
 	ledgerOnboardingConsumer := ledgernats.NewOnboardingConsumer(
 		eventbus.NewConsumer(natsClient, logger.With("component", "ledger_onboarding")),
 		createAccount,
 		logger.With("component", "ledger_onboarding"),
 	)
+	ledgerPaymentConsumer := ledgernats.NewPaymentConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "ledger_payment")),
+		postEntry,
+		accountRepo,
+		logger.With("component", "ledger_payment"),
+	)
+
+	// ── Arrancar goroutines ───────────────────────────────────────────────────
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		if err := authOnboardingConsumer.Start(ctx); err != nil {
-			logger.Error("auth onboarding consumer: stopped", "error", err)
+		if err := relay.Start(ctx); err != nil {
+			logger.Error("relay stopped", "error", err); cancel()
 		}
 	}()
-
+	go func() {
+		if err := auditConsumer.StartAuthConsumer(ctx); err != nil {
+			logger.Error("audit auth consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := auditConsumer.StartLedgerConsumer(ctx); err != nil {
+			logger.Error("audit ledger consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := authOnboardingConsumer.Start(ctx); err != nil {
+			logger.Error("auth onboarding consumer stopped", "error", err)
+		}
+	}()
 	go func() {
 		if err := ledgerOnboardingConsumer.Start(ctx); err != nil {
-			logger.Error("ledger onboarding consumer: stopped", "error", err)
+			logger.Error("ledger onboarding consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := ledgerPaymentConsumer.Start(ctx); err != nil {
+			logger.Error("ledger payment consumer stopped", "error", err)
 		}
 	}()
 
@@ -159,13 +159,11 @@ func main() {
 		"outbox_interval", cfg.OutboxInterval,
 		"outbox_batch_size", cfg.OutboxBatchSize,
 	)
-
 	<-quit
-	logger.Info("worker: shutting down...")
+	logger.Info("worker stopping...")
 	cancel()
-	logger.Info("worker: stopped")
+	logger.Info("worker stopped")
 }
 
 type realClock struct{}
-
 func (realClock) Now() time.Time { return time.Now().UTC() }
