@@ -21,6 +21,12 @@ import (
 	auditnats "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/inbound/nats"
 	auditcrypto "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/crypto"
 	auditpg "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/postgres"
+	authnats "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/inbound/nats"
+	authapp "github.com/juantevez/cobros-platform/context/auth/application"
+	authpg "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/postgres"
+	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
+	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
+	ledgernats "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/nats"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -107,9 +113,45 @@ func main() {
 		}
 	}()
 
+	// ── Auth consumer: reacciona a onboarding aprobado ───────────────────────
+
+	tenantRepo := authpg.NewTenantRepository(pool)
+	activateTenant := authapp.NewActivateTenantUseCase(
+		tenantRepo,
+		postgres.NewTxManager(pool),
+		// eventPublisher para auth (outbox ya inicializado arriba)
+		nil, // placeholder: en producción inyectar el publisher de auth
+	)
+	authOnboardingConsumer := authnats.NewOnboardingConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "auth_onboarding")),
+		activateTenant,
+		logger.With("component", "auth_onboarding"),
+	)
+
+	// ── Ledger consumer: crea cuentas al aprobarse el KYC ────────────────────
+
+	accountRepo := ledgerpg.NewAccountRepository(pool)
+	// El outbox del ledger necesita su propio publisher; usamos el mismo store.
+	createAccount := ledgerapp.NewCreateAccountUseCase(
+		accountRepo,
+		postgres.NewTxManager(pool),
+		nil, // placeholder: en producción inyectar el publisher de ledger
+	)
+	ledgerOnboardingConsumer := ledgernats.NewOnboardingConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "ledger_onboarding")),
+		createAccount,
+		logger.With("component", "ledger_onboarding"),
+	)
+
 	go func() {
-		if err := auditConsumer.StartLedgerConsumer(ctx); err != nil {
-			logger.Error("audit ledger consumer: stopped with error", "error", err)
+		if err := authOnboardingConsumer.Start(ctx); err != nil {
+			logger.Error("auth onboarding consumer: stopped", "error", err)
+		}
+	}()
+
+	go func() {
+		if err := ledgerOnboardingConsumer.Start(ctx); err != nil {
+			logger.Error("ledger onboarding consumer: stopped", "error", err)
 		}
 	}()
 

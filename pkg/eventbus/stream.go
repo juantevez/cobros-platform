@@ -53,7 +53,7 @@ func AppStreams() []StreamDefinition {
 	return []StreamDefinition{
 		{Name: "AUTH", Subjects: []string{"auth.>"}},
 		{Name: "LEDGER", Subjects: []string{"ledger.>"}},
+		{Name: "ONBOARDING", Subjects: []string{"onboarding.>"}},
 		// AUDIT consume; no produce streams propios de negocio.
-		// OUTBOX no tiene stream propio: usa AUTH y LEDGER.
 	}
 }

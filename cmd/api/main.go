@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/auth/application"
+	authdomain "github.com/juantevez/cobros-platform/context/auth/domain"
 	authttp "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/inbound/http"
 	authcrypto "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/crypto"
-	authevents "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/events"
 	authpg "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/postgres"
 	authtoken "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/token"
 	auditapp "github.com/juantevez/cobros-platform/context/audit/application"
@@ -26,9 +26,13 @@ import (
 	auditcrypto "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/crypto"
 	auditpg "github.com/juantevez/cobros-platform/context/audit/infrastructure/adapters/outbound/postgres"
 	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
+	ledgerdomain "github.com/juantevez/cobros-platform/context/ledger/domain"
 	ledgerhttp "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/http"
-	ledgerevents "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/events"
 	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
+	onboardingapp "github.com/juantevez/cobros-platform/context/onboarding/application"
+	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
+	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
+	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -90,7 +94,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	eventPublisher := authevents.NewEventPublisher(outboxStore)
+	// ── Publishers por contexto ───────────────────────────────────────────────
+	// Go no permite covarianza en variadics, por lo que cada contexto necesita
+	// su propio EventPublisher tipado sobre su domain.Event.
+	authEventPublisher := outbox.NewEventPublisher[authdomain.Event](outboxStore)
+	ledgerEventPublisher := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
+	onboardingEventPublisher := outbox.NewEventPublisher[onboardingdomain.Event](outboxStore)
 
 	// Repositorios
 	tenantRepo := authpg.NewTenantRepository(pool)
@@ -103,12 +112,12 @@ func main() {
 
 	clock := realClock{}
 
-	registerTenant := application.NewRegisterTenantUseCase(tenantRepo, txManager, eventPublisher)
-	activateTenant := application.NewActivateTenantUseCase(tenantRepo, txManager, eventPublisher)
-	suspendTenant := application.NewSuspendTenantUseCase(tenantRepo, txManager, eventPublisher)
+	registerTenant := application.NewRegisterTenantUseCase(tenantRepo, txManager, authEventPublisher)
+	activateTenant := application.NewActivateTenantUseCase(tenantRepo, txManager, authEventPublisher)
+	suspendTenant := application.NewSuspendTenantUseCase(tenantRepo, txManager, authEventPublisher)
 
 	registerUser := application.NewRegisterUserUseCase(
-		tenantRepo, userRepo, membershipRepo, hasher, txManager, eventPublisher,
+		tenantRepo, userRepo, membershipRepo, hasher, txManager, authEventPublisher,
 	)
 	authenticate := application.NewAuthenticateUseCase(
 		tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock,
@@ -119,11 +128,11 @@ func main() {
 	logoutUC := application.NewLogoutUseCase(refreshRepo, hasher)
 
 	issueApiKey := application.NewIssueApiKeyUseCase(
-		tenantRepo, apiKeyRepo, hasher, txManager, eventPublisher,
+		tenantRepo, apiKeyRepo, hasher, txManager, authEventPublisher,
 	)
-	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, eventPublisher)
+	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authEventPublisher)
 	assignRole := application.NewAssignRoleUseCase(
-		tenantRepo, userRepo, membershipRepo, txManager, eventPublisher,
+		tenantRepo, userRepo, membershipRepo, txManager, authEventPublisher,
 	)
 
 	// ── Auth: handlers HTTP ───────────────────────────────────────────────────
@@ -147,14 +156,13 @@ func main() {
 
 	// ── Ledger: repositorios y casos de uso ───────────────────────────────────
 
-	ledgerEventPub := ledgerevents.NewEventPublisher(outboxStore)
 	accountRepo := ledgerpg.NewAccountRepository(pool)
 	entryRepo := ledgerpg.NewEntryRepository(pool)
 	balanceRepo := ledgerpg.NewBalanceRepository(pool)
 
-	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txManager, ledgerEventPub)
-	postEntry := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPub, ledgerapp.RealClock())
-	reverseEntry := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPub)
+	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txManager, ledgerEventPublisher)
+	postEntry := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPublisher, ledgerapp.RealClock())
+	reverseEntry := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerEventPublisher)
 	getBalance := ledgerapp.NewGetBalanceUseCase(accountRepo, balanceRepo)
 
 	// ── Ledger: handlers HTTP (se registran en el grupo protegido) ────────────
@@ -175,6 +183,24 @@ func main() {
 	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
 	auditHandler := audithttp.NewAuditHandler(listLogs, verifyChain)
 	audithttp.RegisterRoutes(protected, auditHandler)
+
+	// ── Onboarding ────────────────────────────────────────────────────────────
+
+	appRepo := onboardingpg.NewApplicationRepository(pool)
+
+	submitApp := onboardingapp.NewSubmitApplicationUseCase(appRepo, txManager, onboardingEventPublisher)
+	uploadDoc := onboardingapp.NewUploadDocumentUseCase(appRepo, txManager)
+	addPerson := onboardingapp.NewAddPersonUseCase(appRepo, txManager)
+	setBankAcct := onboardingapp.NewSetBankAccountUseCase(appRepo, txManager)
+	submitForReview := onboardingapp.NewSubmitForReviewUseCase(appRepo, txManager, onboardingEventPublisher)
+	reviewApp := onboardingapp.NewReviewApplicationUseCase(appRepo, txManager, onboardingEventPublisher)
+	getApp := onboardingapp.NewGetApplicationUseCase(appRepo)
+
+	obHandler := onboardinghttp.NewOnboardingHandler(
+		submitApp, uploadDoc, addPerson, setBankAcct, submitForReview, getApp,
+	)
+	reviewHandler := onboardinghttp.NewReviewHandler(reviewApp)
+	onboardinghttp.RegisterRoutes(protected, obHandler, reviewHandler)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 
