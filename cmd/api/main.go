@@ -29,6 +29,10 @@ import (
 	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
 	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
 	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	billingapp "github.com/juantevez/cobros-platform/context/billing/application"
+	billingdomain "github.com/juantevez/cobros-platform/context/billing/domain"
+	billinghttp "github.com/juantevez/cobros-platform/context/billing/infrastructure/adapters/inbound/http"
+	billingpg "github.com/juantevez/cobros-platform/context/billing/infrastructure/adapters/outbound/postgres"
 	paymentapp "github.com/juantevez/cobros-platform/context/payment/application"
 	paymentdomain "github.com/juantevez/cobros-platform/context/payment/domain"
 	payoutdomain "github.com/juantevez/cobros-platform/context/payout/domain"
@@ -97,6 +101,7 @@ func main() {
 	onboardingPub  := outbox.NewEventPublisher[onboardingdomain.Event](outboxStore)
 	paymentPub     := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
 	payoutPub      := outbox.NewEventPublisher[payoutdomain.Event](outboxStore)
+	billingPub     := outbox.NewEventPublisher[billingdomain.Event](outboxStore)
 
 	// ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -172,12 +177,30 @@ func main() {
 		onboardinghttp.NewReviewHandler(reviewApp),
 	)
 
+	// ── Billing & Fees ────────────────────────────────────────────────────────
+
+	planRepo       := billingpg.NewPlanRepository(pool)
+	tenantPlanRepo := billingpg.NewTenantPlanRepository(pool)
+
+	createPlan    := billingapp.NewCreatePlanUseCase(planRepo, txManager, billingPub)
+	assignPlan    := billingapp.NewAssignPlanUseCase(planRepo, tenantPlanRepo, txManager, billingPub)
+	calculateFeeUC := billingapp.NewCalculateFeeUseCase(planRepo, tenantPlanRepo, 300)
+	getPlanUC     := billingapp.NewGetPlanUseCase(planRepo)
+	listPlansUC   := billingapp.NewListPlansUseCase(planRepo)
+	getTenantPlan := billingapp.NewGetTenantPlanUseCase(tenantPlanRepo)
+
+	billinghttp.RegisterRoutes(protected, billinghttp.NewBillingHandler(
+		createPlan, assignPlan, getPlanUC, listPlansUC, getTenantPlan,
+	))
+
 	// ── Payment Processing ────────────────────────────────────────────────────
 
-	paymentRepo    := paymentpg.NewPaymentRepository(pool)
-	pspRouter      := psp.NewRouter()
-	riskEvaluator  := risk.NewPermissiveEvaluator()
-	feeCalculator  := fees.NewFixedRateCalculator(300) // 3% por defecto
+	paymentRepo   := paymentpg.NewPaymentRepository(pool)
+	pspRouter     := psp.NewRouter()
+	riskEvaluator := risk.NewPermissiveEvaluator()
+	// BillingFeeCalculator usa el plan real del tenant.
+	// Fallback: 300 bps (3%) si el tenant no tiene plan asignado.
+	feeCalculator := fees.NewBillingFeeCalculator(calculateFeeUC)
 
 	processPayment := paymentapp.NewProcessPaymentUseCase(paymentRepo, pspRouter, riskEvaluator, feeCalculator, txManager, paymentPub)
 	refundPayment  := paymentapp.NewRefundPaymentUseCase(paymentRepo, pspRouter, txManager, paymentPub)

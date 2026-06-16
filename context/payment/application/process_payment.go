@@ -128,7 +128,7 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 
 	// ── 5. Calcular comisión ─────────────────────────────────────────────────
 
-	platformFee, err := uc.feeCalculator.Calculate(tenantID, amount, method)
+	platformFee, err := uc.feeCalculator.Calculate(ctx, tenantID, amount, method)
 	if err != nil {
 		return ProcessPaymentResult{}, fmt.Errorf("calculate fee: %w", err)
 	}

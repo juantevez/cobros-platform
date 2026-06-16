@@ -2,6 +2,7 @@
 package fees
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juantevez/cobros-platform/context/payment/domain"
@@ -23,6 +24,7 @@ func NewFixedRateCalculator(rateBps int64) *FixedRateCalculator {
 }
 
 func (c *FixedRateCalculator) Calculate(
+	_ context.Context,
 	_ domain.TenantID,
 	amount domain.Money,
 	_ domain.PaymentMethod,

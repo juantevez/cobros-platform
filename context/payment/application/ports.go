@@ -90,10 +90,10 @@ type RiskDecision struct {
 // ── Comisiones ────────────────────────────────────────────────────────────────
 
 // FeeCalculator calcula la comisión de la plataforma sobre un pago.
-// En Fase 2: porcentaje fijo configurable.
-// En Fase 3: se conecta con el módulo Billing & Fees real (planes por tenant).
+// En Fase 2: porcentaje fijo configurable (FixedRateCalculator).
+// En Fase 3: consulta el plan del tenant en Billing & Fees (BillingFeeCalculator).
 type FeeCalculator interface {
-	Calculate(tenantID domain.TenantID, amount domain.Money, method domain.PaymentMethod) (domain.Money, error)
+	Calculate(ctx context.Context, tenantID domain.TenantID, amount domain.Money, method domain.PaymentMethod) (domain.Money, error)
 }
 
 // ── Outbox ────────────────────────────────────────────────────────────────────
