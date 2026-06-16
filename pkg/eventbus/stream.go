@@ -57,5 +57,6 @@ func AppStreams() []StreamDefinition {
 		{Name: "PAYMENT", Subjects: []string{"payment.>"}},
 		{Name: "PAYOUT", Subjects: []string{"payout.>"}},
 		{Name: "BILLING", Subjects: []string{"billing.>"}},
+		{Name: "WEBHOOK", Subjects: []string{"webhook.>"}},
 	}
 }

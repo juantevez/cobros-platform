@@ -29,6 +29,12 @@ import (
 	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
 	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
 	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	webhookapp "github.com/juantevez/cobros-platform/context/webhook/application"
+	webhookdomain "github.com/juantevez/cobros-platform/context/webhook/domain"
+	webhookhttp "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/inbound/http"
+	webhookcrypto "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/crypto"
+	webhookdispatcher "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/http"
+	webhookpg "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/postgres"
 	billingapp "github.com/juantevez/cobros-platform/context/billing/application"
 	billingdomain "github.com/juantevez/cobros-platform/context/billing/domain"
 	billinghttp "github.com/juantevez/cobros-platform/context/billing/infrastructure/adapters/inbound/http"
@@ -102,6 +108,7 @@ func main() {
 	paymentPub     := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
 	payoutPub      := outbox.NewEventPublisher[payoutdomain.Event](outboxStore)
 	billingPub     := outbox.NewEventPublisher[billingdomain.Event](outboxStore)
+	webhookPub     := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
 
 	// ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -222,6 +229,28 @@ func main() {
 	listPayouts := payoutapp.NewListPayoutsUseCase(payoutRepo)
 
 	payouthttp.RegisterRoutes(protected, payouthttp.NewPayoutHandler(initiatePayout, getPayout, listPayouts))
+
+	// ── Webhooks ──────────────────────────────────────────────────────────────
+
+	endpointRepo  := webhookpg.NewEndpointRepository(pool)
+	deliveryRepo  := webhookpg.NewDeliveryRepository(pool)
+	secretGen     := webhookcrypto.NewHexSecretGenerator()
+	httpDispatcher := webhookdispatcher.NewDispatcher()
+
+	registerEndpoint   := webhookapp.NewRegisterEndpointUseCase(endpointRepo, secretGen, txManager, webhookPub)
+	deactivateEndpoint := webhookapp.NewDeactivateEndpointUseCase(endpointRepo, txManager, webhookPub)
+	dispatchEvent      := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
+	retryDelivery      := webhookapp.NewRetryDeliveryUseCase(endpointRepo, deliveryRepo, httpDispatcher, webhookPub, clock)
+	listEndpoints      := webhookapp.NewListEndpointsUseCase(endpointRepo)
+	listDeliveries     := webhookapp.NewListDeliveriesUseCase(deliveryRepo)
+	getDelivery        := webhookapp.NewGetDeliveryUseCase(deliveryRepo)
+
+	_ = dispatchEvent // usado en cmd/worker; declarado aquí para visibilidad
+
+	webhookhttp.RegisterRoutes(protected, webhookhttp.NewWebhookHandler(
+		registerEndpoint, deactivateEndpoint, listEndpoints,
+		listDeliveries, getDelivery, retryDelivery,
+	))
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

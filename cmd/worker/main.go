@@ -21,6 +21,12 @@ import (
 	ledgerdomain "github.com/juantevez/cobros-platform/context/ledger/domain"
 	ledgernats "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/nats"
 	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
+	webhookapp "github.com/juantevez/cobros-platform/context/webhook/application"
+	webhookdomain "github.com/juantevez/cobros-platform/context/webhook/domain"
+	webhooknats "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/inbound/nats"
+	webhookcrypto "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/crypto"
+	webhookdispatcher "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/http"
+	webhookpg "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/postgres"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -76,6 +82,7 @@ func main() {
 
 	authPub   := outbox.NewEventPublisher[authdomain.Event](outboxStore)
 	ledgerPub := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
+	webhookPub := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
 
 	// ── Audit consumers ───────────────────────────────────────────────────────
 
@@ -163,6 +170,55 @@ func main() {
 	go func() {
 		if err := ledgerPayoutConsumer.Start(ctx); err != nil {
 			logger.Error("ledger payout consumer stopped", "error", err)
+		}
+	}()
+
+	// ── Webhook: consumers + RetryPoller ─────────────────────────────────────
+
+	endpointRepo  := webhookpg.NewEndpointRepository(pool)
+	deliveryRepo  := webhookpg.NewDeliveryRepository(pool)
+	secretGen     := webhookcrypto.NewHexSecretGenerator()
+	httpDispatcher := webhookdispatcher.NewDispatcher()
+	_ = secretGen // usado en cmd/api
+
+	dispatchEvent := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
+	retryDelivery := webhookapp.NewRetryDeliveryUseCase(
+		endpointRepo, deliveryRepo, httpDispatcher, webhookPub, realClock{},
+	)
+	retryPoller := webhookapp.NewRetryPoller(
+		retryDelivery, deliveryRepo, 5*time.Second,
+		logger.With("component", "webhook_retry_poller"),
+	)
+
+	webhookConsumer := webhooknats.NewEventConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "webhook")),
+		dispatchEvent,
+		logger.With("component", "webhook"),
+	)
+
+	go func() {
+		if err := webhookConsumer.StartPaymentConsumer(ctx); err != nil {
+			logger.Error("webhook payment consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := webhookConsumer.StartPayoutConsumer(ctx); err != nil {
+			logger.Error("webhook payout consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := webhookConsumer.StartOnboardingConsumer(ctx); err != nil {
+			logger.Error("webhook onboarding consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := webhookConsumer.StartAuthConsumer(ctx); err != nil {
+			logger.Error("webhook auth consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := retryPoller.Start(ctx); err != nil {
+			logger.Error("webhook retry poller stopped", "error", err)
 		}
 	}()
 
