@@ -54,6 +54,7 @@ func AppStreams() []StreamDefinition {
 		{Name: "AUTH", Subjects: []string{"auth.>"}},
 		{Name: "LEDGER", Subjects: []string{"ledger.>"}},
 		{Name: "ONBOARDING", Subjects: []string{"onboarding.>"}},
+		{Name: "PAYMENT", Subjects: []string{"payment.>"}},
 		// AUDIT consume; no produce streams propios de negocio.
 	}
 }
