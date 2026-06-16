@@ -31,6 +31,13 @@ import (
 	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
 	paymentapp "github.com/juantevez/cobros-platform/context/payment/application"
 	paymentdomain "github.com/juantevez/cobros-platform/context/payment/domain"
+	payoutdomain "github.com/juantevez/cobros-platform/context/payout/domain"
+	payoutapp "github.com/juantevez/cobros-platform/context/payout/application"
+	payouthttp "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/inbound/http"
+	payoutpg "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/postgres"
+	payoutledger "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/ledger"
+	payoutonboarding "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/onboarding"
+	payouttransfer "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/transfer/mock"
 	paymenthttp "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/inbound/http"
 	paymentpg "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/postgres"
 	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/fees"
@@ -89,6 +96,7 @@ func main() {
 	ledgerPub      := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
 	onboardingPub  := outbox.NewEventPublisher[onboardingdomain.Event](outboxStore)
 	paymentPub     := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
+	payoutPub      := outbox.NewEventPublisher[payoutdomain.Event](outboxStore)
 
 	// ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -176,6 +184,21 @@ func main() {
 	getPayment     := paymentapp.NewGetPaymentUseCase(paymentRepo)
 
 	paymenthttp.RegisterRoutes(protected, paymenthttp.NewPaymentHandler(processPayment, refundPayment, getPayment))
+
+	// ── Payouts ───────────────────────────────────────────────────────────────
+
+	payoutRepo      := payoutpg.NewPayoutRepository(pool)
+	balanceChecker  := payoutledger.NewBalanceChecker(pool)
+	bankProvider    := payoutonboarding.NewBankAccountProvider(pool)
+	transferAdapter := payouttransfer.New()
+
+	initiatePayout := payoutapp.NewInitiatePayoutUseCase(
+		payoutRepo, balanceChecker, bankProvider, transferAdapter, txManager, payoutPub,
+	)
+	getPayout   := payoutapp.NewGetPayoutUseCase(payoutRepo)
+	listPayouts := payoutapp.NewListPayoutsUseCase(payoutRepo)
+
+	payouthttp.RegisterRoutes(protected, payouthttp.NewPayoutHandler(initiatePayout, getPayout, listPayouts))
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

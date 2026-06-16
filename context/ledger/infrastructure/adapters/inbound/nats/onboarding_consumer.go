@@ -62,6 +62,8 @@ func (c *OnboardingConsumer) handle(ctx context.Context, msg *eventbus.Message) 
 		{"merchant_balance", "Saldo disponible del comercio"},
 		{"reserve", "Reserva de garantía (rolling reserve)"},
 		{"dispute_hold", "Fondos retenidos por disputas"},
+		{"payout_transit", "Fondos en tránsito al banco del comercio"},
+		{"payout_sent", "Fondos confirmados enviados al banco"},
 	}
 
 	for _, acc := range accounts {

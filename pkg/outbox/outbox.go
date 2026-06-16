@@ -73,30 +73,28 @@ type DomainEvent interface {
 	OccurredAt() time.Time
 }
 
-// EventPublisher implementa el puerto EventPublisher de cualquier contexto.
+// EventPublisher[E] implementa el puerto EventPublisher de cualquier contexto.
 //
-// Es genérico sobre E (el tipo de evento del dominio) para que la firma
-// Publish(ctx, ...E) coincida exactamente con el puerto de cada contexto
-// (auth/application.EventPublisher, ledger/application.EventPublisher, etc.).
-// Go no permite covarianza en variadics, por lo que ...outbox.DomainEvent no
-// satisface ...domain.Event aunque domain.Event implemente DomainEvent.
+// El parámetro de tipo E resuelve la falta de covarianza en variadics de Go.
+// Sin genéricos, pasar []auth.Event como ...DomainEvent no compila:
 //
-// Uso en main.go:
+//	publisher.Publish(ctx, payment.PullEvents()...)  // ❌ si Publish acepta ...DomainEvent
 //
-//	authPub   := outbox.NewEventPublisher[authdomain.Event](store)
-//	ledgerPub := outbox.NewEventPublisher[ledgerdomain.Event](store)
+// Con genéricos, cada contexto instancia su propio publisher tipado:
+//
+//	authPub    := outbox.NewEventPublisher[authdomain.Event](store)    // ✅
+//	paymentPub := outbox.NewEventPublisher[paymentdomain.Event](store) // ✅
 type EventPublisher[E DomainEvent] struct {
 	store Store
 }
 
-// NewEventPublisher crea un EventPublisher tipado para el dominio E.
+// NewEventPublisher crea un EventPublisher tipado para el evento E del contexto.
 func NewEventPublisher[E DomainEvent](store Store) *EventPublisher[E] {
 	return &EventPublisher[E]{store: store}
 }
 
 // Publish serializa cada evento y lo guarda en outbox_messages dentro de la
-// transacción activa del contexto. El Subject es el EventType del evento,
-// que coincide con el subject de NATS donde el relay lo publicará.
+// transacción activa del contexto.
 func (p *EventPublisher[E]) Publish(ctx context.Context, events ...E) error {
 	for _, ev := range events {
 		payload, err := json.Marshal(ev)

@@ -1,16 +1,25 @@
-.PHONY: up down migrate migrate-down test lint tidy
+.PHONY: up down up-app down-app migrate migrate-down test lint tidy build
 
-# ── Infraestructura local ────────────────────────────────────────────────────
+COMPOSE = docker compose -f deploy/docker/docker-compose.yml
+DB_URL  ?= postgres://cobros:cobros@localhost:5432/cobros?sslmode=disable
+
+# ── Infraestructura local (Postgres + NATS) ──────────────────────────────────
 
 up:
-	docker compose -f deploy/docker/docker-compose.yml up -d
+	$(COMPOSE) up -d
+	@echo "✓ Postgres en localhost:5432, NATS en localhost:4222"
 
 down:
-	docker compose -f deploy/docker/docker-compose.yml down
+	$(COMPOSE) down
+
+# Con los binarios de la app en Docker
+up-app:
+	$(COMPOSE) --profile app up -d --build
+
+down-app:
+	$(COMPOSE) --profile app down
 
 # ── Migraciones (golang-migrate) ─────────────────────────────────────────────
-
-DB_URL ?= postgres://cobros:cobros@localhost:5432/cobros?sslmode=disable
 
 migrate:
 	migrate -path ./migrations -database "$(DB_URL)" up
@@ -35,12 +44,16 @@ test:
 test-verbose:
 	go test -race -count=1 -v ./...
 
-# ── Build ────────────────────────────────────────────────────────────────────
+# ── Build local ──────────────────────────────────────────────────────────────
 
-build-api:
-	go build -o bin/api ./cmd/api
-
-build-worker:
+build:
+	go build -o bin/api    ./cmd/api
 	go build -o bin/worker ./cmd/worker
 
-build: build-api build-worker
+# ── Run local (sin Docker para la app) ───────────────────────────────────────
+
+run-api:
+	go run ./cmd/api
+
+run-worker:
+	go run ./cmd/worker

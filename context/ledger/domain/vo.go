@@ -51,30 +51,23 @@ func (id TenantID) String() string  { return string(id) }
 type AccountType string
 
 const (
-	// MerchantBalance: pasivo de la plataforma hacia el comercio.
-	// Saldo positivo = la plataforma le debe ese monto al comercio.
 	AccountTypeMerchantBalance AccountType = "merchant_balance"
-
-	// PlatformFees: ingresos de la plataforma por comisiones.
-	// Saldo positivo = la plataforma ganó ese monto.
-	AccountTypePlatformFees AccountType = "platform_fees"
-
-	// Reserve: fondos del comercio retenidos temporalmente (rolling reserve).
-	// Se liberan cuando el período de retención vence.
-	AccountTypeReserve AccountType = "reserve"
-
-	// InTransit: fondos capturados del pagador pero aún no liquidados por el PSP.
-	AccountTypeInTransit AccountType = "in_transit"
-
-	// DisputeHold: fondos congelados mientras hay una disputa abierta.
-	AccountTypeDisputeHold AccountType = "dispute_hold"
+	AccountTypePlatformFees    AccountType = "platform_fees"
+	AccountTypeReserve         AccountType = "reserve"
+	AccountTypeInTransit       AccountType = "in_transit"
+	AccountTypeDisputeHold     AccountType = "dispute_hold"
+	// Payout transit: fondos del comercio en camino al banco.
+	AccountTypePayoutTransit AccountType = "payout_transit"
+	// Payout sent: fondos confirmados como enviados al banco del comercio.
+	AccountTypePayoutSent AccountType = "payout_sent"
 )
 
 func ParseAccountType(s string) (AccountType, error) {
 	t := AccountType(s)
 	switch t {
 	case AccountTypeMerchantBalance, AccountTypePlatformFees,
-		AccountTypeReserve, AccountTypeInTransit, AccountTypeDisputeHold:
+		AccountTypeReserve, AccountTypeInTransit, AccountTypeDisputeHold,
+		AccountTypePayoutTransit, AccountTypePayoutSent:
 		return t, nil
 	}
 	return "", fmt.Errorf("%w: %q", ErrInvalidAccountType, s)

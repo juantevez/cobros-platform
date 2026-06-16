@@ -118,6 +118,12 @@ func main() {
 		accountRepo,
 		logger.With("component", "ledger_payment"),
 	)
+	ledgerPayoutConsumer := ledgernats.NewPayoutConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "ledger_payout")),
+		postEntry,
+		accountRepo,
+		logger.With("component", "ledger_payout"),
+	)
 
 	// ── Arrancar goroutines ───────────────────────────────────────────────────
 
@@ -152,6 +158,11 @@ func main() {
 	go func() {
 		if err := ledgerPaymentConsumer.Start(ctx); err != nil {
 			logger.Error("ledger payment consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := ledgerPayoutConsumer.Start(ctx); err != nil {
+			logger.Error("ledger payout consumer stopped", "error", err)
 		}
 	}()
 

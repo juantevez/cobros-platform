@@ -204,9 +204,9 @@ POST /api/v1/ledger/entries
 |---|---|---|
 | **Fase 1** | Auth & Multi-Tenant | ✅ Completo |
 | **Fase 1** | Ledger / Libro Mayor | ✅ Completo |
-| **Fase 1** | Audit & Observability | ✅ Completo |
-| **Fase 2** | Onboarding (KYC/KYB) | ✅ Completo |
-| **Fase 2** | Payment Processing | ✅ Completo |
+| **Fase 1** | Audit & Observability | 🚧 En desarrollo |
+| **Fase 2** | Onboarding (KYC/KYB) | ⏳ Pendiente |
+| **Fase 2** | Payment Processing | ⏳ Pendiente |
 | **Fase 2** | Fraud & Risk | ⏳ Pendiente |
 | **Fase 3** | Payouts / Desembolsos | ⏳ Pendiente |
 | **Fase 3** | Billing & Fees | ⏳ Pendiente |
@@ -371,4 +371,3 @@ Cliente paga
 - **Eventos**: `PullEvents()` en el agregado los entrega y los limpia; el caso de uso los pasa al `EventPublisher`
 - **Idempotencia**: toda operación que mueve dinero acepta una `idempotency_key`
 - **Tests**: el dominio y la capa de application son testeables sin base de datos ni NATS
-
