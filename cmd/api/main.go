@@ -29,6 +29,11 @@ import (
 	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
 	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
 	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	reconciliationapp "github.com/juantevez/cobros-platform/context/reconciliation/application"
+	reconciliationdomain "github.com/juantevez/cobros-platform/context/reconciliation/domain"
+	reconciliationhttp "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/inbound/http"
+	reconciliationpg "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/outbound/postgres"
+	reconciliationreaders "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/outbound/readers"
 	webhookapp "github.com/juantevez/cobros-platform/context/webhook/application"
 	webhookdomain "github.com/juantevez/cobros-platform/context/webhook/domain"
 	webhookhttp "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/inbound/http"
@@ -109,6 +114,7 @@ func main() {
 	payoutPub      := outbox.NewEventPublisher[payoutdomain.Event](outboxStore)
 	billingPub     := outbox.NewEventPublisher[billingdomain.Event](outboxStore)
 	webhookPub     := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
+	reconcPub      := outbox.NewEventPublisher[reconciliationdomain.Event](outboxStore)
 
 	// ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -250,6 +256,25 @@ func main() {
 	webhookhttp.RegisterRoutes(protected, webhookhttp.NewWebhookHandler(
 		registerEndpoint, deactivateEndpoint, listEndpoints,
 		listDeliveries, getDelivery, retryDelivery,
+	))
+
+	// ── Reconciliation ────────────────────────────────────────────────────────
+
+	runRepo         := reconciliationpg.NewRunRepository(pool)
+	discrepancyRepo := reconciliationpg.NewDiscrepancyRepository(pool)
+	paymentReader   := reconciliationreaders.NewPaymentReader(pool)
+	ledgerChecker   := reconciliationreaders.NewLedgerChecker(pool)
+	csvParser       := reconciliationreaders.NewCSVReportParser()
+
+	startRun        := reconciliationapp.NewStartReconciliationUseCase(runRepo)
+	processReport   := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, reconcPub)
+	processInternal := reconciliationapp.NewProcessInternalUseCase(runRepo, discrepancyRepo, ledgerChecker, reconcPub)
+	resolveDisc     := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo)
+	getReport       := reconciliationapp.NewGetReportUseCase(runRepo, discrepancyRepo)
+	listRuns        := reconciliationapp.NewListRunsUseCase(runRepo)
+
+	reconciliationhttp.RegisterRoutes(protected, reconciliationhttp.NewReconciliationHandler(
+		startRun, processReport, processInternal, resolveDisc, getReport, listRuns,
 	))
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
