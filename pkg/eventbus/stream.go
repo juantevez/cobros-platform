@@ -60,5 +60,6 @@ func AppStreams() []StreamDefinition {
 		{Name: "WEBHOOK", Subjects: []string{"webhook.>"}},
 		{Name: "RECONCILIATION", Subjects: []string{"reconciliation.>"}},
 		{Name: "NOTIFICATION", Subjects: []string{"notification.>"}},
+		{Name: "DISPUTE", Subjects: []string{"dispute.>"}},
 	}
 }

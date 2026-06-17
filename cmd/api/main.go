@@ -29,6 +29,10 @@ import (
 	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
 	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
 	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	disputeapp "github.com/juantevez/cobros-platform/context/dispute/application"
+	disputedomain "github.com/juantevez/cobros-platform/context/dispute/domain"
+	disputehttp "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/inbound/http"
+	disputepg "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/outbound/postgres"
 	notificationapp "github.com/juantevez/cobros-platform/context/notification/application"
 	notificationhttp "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/inbound/http"
 	notificationemail "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/email"
@@ -119,6 +123,7 @@ func main() {
 	billingPub     := outbox.NewEventPublisher[billingdomain.Event](outboxStore)
 	webhookPub     := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
 	reconcPub      := outbox.NewEventPublisher[reconciliationdomain.Event](outboxStore)
+	disputePub     := outbox.NewEventPublisher[disputedomain.Event](outboxStore)
 
 	// ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -312,6 +317,20 @@ func main() {
 	))
 
 	_ = sendNotif // usado en cmd/worker
+
+	// ── Disputes & Chargebacks ────────────────────────────────────────────────
+
+	disputeRepo   := disputepg.NewDisputeRepository(pool)
+	openDispute   := disputeapp.NewOpenDisputeUseCase(disputeRepo, txManager, disputePub)
+	contestDisp   := disputeapp.NewContestDisputeUseCase(disputeRepo, txManager, clock)
+	acceptDisp    := disputeapp.NewAcceptDisputeUseCase(disputeRepo, txManager, disputePub)
+	resolveDisp   := disputeapp.NewResolveDisputeUseCase(disputeRepo, txManager, disputePub)
+	getDisp       := disputeapp.NewGetDisputeUseCase(disputeRepo, clock)
+	listDisp      := disputeapp.NewListDisputesUseCase(disputeRepo, clock)
+
+	disputehttp.RegisterRoutes(protected, disputehttp.NewDisputeHandler(
+		openDispute, contestDisp, acceptDisp, resolveDisp, getDisp, listDisp,
+	))
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

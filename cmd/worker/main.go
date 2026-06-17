@@ -28,6 +28,9 @@ import (
 	notificationnats "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/inbound/nats"
 	notificationemail "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/email"
 	notificationpg "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/postgres"
+	disputeapp "github.com/juantevez/cobros-platform/context/dispute/application"
+	disputedomain "github.com/juantevez/cobros-platform/context/dispute/domain"
+	disputepg "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/outbound/postgres"
 	webhookcrypto "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/crypto"
 	webhookdispatcher "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/http"
 	webhookpg "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/postgres"
@@ -84,9 +87,10 @@ func main() {
 
 	// ── Publishers tipados (usados por consumers que también producen eventos) ─
 
-	authPub   := outbox.NewEventPublisher[authdomain.Event](outboxStore)
-	ledgerPub := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
-	webhookPub := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
+	authPub    := outbox.NewEventPublisher[authdomain.Event](outboxStore)
+	ledgerPub  := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
+	webhookPub  := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
+	disputePub  := outbox.NewEventPublisher[disputedomain.Event](outboxStore)
 
 	// ── Audit consumers ───────────────────────────────────────────────────────
 
@@ -261,6 +265,31 @@ func main() {
 	go func() {
 		if err := notifConsumer.StartAuthConsumer(ctx); err != nil {
 			logger.Error("notification auth consumer stopped", "error", err)
+		}
+	}()
+
+	// ── Dispute: Ledger consumer + ExpiryPoller ───────────────────────────────
+
+	disputeRepo   := disputepg.NewDisputeRepository(pool)
+	expiryPoller  := disputeapp.NewExpiryPoller(
+		disputeRepo, postgres.NewTxManager(pool), disputePub,
+		realClock{}, logger.With("component", "dispute_expiry"),
+	)
+	ledgerDisputeConsumer := ledgernats.NewDisputeConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "ledger_dispute")),
+		postEntry,
+		accountRepo,
+		logger.With("component", "ledger_dispute"),
+	)
+
+	go func() {
+		if err := ledgerDisputeConsumer.Start(ctx); err != nil {
+			logger.Error("ledger dispute consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := expiryPoller.Start(ctx); err != nil {
+			logger.Error("dispute expiry poller stopped", "error", err)
 		}
 	}()
 

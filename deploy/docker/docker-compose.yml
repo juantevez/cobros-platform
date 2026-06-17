@@ -1,23 +1,24 @@
 # docker-compose.yml — Entorno de desarrollo local
 #
-# Modos de uso:
+# Uso básico (levanta TODO: infra + migraciones + api + worker):
 #
-#   Solo infraestructura (Postgres + NATS) para desarrollo local:
-#     docker compose up -d
-#     make migrate
-#     make run-api      ← en terminal 1
-#     make run-worker   ← en terminal 2
+#   docker compose up -d --build
+#   docker compose logs -f api worker
 #
-#   Todo dockerizado (infraestructura + migraciones + binarios):
-#     docker compose --profile app up -d --build
-#     docker compose --profile app logs -f
+# Solo infraestructura (para correr api/worker con `go run` local):
 #
-#   Solo migraciones (sin levantar la app):
-#     docker compose --profile tools run --rm migrate
+#   docker compose up -d postgres nats
+#   make migrate
+#   make run-api      ← terminal 1
+#   make run-worker   ← terminal 2
+#
+# Solo migraciones:
+#
+#   docker compose run --rm migrate
 
 services:
 
-  # ── Infraestructura ───────────────────────────────────────────────────────
+  # ── Infraestructura ────────────────────────────────────────────────────────
 
   postgres:
     image: postgres:16-alpine
@@ -38,11 +39,10 @@ services:
 
   nats:
     image: nats:2.10-alpine
-    # JetStream habilitado con persistencia en /data
     command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "4222:4222"   # clientes
-      - "8222:8222"   # HTTP monitoring → http://localhost:8222/healthz
+      - "4222:4222"
+      - "8222:8222"
     volumes:
       - nats_data:/data
     healthcheck:
@@ -52,16 +52,11 @@ services:
       retries: 10
       start_period: 5s
 
-  # ── Migraciones ───────────────────────────────────────────────────────────
-  # Corre golang-migrate y termina (exit 0). Los servicios api y worker
-  # esperan a que complete antes de arrancar (service_completed_successfully).
-  #
-  # Disponible en dos profiles:
-  #   app   → corre automáticamente al hacer --profile app up
-  #   tools → corre de forma aislada: docker compose --profile tools run --rm migrate
+  # ── Migraciones ────────────────────────────────────────────────────────────
+  # Corre golang-migrate y termina (exit 0).
+  # api y worker esperan a que complete (service_completed_successfully).
 
   migrate:
-    profiles: [app, tools]
     image: migrate/migrate:v4
     command:
       - "-path=/migrations"
@@ -74,29 +69,28 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # ── Aplicación (profile "app") ────────────────────────────────────────────
-  # Activos solo con: docker compose --profile app up
-  # En desarrollo se prefiere: make run-api / make run-worker
+  # ── Aplicación ─────────────────────────────────────────────────────────────
 
   api:
-    profiles: [app]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: api
     environment:
-      # HTTP
       HTTP_ADDR:              ":8080"
       HTTP_READ_TIMEOUT_SEC:  "10"
       HTTP_WRITE_TIMEOUT_SEC: "30"
-      # PostgreSQL
-      DATABASE_URL: "postgres://cobros:cobros@postgres:5432/cobros?sslmode=disable"
-      DB_MAX_CONNS: "25"
-      DB_MIN_CONNS: "5"
-      # NATS
-      NATS_URL: "nats://nats:4222"
-      # Auth
-      JWT_SECRET: "${JWT_SECRET:-change-me-in-production-needs-32-chars!!}"
+      DATABASE_URL:           "postgres://cobros:cobros@postgres:5432/cobros?sslmode=disable"
+      DB_MAX_CONNS:           "25"
+      DB_MIN_CONNS:           "5"
+      NATS_URL:               "nats://nats:4222"
+      JWT_SECRET:             "${JWT_SECRET:-change-me-in-production-needs-32-chars!!}"
+      # SMTP vacío → usa LogSender (loguea emails en stdout, no envía)
+      SMTP_HOST:              "${SMTP_HOST:-}"
+      SMTP_PORT:              "${SMTP_PORT:-587}"
+      SMTP_USERNAME:          "${SMTP_USERNAME:-}"
+      SMTP_PASSWORD:          "${SMTP_PASSWORD:-}"
+      SMTP_FROM:              "${SMTP_FROM:-noreply@cobros-platform.com}"
     ports:
       - "8080:8080"
     depends_on:
@@ -104,21 +98,24 @@ services:
         condition: service_completed_successfully
       nats:
         condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   worker:
-    profiles: [app]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: worker
     environment:
-      # PostgreSQL
       DATABASE_URL:      "postgres://cobros:cobros@postgres:5432/cobros?sslmode=disable"
       DB_MAX_CONNS:      "10"
       DB_MIN_CONNS:      "2"
-      # NATS
       NATS_URL:          "nats://nats:4222"
-      # Outbox relay
       OUTBOX_INTERVAL:   "1s"
       OUTBOX_BATCH_SIZE: "50"
     depends_on:
@@ -126,6 +123,7 @@ services:
         condition: service_completed_successfully
       nats:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:

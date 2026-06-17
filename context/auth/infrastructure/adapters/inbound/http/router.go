@@ -27,6 +27,11 @@ func NewRouter(
 	r.Use(gin.Recovery())
 	r.Use(CorrelationIDMiddleware())
 
+	// Healthcheck para Docker / load balancers.
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok"})
+	})
+
 	v1 := r.Group("/api/v1")
 
 	// ── Rutas públicas (sin autenticación) ───────────────────────────────────
