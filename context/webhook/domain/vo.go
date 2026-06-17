@@ -72,14 +72,14 @@ func (s DeliveryStatus) IsRetryable() bool {
 // RetrySchedule define los intervalos entre reintentos (backoff escalonado).
 // Intento 1 es inmediato. Los siguientes siguen este schedule.
 var RetrySchedule = []time.Duration{
-	30 * time.Second, // reintento 2
-	2 * time.Minute,  // reintento 3
-	10 * time.Minute, // reintento 4
-	1 * time.Hour,    // reintento 5
+	30 * time.Second,  // reintento 2
+	2 * time.Minute,   // reintento 3
+	10 * time.Minute,  // reintento 4
+	1 * time.Hour,     // reintento 5
 }
 
 // MaxAttempts es el número máximo de intentos antes de marcar como exhausted.
-// const MaxAttempts = len(RetrySchedule) + 1 // 5
+// Debe mantenerse sincronizado manualmente con len(RetrySchedule) + 1.
 const MaxAttempts = 5
 
 // NextRetryAt calcula cuándo hacer el siguiente reintento dado el número
@@ -97,13 +97,13 @@ func NextRetryAt(attemptCount int, now time.Time) *time.Time {
 
 // DeliveryAttempt registra el resultado de un intento de entrega HTTP.
 type DeliveryAttempt struct {
-	id           AttemptID
-	attemptNum   int
-	httpStatus   int    // 0 si fue error de red/timeout
+	id          AttemptID
+	attemptNum  int
+	httpStatus  int    // 0 si fue error de red/timeout
 	responseBody string // primeros 500 chars de la respuesta
-	errMsg       string // mensaje de error si no hubo respuesta HTTP
-	durationMs   int64
-	attemptedAt  time.Time
+	errMsg      string // mensaje de error si no hubo respuesta HTTP
+	durationMs  int64
+	attemptedAt time.Time
 }
 
 func NewDeliveryAttempt(num, httpStatus int, responseBody, errMsg string, durationMs int64) DeliveryAttempt {
@@ -128,10 +128,10 @@ func ReconstituteAttempt(id AttemptID, num, httpStatus int, body, errMsg string,
 }
 
 func (a DeliveryAttempt) ID() AttemptID          { return a.id }
-func (a DeliveryAttempt) AttemptNum() int        { return a.attemptNum }
-func (a DeliveryAttempt) HTTPStatus() int        { return a.httpStatus }
-func (a DeliveryAttempt) ResponseBody() string   { return a.responseBody }
-func (a DeliveryAttempt) ErrMsg() string         { return a.errMsg }
-func (a DeliveryAttempt) DurationMs() int64      { return a.durationMs }
-func (a DeliveryAttempt) AttemptedAt() time.Time { return a.attemptedAt }
-func (a DeliveryAttempt) Succeeded() bool        { return a.httpStatus >= 200 && a.httpStatus < 300 }
+func (a DeliveryAttempt) AttemptNum() int         { return a.attemptNum }
+func (a DeliveryAttempt) HTTPStatus() int         { return a.httpStatus }
+func (a DeliveryAttempt) ResponseBody() string    { return a.responseBody }
+func (a DeliveryAttempt) ErrMsg() string          { return a.errMsg }
+func (a DeliveryAttempt) DurationMs() int64       { return a.durationMs }
+func (a DeliveryAttempt) AttemptedAt() time.Time  { return a.attemptedAt }
+func (a DeliveryAttempt) Succeeded() bool         { return a.httpStatus >= 200 && a.httpStatus < 300 }

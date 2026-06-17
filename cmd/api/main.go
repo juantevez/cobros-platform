@@ -29,6 +29,10 @@ import (
 	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
 	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
 	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	notificationapp "github.com/juantevez/cobros-platform/context/notification/application"
+	notificationhttp "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/inbound/http"
+	notificationemail "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/email"
+	notificationpg "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/postgres"
 	reconciliationapp "github.com/juantevez/cobros-platform/context/reconciliation/application"
 	reconciliationdomain "github.com/juantevez/cobros-platform/context/reconciliation/domain"
 	reconciliationhttp "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/inbound/http"
@@ -276,6 +280,38 @@ func main() {
 	reconciliationhttp.RegisterRoutes(protected, reconciliationhttp.NewReconciliationHandler(
 		startRun, processReport, processInternal, resolveDisc, getReport, listRuns,
 	))
+
+	// ── Notifications ─────────────────────────────────────────────────────────
+
+	notifRepo   := notificationpg.NewNotificationRepository(pool)
+	prefRepo    := notificationpg.NewPreferenceRepository(pool)
+	contactReader := notificationpg.NewContactReader(pool)
+	// En producción: usar SMTPSender con config desde env vars.
+	// En desarrollo: LogSender loguea en stdout sin enviar.
+	var emailSender notificationapp.EmailSender
+	if cfg.SMTPHost != "" {
+		emailSender = notificationemail.NewSMTPSender(notificationemail.SMTPConfig{
+			Host:     cfg.SMTPHost,
+			Port:     cfg.SMTPPort,
+			Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword,
+			From:     cfg.SMTPFrom,
+			UseTLS:   cfg.SMTPUseTLS,
+		})
+	} else {
+		emailSender = notificationemail.NewLogSender(logger.With("component", "email"))
+	}
+
+	sendNotif   := notificationapp.NewSendNotificationUseCase(notifRepo, prefRepo, emailSender, contactReader, logger.With("component", "notification"))
+	listNotifs  := notificationapp.NewListNotificationsUseCase(notifRepo)
+	getPrefs    := notificationapp.NewGetPreferencesUseCase(prefRepo)
+	updatePref  := notificationapp.NewUpdatePreferenceUseCase(prefRepo)
+
+	notificationhttp.RegisterRoutes(protected, notificationhttp.NewNotificationHandler(
+		listNotifs, getPrefs, updatePref,
+	))
+
+	_ = sendNotif // usado en cmd/worker
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

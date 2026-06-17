@@ -24,6 +24,10 @@ import (
 	webhookapp "github.com/juantevez/cobros-platform/context/webhook/application"
 	webhookdomain "github.com/juantevez/cobros-platform/context/webhook/domain"
 	webhooknats "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/inbound/nats"
+	notificationapp "github.com/juantevez/cobros-platform/context/notification/application"
+	notificationnats "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/inbound/nats"
+	notificationemail "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/email"
+	notificationpg "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/postgres"
 	webhookcrypto "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/crypto"
 	webhookdispatcher "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/http"
 	webhookpg "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/postgres"
@@ -219,6 +223,44 @@ func main() {
 	go func() {
 		if err := retryPoller.Start(ctx); err != nil {
 			logger.Error("webhook retry poller stopped", "error", err)
+		}
+	}()
+
+	// ── Notification consumers ────────────────────────────────────────────────
+
+	notifRepo    := notificationpg.NewNotificationRepository(pool)
+	notifPrefRepo := notificationpg.NewPreferenceRepository(pool)
+	contactReader := notificationpg.NewContactReader(pool)
+	notifEmailSender := notificationemail.NewLogSender(logger.With("component", "email"))
+
+	sendNotif := notificationapp.NewSendNotificationUseCase(
+		notifRepo, notifPrefRepo, notifEmailSender, contactReader,
+		logger.With("component", "notification"),
+	)
+	notifConsumer := notificationnats.NewEventConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "notification")),
+		sendNotif,
+		logger.With("component", "notification"),
+	)
+
+	go func() {
+		if err := notifConsumer.StartPaymentConsumer(ctx); err != nil {
+			logger.Error("notification payment consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := notifConsumer.StartPayoutConsumer(ctx); err != nil {
+			logger.Error("notification payout consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := notifConsumer.StartOnboardingConsumer(ctx); err != nil {
+			logger.Error("notification onboarding consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := notifConsumer.StartAuthConsumer(ctx); err != nil {
+			logger.Error("notification auth consumer stopped", "error", err)
 		}
 	}()
 

@@ -35,6 +35,14 @@ type Config struct {
 	// ── Outbox relay ────────────────────────────────────────────────────────
 	OutboxInterval  time.Duration
 	OutboxBatchSize int
+
+	// SMTP — Email (vacío = LogSender en desarrollo)
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string
+	SMTPUseTLS   bool
 }
 
 // Load carga la configuración desde variables de entorno.
@@ -61,6 +69,14 @@ func Load() Config {
 		// Outbox relay
 		OutboxInterval:  getDuration("OUTBOX_INTERVAL", 1*time.Second),
 		OutboxBatchSize: getInt("OUTBOX_BATCH_SIZE", 50),
+
+		// SMTP (vacío = LogSender en desarrollo)
+		SMTPHost:     getStr("SMTP_HOST", ""),
+		SMTPPort:     getInt("SMTP_PORT", 587),
+		SMTPUsername: getStr("SMTP_USERNAME", ""),
+		SMTPPassword: getStr("SMTP_PASSWORD", ""),
+		SMTPFrom:     getStr("SMTP_FROM", "noreply@cobros-platform.com"),
+		SMTPUseTLS:   getStr("SMTP_USE_TLS", "false") == "true",
 	}
 }
 
