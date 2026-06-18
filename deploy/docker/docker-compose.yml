@@ -57,7 +57,7 @@ services:
   # api y worker esperan a que complete (service_completed_successfully).
 
   migrate:
-    image: migrate/migrate:v4
+    image: migrate/migrate:v4.17.0
     command:
       - "-path=/migrations"
       - "-database=postgres://cobros:cobros@postgres:5432/cobros?sslmode=disable"

@@ -23,10 +23,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/worker ./cmd/work
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
-FROM scratch AS api
+FROM alpine:3.19 AS api
 
-# Certificados TLS necesarios para conexiones HTTPS salientes.
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# ca-certificates: para conexiones TLS salientes (SMTP, PSPs, etc.)
+# wget: para el healthcheck de Docker
+RUN apk add --no-cache ca-certificates wget
+
 COPY --from=builder /bin/api /api
 
 EXPOSE 8080
@@ -34,9 +36,10 @@ ENTRYPOINT ["/api"]
 
 # ── Worker ────────────────────────────────────────────────────────────────────
 
-FROM scratch AS worker
+FROM alpine:3.19 AS worker
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN apk add --no-cache ca-certificates
+
 COPY --from=builder /bin/worker /worker
 
 ENTRYPOINT ["/worker"]
