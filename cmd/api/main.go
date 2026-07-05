@@ -42,6 +42,9 @@ import (
 	reconciliationhttp "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/inbound/http"
 	reconciliationpg "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/outbound/postgres"
 	reconciliationreaders "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/outbound/readers"
+	reportingapp "github.com/juantevez/cobros-platform/context/reporting/application"
+	reportinghttp "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/inbound/http"
+	reportingpg "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/outbound/postgres"
 	webhookapp "github.com/juantevez/cobros-platform/context/webhook/application"
 	webhookdomain "github.com/juantevez/cobros-platform/context/webhook/domain"
 	webhookhttp "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/inbound/http"
@@ -331,6 +334,15 @@ func main() {
 	disputehttp.RegisterRoutes(protected, disputehttp.NewDisputeHandler(
 		openDispute, contestDisp, acceptDisp, resolveDisp, getDisp, listDisp,
 	))
+
+	// ── Dashboard & Reporting ─────────────────────────────────────────────────
+	// Read-model CQRS: solo lecturas agregadas. La proyección de eventos ocurre
+	// en cmd/worker (consumers de PAYMENT y LEDGER).
+
+	reportRepo := reportingpg.NewReportRepository(pool)
+	getReports := reportingapp.NewGetReportsUseCase(reportRepo)
+
+	reportinghttp.RegisterRoutes(protected, reportinghttp.NewReportingHandler(getReports))
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

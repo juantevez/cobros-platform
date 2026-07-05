@@ -31,6 +31,9 @@ import (
 	disputeapp "github.com/juantevez/cobros-platform/context/dispute/application"
 	disputedomain "github.com/juantevez/cobros-platform/context/dispute/domain"
 	disputepg "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/outbound/postgres"
+	reportingapp "github.com/juantevez/cobros-platform/context/reporting/application"
+	reportingnats "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/inbound/nats"
+	reportingpg "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/outbound/postgres"
 	webhookcrypto "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/crypto"
 	webhookdispatcher "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/http"
 	webhookpg "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/postgres"
@@ -290,6 +293,29 @@ func main() {
 	go func() {
 		if err := expiryPoller.Start(ctx); err != nil {
 			logger.Error("dispute expiry poller stopped", "error", err)
+		}
+	}()
+
+	// ── Reporting: proyección del read-model ──────────────────────────────────
+	// Consume PAYMENT y LEDGER y proyecta hechos idempotentes para el dashboard.
+
+	projectionRepo := reportingpg.NewProjectionRepository(pool)
+	accountReader  := reportingpg.NewAccountReader(pool)
+	projectEvents  := reportingapp.NewProjectEventsUseCase(projectionRepo, accountReader, realClock{})
+	reportingConsumer := reportingnats.NewEventConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "reporting")),
+		projectEvents,
+		logger.With("component", "reporting"),
+	)
+
+	go func() {
+		if err := reportingConsumer.StartPaymentConsumer(ctx); err != nil {
+			logger.Error("reporting payment consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := reportingConsumer.StartLedgerConsumer(ctx); err != nil {
+			logger.Error("reporting ledger consumer stopped", "error", err)
 		}
 	}()
 

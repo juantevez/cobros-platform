@@ -198,6 +198,30 @@ POST /api/v1/ledger/entries
 
 ---
 
+### ✅ Dashboard & Reporting
+
+**Read-model CQRS**: proyecta eventos de otros contextos en tablas desnormalizadas optimizadas para consulta. No tiene agregados ni escribe dinero — solo lee.
+
+| Elemento | Descripción |
+|---|---|
+| Hechos (read-model) | `PaymentFact` (desde `payment.captured.v1`), `LedgerMovement` (desde `ledger.entry.posted.v1`) |
+| Vistas | `VolumePoint`, `RevenueSummary`, `TenantBalance` |
+| Casos de uso | `ProjectPaymentCaptured`, `ProjectEntryPosted` (proyección), `GetVolume`, `GetRevenue`, `GetBalances` (consulta) |
+
+**Diseño idempotente:** en vez de contadores incrementales (que se duplicarían ante re-entregas de JetStream), se guardan **hechos inmutables** con inserción `ON CONFLICT DO NOTHING` (clave `payment_id`, y `(entry_id, account_id, direction)`) y se **agrega en tiempo de consulta**. Los consumers de proyección corren en `cmd/worker`.
+
+**Endpoints:**
+
+```
+GET  /api/v1/reports/volume?from=&to=&granularity=day   Serie de volumen transaccional  [JWT]
+GET  /api/v1/reports/revenue?from=&to=                   Comisiones cobradas por período [JWT]
+GET  /api/v1/reports/balances                            Saldo neto por tipo de cuenta   [JWT]
+```
+
+> `from`/`to` en formato RFC3339 (opcionales); `granularity` ∈ `day|week|month` (default `day`).
+
+---
+
 ## Módulos pendientes (Roadmap)
 
 | Fase | Contexto | Estado |
@@ -211,9 +235,9 @@ POST /api/v1/ledger/entries
 | **Fase 3** | Payouts / Desembolsos | ⏳ Pendiente |
 | **Fase 3** | Billing & Fees | ⏳ Pendiente |
 | **Fase 3** | Reconciliation | ⏳ Pendiente |
-| **Fase 4** | Webhooks & Eventos | ⏳ Pendiente |
-| **Fase 4** | Notifications | ⏳ Pendiente |
-| **Fase 4** | Dashboard & Reporting | ⏳ Pendiente |
+| **Fase 4** | Webhooks & Eventos | ✅ Completo |
+| **Fase 4** | Notifications | ✅ Completo |
+| **Fase 4** | Dashboard & Reporting | ✅ Completo |
 | **Fase 5** | Disputes & Chargebacks | ⏳ Pendiente |
 | **Fase 5** | Compliance & AML | ⏳ Pendiente |
 
