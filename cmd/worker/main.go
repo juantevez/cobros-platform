@@ -34,6 +34,10 @@ import (
 	reportingapp "github.com/juantevez/cobros-platform/context/reporting/application"
 	reportingnats "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/inbound/nats"
 	reportingpg "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/outbound/postgres"
+	complianceapp "github.com/juantevez/cobros-platform/context/compliance/application"
+	compliancedomain "github.com/juantevez/cobros-platform/context/compliance/domain"
+	compliancenats "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/inbound/nats"
+	compliancepg "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/outbound/postgres"
 	webhookcrypto "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/crypto"
 	webhookdispatcher "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/http"
 	webhookpg "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/postgres"
@@ -316,6 +320,37 @@ func main() {
 	go func() {
 		if err := reportingConsumer.StartLedgerConsumer(ctx); err != nil {
 			logger.Error("reporting ledger consumer stopped", "error", err)
+		}
+	}()
+
+	// ── Compliance & AML: screening + monitoreo transaccional ─────────────────
+
+	compliancePub  := outbox.NewEventPublisher[compliancedomain.Event](outboxStore)
+	complianceAlerts := compliancepg.NewAlertRepository(pool)
+	complianceWatch  := compliancepg.NewWatchlistRepository(pool)
+	complianceTxRead := compliancepg.NewTransactionReader(pool)
+
+	screenApp := complianceapp.NewScreenApplicationUseCase(
+		complianceAlerts, complianceWatch, txMgr, compliancePub, realClock{},
+	)
+	monitorTx := complianceapp.NewMonitorTransactionUseCase(
+		complianceAlerts, complianceTxRead, txMgr, compliancePub, realClock{},
+		complianceapp.DefaultMonitoringRules(),
+	)
+	complianceConsumer := compliancenats.NewEventConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "compliance")),
+		screenApp, monitorTx,
+		logger.With("component", "compliance"),
+	)
+
+	go func() {
+		if err := complianceConsumer.StartOnboardingConsumer(ctx); err != nil {
+			logger.Error("compliance onboarding consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := complianceConsumer.StartPaymentConsumer(ctx); err != nil {
+			logger.Error("compliance payment consumer stopped", "error", err)
 		}
 	}()
 

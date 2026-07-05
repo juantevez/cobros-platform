@@ -61,5 +61,6 @@ func AppStreams() []StreamDefinition {
 		{Name: "RECONCILIATION", Subjects: []string{"reconciliation.>"}},
 		{Name: "NOTIFICATION", Subjects: []string{"notification.>"}},
 		{Name: "DISPUTE", Subjects: []string{"dispute.>"}},
+		{Name: "COMPLIANCE", Subjects: []string{"compliance.>"}},
 	}
 }

@@ -45,6 +45,10 @@ import (
 	reportingapp "github.com/juantevez/cobros-platform/context/reporting/application"
 	reportinghttp "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/inbound/http"
 	reportingpg "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/outbound/postgres"
+	complianceapp "github.com/juantevez/cobros-platform/context/compliance/application"
+	compliancedomain "github.com/juantevez/cobros-platform/context/compliance/domain"
+	compliancehttp "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/inbound/http"
+	compliancepg "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/outbound/postgres"
 	webhookapp "github.com/juantevez/cobros-platform/context/webhook/application"
 	webhookdomain "github.com/juantevez/cobros-platform/context/webhook/domain"
 	webhookhttp "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/inbound/http"
@@ -127,6 +131,7 @@ func main() {
 	webhookPub     := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
 	reconcPub      := outbox.NewEventPublisher[reconciliationdomain.Event](outboxStore)
 	disputePub     := outbox.NewEventPublisher[disputedomain.Event](outboxStore)
+	compliancePub  := outbox.NewEventPublisher[compliancedomain.Event](outboxStore)
 
 	// ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -343,6 +348,23 @@ func main() {
 	getReports := reportingapp.NewGetReportsUseCase(reportRepo)
 
 	reportinghttp.RegisterRoutes(protected, reportinghttp.NewReportingHandler(getReports))
+
+	// ── Compliance & AML ──────────────────────────────────────────────────────
+	// Lado de consulta/gestión (alertas + watchlist). La generación de alertas
+	// (screening + monitoreo) ocurre en cmd/worker.
+
+	alertRepo     := compliancepg.NewAlertRepository(pool)
+	watchlistRepo := compliancepg.NewWatchlistRepository(pool)
+
+	listAlerts    := complianceapp.NewListAlertsUseCase(alertRepo)
+	getAlert      := complianceapp.NewGetAlertUseCase(alertRepo)
+	resolveAlert  := complianceapp.NewResolveAlertUseCase(alertRepo, txManager, compliancePub, clock)
+	addWatchEntry := complianceapp.NewAddWatchlistEntryUseCase(watchlistRepo, clock)
+	listWatchlist := complianceapp.NewListWatchlistUseCase(watchlistRepo)
+
+	compliancehttp.RegisterRoutes(protected, compliancehttp.NewComplianceHandler(
+		listAlerts, getAlert, resolveAlert, addWatchEntry, listWatchlist,
+	))
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

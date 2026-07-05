@@ -222,6 +222,38 @@ GET  /api/v1/reports/balances                            Saldo neto por tipo de 
 
 ---
 
+### ✅ Compliance & AML
+
+Screening contra listas de vigilancia y monitoreo transaccional. Consume eventos de otros contextos y genera **alertas** para revisión manual (sin enforcement automático).
+
+| Elemento | Descripción |
+|---|---|
+| Agregados | `Alert` (open → cleared \| confirmed) |
+| Value Objects | `AlertType` (sanctions_match, transaction_threshold, transaction_velocity), `RiskLevel`, `AlertStatus` |
+| Entidades | `WatchlistEntry` (lista global sanciones/PEP) |
+| Casos de uso | `ScreenApplication`, `MonitorTransaction`, `ResolveAlert`, `ListAlerts`, `GetAlert`, `AddWatchlistEntry`, `ListWatchlist` |
+| Eventos | `AlertRaised`, `AlertResolved` |
+
+**Reglas del MVP:**
+
+- **Screening** — al recibir `onboarding.application.submitted.v1`, compara el `legal_name` contra `aml_watchlist` (containment normalizado). Match → alerta `sanctions_match`.
+- **Umbral** — `payment.captured.v1` con `amount ≥ 10.000,00` → alerta `transaction_threshold`.
+- **Velocity** — ≥ 10 pagos capturados del tenant en 10 min → alerta `transaction_velocity`.
+
+**Idempotencia:** unicidad `(tenant_id, alert_type, subject)` — una re-entrega de evento no duplica alertas.
+
+**Endpoints:**
+
+```
+GET  /api/v1/compliance/alerts?status=&limit=          Listar alertas          [JWT]
+GET  /api/v1/compliance/alerts/:alertID                Ver alerta              [JWT]
+POST /api/v1/compliance/alerts/:alertID/resolve        Disponer (cleared|confirmed) [JWT]
+GET  /api/v1/compliance/watchlist                      Listar watchlist        [JWT]
+POST /api/v1/compliance/watchlist                      Agregar entrada         [JWT]
+```
+
+---
+
 ## Módulos pendientes (Roadmap)
 
 | Fase | Contexto | Estado |
@@ -238,8 +270,8 @@ GET  /api/v1/reports/balances                            Saldo neto por tipo de 
 | **Fase 4** | Webhooks & Eventos | ✅ Completo |
 | **Fase 4** | Notifications | ✅ Completo |
 | **Fase 4** | Dashboard & Reporting | ✅ Completo |
-| **Fase 5** | Disputes & Chargebacks | ⏳ Pendiente |
-| **Fase 5** | Compliance & AML | ⏳ Pendiente |
+| **Fase 5** | Disputes & Chargebacks | ✅ Completo |
+| **Fase 5** | Compliance & AML | ✅ Completo |
 
 ---
 
@@ -340,12 +372,15 @@ Convención de subjects: `<contexto>.<agregado>.<hecho>.<versión>`
 | `ledger.account.created.v1` | Cuenta contable creada |
 | `ledger.entry.posted.v1` | Asiento contable registrado |
 | `ledger.entry.reversed.v1` | Asiento revertido |
+| `compliance.alert.raised.v1` | Alerta de AML generada |
+| `compliance.alert.resolved.v1` | Alerta dispuesta por un analista |
 
 **Streams JetStream:**
 
 ```
-AUTH   → subjects: auth.>
-LEDGER → subjects: ledger.>
+AUTH       → subjects: auth.>
+LEDGER     → subjects: ledger.>
+COMPLIANCE → subjects: compliance.>
 ```
 
 ---
