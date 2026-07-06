@@ -8,10 +8,19 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juantevez/cobros-platform/context/audit/domain"
 )
+
+// pgxPool es el subconjunto de *pgxpool.Pool que usa el repositorio.
+// Definirlo como interfaz permite inyectar un mock (pgxmock) en los tests;
+// en producción se satisface con *pgxpool.Pool sin cambios en los callers.
+type pgxPool interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // pgAuditLogRepository implementa AuditLogRepository sobre PostgreSQL.
 //
@@ -22,10 +31,10 @@ import (
 // registro para garantizar la integridad del hash chain ante múltiples
 // instancias del worker.
 type pgAuditLogRepository struct {
-	pool *pgxpool.Pool
+	pool pgxPool
 }
 
-func NewAuditLogRepository(pool *pgxpool.Pool) *pgAuditLogRepository {
+func NewAuditLogRepository(pool pgxPool) *pgAuditLogRepository {
 	return &pgAuditLogRepository{pool: pool}
 }
 

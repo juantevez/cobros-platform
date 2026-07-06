@@ -260,13 +260,13 @@ POST /api/v1/compliance/watchlist                      Agregar entrada         [
 |---|---|---|
 | **Fase 1** | Auth & Multi-Tenant | ✅ Completo |
 | **Fase 1** | Ledger / Libro Mayor | ✅ Completo |
-| **Fase 1** | Audit & Observability | 🚧 En desarrollo |
-| **Fase 2** | Onboarding (KYC/KYB) | ⏳ Pendiente |
-| **Fase 2** | Payment Processing | ⏳ Pendiente |
-| **Fase 2** | Fraud & Risk | ⏳ Pendiente |
-| **Fase 3** | Payouts / Desembolsos | ⏳ Pendiente |
-| **Fase 3** | Billing & Fees | ⏳ Pendiente |
-| **Fase 3** | Reconciliation | ⏳ Pendiente |
+| **Fase 1** | Audit & Observability | ✅ Completo |
+| **Fase 2** | Onboarding (KYC/KYB) | ✅ Completo |
+| **Fase 2** | Payment Processing | ✅ Completo |
+| **Fase 2** | Fraud & Risk | ✅ Completo |
+| **Fase 3** | Payouts / Desembolsos | ✅ Completo |
+| **Fase 3** | Billing & Fees | ✅ Completo |
+| **Fase 3** | Reconciliation | ✅ Completo |
 | **Fase 4** | Webhooks & Eventos | ✅ Completo |
 | **Fase 4** | Notifications | ✅ Completo |
 | **Fase 4** | Dashboard & Reporting | ✅ Completo |
