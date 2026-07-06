@@ -5,16 +5,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/juantevez/cobros-platform/context/compliance/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // WatchlistRepository consulta y gestiona la lista de vigilancia global.
 // No es tenant-scoped: la watchlist es única para toda la plataforma.
-type WatchlistRepository struct{ pool *pgxpool.Pool }
+type WatchlistRepository struct{ pool pkgpostgres.Conn }
 
-func NewWatchlistRepository(pool *pgxpool.Pool) *WatchlistRepository {
+func NewWatchlistRepository(pool pkgpostgres.Conn) *WatchlistRepository {
 	return &WatchlistRepository{pool: pool}
 }
 

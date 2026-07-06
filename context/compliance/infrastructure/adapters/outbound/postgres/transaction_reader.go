@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // TransactionReader cuenta pagos capturados leyendo la tabla payments
 // (misma BD, patrón de lectura cruzada) para la regla de velocity.
-type TransactionReader struct{ pool *pgxpool.Pool }
+type TransactionReader struct{ pool pkgpostgres.Conn }
 
-func NewTransactionReader(pool *pgxpool.Pool) *TransactionReader {
+func NewTransactionReader(pool pkgpostgres.Conn) *TransactionReader {
 	return &TransactionReader{pool: pool}
 }
 

@@ -5,7 +5,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Conn es la interfaz mínima compartida entre *pgxpool.Pool y pgx.Tx.
@@ -29,7 +28,10 @@ type Conn interface {
 //
 //	conn := postgres.ConnFromContext(ctx, r.pool)
 //	_, err := conn.Exec(ctx, `INSERT INTO ...`, args...)
-func ConnFromContext(ctx context.Context, pool *pgxpool.Pool) Conn {
+//
+// El parámetro es la interfaz Conn (no *pgxpool.Pool) para permitir inyectar
+// un mock del pool en tests; *pgxpool.Pool la satisface sin cambios en callers.
+func ConnFromContext(ctx context.Context, pool Conn) Conn {
 	if tx, ok := TxFromContext(ctx); ok {
 		return tx
 	}

@@ -10,15 +10,14 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/compliance/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
-type AlertRepository struct{ pool *pgxpool.Pool }
+type AlertRepository struct{ pool pkgpostgres.Conn }
 
-func NewAlertRepository(pool *pgxpool.Pool) *AlertRepository {
+func NewAlertRepository(pool pkgpostgres.Conn) *AlertRepository {
 	return &AlertRepository{pool: pool}
 }
 
@@ -109,10 +108,10 @@ type scanner interface {
 func scanAlert(s scanner) (*domain.Alert, error) {
 	var (
 		idStr, tenantIDStr, alertType, riskLevel, status, subject, note string
-		score                                                          int
-		detailsRaw                                                     []byte
-		createdAt                                                      time.Time
-		resolvedAt                                                     *time.Time
+		score                                                           int
+		detailsRaw                                                      []byte
+		createdAt                                                       time.Time
+		resolvedAt                                                      *time.Time
 	)
 	if err := s.Scan(&idStr, &tenantIDStr, &alertType, &riskLevel, &status,
 		&subject, &score, &detailsRaw, &note, &createdAt, &resolvedAt); err != nil {
