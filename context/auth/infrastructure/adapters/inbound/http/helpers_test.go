@@ -24,8 +24,6 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-var errBoom = errors.New("boom")
-
 // ── Fakes de puertos ──────────────────────────────────────────────────────────
 
 type fakeTx struct{}
