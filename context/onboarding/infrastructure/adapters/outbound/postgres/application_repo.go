@@ -181,7 +181,9 @@ func (r *pgApplicationRepository) scanWithRelations(ctx context.Context, conn po
 	for docRows.Next() {
 		var did, dtype, ref, dstatus, notes string
 		var uploadedAt time.Time
-		docRows.Scan(&did, &dtype, &ref, &dstatus, &notes, &uploadedAt)
+		if err := docRows.Scan(&did, &dtype, &ref, &dstatus, &notes, &uploadedAt); err != nil {
+			return nil, fmt.Errorf("application repo: scan document: %w", err)
+		}
 		dt, _ := domain.ParseDocumentType(dtype)
 		docs = append(docs, domain.ReconstituteDocument(
 			domain.DocumentID(did), dt, ref, notes,
@@ -203,7 +205,9 @@ func (r *pgApplicationRepository) scanWithRelations(ctx context.Context, conn po
 	for personRows.Next() {
 		var pid, fullName, roleStr, idocType, idocNum, nationality string
 		var pc time.Time
-		personRows.Scan(&pid, &fullName, &roleStr, &idocType, &idocNum, &nationality, &pc)
+		if err := personRows.Scan(&pid, &fullName, &roleStr, &idocType, &idocNum, &nationality, &pc); err != nil {
+			return nil, fmt.Errorf("application repo: scan person: %w", err)
+		}
 		role, _ := domain.ParsePersonRole(roleStr)
 		persons = append(persons, domain.ReconstitutePerson(
 			domain.PersonID(pid), fullName, role, idocType, idocNum, nationality, pc.UTC(),
