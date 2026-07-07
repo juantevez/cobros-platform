@@ -7,15 +7,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
-type pgDisputeRepository struct{ pool *pgxpool.Pool }
+type pgDisputeRepository struct{ pool pkgpostgres.Conn }
 
-func NewDisputeRepository(pool *pgxpool.Pool) *pgDisputeRepository {
+func NewDisputeRepository(pool pkgpostgres.Conn) *pgDisputeRepository {
 	return &pgDisputeRepository{pool: pool}
 }
 
@@ -131,12 +130,6 @@ const baseSelect = `
 	       deadline, opened_at, responded_at, resolved_at
 	FROM disputes`
 
-// connQuerier unifica pgxpool.Pool y pkgpostgres.Conn para las queries de evidencia.
-type connQuerier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	Exec(ctx context.Context, sql string, args ...any) (interface{ RowsAffected() int64 }, error)
-}
-
 func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }, row interface{ Scan(...any) error }) (*domain.Dispute, error) {
@@ -173,7 +166,9 @@ func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interfa
 	for evRows.Next() {
 		var eid, evType, ref, desc string
 		var submittedAt time.Time
-		evRows.Scan(&eid, &evType, &ref, &desc, &submittedAt)
+		if err := evRows.Scan(&eid, &evType, &ref, &desc, &submittedAt); err != nil {
+			return nil, fmt.Errorf("dispute repo: scan evidence: %w", err)
+		}
 		evidence = append(evidence, domain.ReconstituteEvidence(
 			domain.EvidenceID(eid), evType, ref, desc, submittedAt.UTC(),
 		))

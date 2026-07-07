@@ -155,8 +155,11 @@ func (h *DisputeHandler) Contest(c *gin.Context) {
 //	POST /api/v1/disputes/:disputeID/accept
 func (h *DisputeHandler) Accept(c *gin.Context) {
 	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
-	var req struct{ Note string `json:"note"` }
-	c.ShouldBindJSON(&req)
+	var req struct {
+		Note string `json:"note"`
+	}
+	// El body es opcional (solo la nota); ignoramos el error de binding a propósito.
+	_ = c.ShouldBindJSON(&req)
 
 	if err := h.accept.Execute(c.Request.Context(), application.AcceptDisputeCmd{
 		TenantID:  tenantID,
