@@ -7,15 +7,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
-type pgDiscrepancyRepository struct{ pool *pgxpool.Pool }
+type pgDiscrepancyRepository struct{ pool pkgpostgres.Conn }
 
-func NewDiscrepancyRepository(pool *pgxpool.Pool) *pgDiscrepancyRepository {
+func NewDiscrepancyRepository(pool pkgpostgres.Conn) *pgDiscrepancyRepository {
 	return &pgDiscrepancyRepository{pool: pool}
 }
 

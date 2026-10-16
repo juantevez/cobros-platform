@@ -7,15 +7,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
-type pgRunRepository struct{ pool *pgxpool.Pool }
+type pgRunRepository struct{ pool pkgpostgres.Conn }
 
-func NewRunRepository(pool *pgxpool.Pool) *pgRunRepository {
+func NewRunRepository(pool pkgpostgres.Conn) *pgRunRepository {
 	return &pgRunRepository{pool: pool}
 }
 

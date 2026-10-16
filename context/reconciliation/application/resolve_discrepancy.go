@@ -31,6 +31,10 @@ func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDis
 	if err != nil {
 		return err
 	}
+	// Aislamiento: misma regla que ownedBy para runs.
+	if d.TenantID().String() != cmd.TenantID {
+		return domain.ErrDiscrepancyNotFound
+	}
 
 	switch cmd.Action {
 	case "resolve":
@@ -69,6 +73,9 @@ func (uc *GetReportUseCase) Execute(ctx context.Context, q GetReportQuery) (Repo
 	run, err := uc.runRepo.FindByID(ctx, runID)
 	if err != nil {
 		return ReportView{}, err
+	}
+	if !ownedBy(run, q.TenantID) {
+		return ReportView{}, domain.ErrRunNotFound
 	}
 
 	limit := q.Limit

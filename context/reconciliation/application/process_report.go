@@ -57,6 +57,9 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 	if err != nil {
 		return fmt.Errorf("find run: %w", err)
 	}
+	if !ownedBy(run, cmd.TenantID) {
+		return domain.ErrRunNotFound
+	}
 
 	if err := run.Start(); err != nil {
 		return err
@@ -196,6 +199,13 @@ func isStatusMismatch(systemStatus, pspStatus string) bool {
 	return criticalMismatches[[2]string{systemStatus, pspStatus}]
 }
 
+// ownedBy indica si el run pertenece al tenant del caller.
+// Aislamiento: un tenant nunca accede a runs de otro tenant ni a los globales;
+// un caller sin tenant (proceso interno) sólo accede a los globales.
+func ownedBy(run *domain.ReconciliationRun, tenantID string) bool {
+	return run.TenantID().String() == tenantID
+}
+
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
@@ -240,6 +250,9 @@ func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessIntern
 	run, err := uc.runRepo.FindByID(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("find run: %w", err)
+	}
+	if !ownedBy(run, cmd.TenantID) {
+		return domain.ErrRunNotFound
 	}
 
 	if err := run.Start(); err != nil {

@@ -17,6 +17,7 @@ type StartReconciliationResult struct {
 // ProcessReportCmd procesa el informe del PSP para un run existente.
 // Solo aplica a runs de tipo "payment".
 type ProcessReportCmd struct {
+	TenantID   string // tenant del caller; vacío sólo para runs globales
 	RunID      string
 	ReportData []byte // CSV del PSP
 }
@@ -24,11 +25,13 @@ type ProcessReportCmd struct {
 // ProcessInternalCmd ejecuta la reconciliación interna del Ledger.
 // Solo aplica a runs de tipo "internal_ledger".
 type ProcessInternalCmd struct {
-	RunID string
+	TenantID string // tenant del caller; vacío sólo para runs globales
+	RunID    string
 }
 
 // ResolveDiscrepancyCmd resuelve o ignora una discrepancia.
 type ResolveDiscrepancyCmd struct {
+	TenantID      string // tenant del caller; vacío sólo para runs globales
 	DiscrepancyID string
 	Action        string // "resolve" | "ignore"
 	ResolvedBy    string // userID del operador
@@ -37,9 +40,10 @@ type ResolveDiscrepancyCmd struct {
 
 // GetReportQuery solicita el reporte completo de un run.
 type GetReportQuery struct {
-	RunID         string
-	StatusFilter  string // "" | "open" | "resolved" | "ignored"
-	Limit         int
+	TenantID     string // tenant del caller; vacío sólo para runs globales
+	RunID        string
+	StatusFilter string // "" | "open" | "resolved" | "ignored"
+	Limit        int
 }
 
 // ── Views ─────────────────────────────────────────────────────────────────────

@@ -5,19 +5,18 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/juantevez/cobros-platform/context/reconciliation/application"
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // PaymentReader implementa application.PaymentReader consultando
 // directamente la tabla payments (mismo esquema PostgreSQL).
 type PaymentReader struct {
-	pool *pgxpool.Pool
+	pool pkgpostgres.Conn
 }
 
-func NewPaymentReader(pool *pgxpool.Pool) *PaymentReader {
+func NewPaymentReader(pool pkgpostgres.Conn) *PaymentReader {
 	return &PaymentReader{pool: pool}
 }
 
@@ -68,10 +67,10 @@ func (r *PaymentReader) ReadByPeriod(
 // LedgerChecker implementa application.LedgerChecker consultando
 // directamente la tabla postings del Ledger.
 type LedgerChecker struct {
-	pool *pgxpool.Pool
+	pool pkgpostgres.Conn
 }
 
-func NewLedgerChecker(pool *pgxpool.Pool) *LedgerChecker {
+func NewLedgerChecker(pool pkgpostgres.Conn) *LedgerChecker {
 	return &LedgerChecker{pool: pool}
 }
 

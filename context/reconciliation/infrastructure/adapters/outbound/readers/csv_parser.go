@@ -3,7 +3,9 @@ package readers
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -52,10 +54,16 @@ func (p *CSVReportParser) Parse(data []byte) ([]application.PSPRecord, error) {
 	lineNum := 1
 	for {
 		row, err := r.Read()
-		if err != nil {
-			break // EOF
+		if errors.Is(err, io.EOF) {
+			break
 		}
 		lineNum++
+		if err != nil {
+			// Una fila mal formada (comillas sin cerrar, cantidad de columnas
+			// distinta al header) invalida el informe completo: cortar acá en
+			// silencio haría aparecer las filas siguientes como faltantes.
+			return nil, fmt.Errorf("%w: row %d: %v", domain.ErrInvalidReportFormat, lineNum, err)
+		}
 
 		rec, err := parseRow(row, colIdx, lineNum)
 		if err != nil {

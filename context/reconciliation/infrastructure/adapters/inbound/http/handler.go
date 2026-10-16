@@ -43,7 +43,10 @@ func NewReconciliationHandler(
 //
 //	POST /api/v1/reconciliation/runs
 func (h *ReconciliationHandler) StartRun(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 
 	var req struct {
 		Type       string `json:"type"        binding:"required"`
@@ -83,7 +86,10 @@ func (h *ReconciliationHandler) StartRun(c *gin.Context) {
 //
 //	GET /api/v1/reconciliation/runs?limit=20
 func (h *ReconciliationHandler) ListRuns(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 
 	views, err := h.listRuns.Execute(c.Request.Context(), tenantID, limit)
@@ -98,8 +104,13 @@ func (h *ReconciliationHandler) ListRuns(c *gin.Context) {
 //
 //	GET /api/v1/reconciliation/runs/:runID?status=open&limit=100
 func (h *ReconciliationHandler) GetReport(c *gin.Context) {
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 	report, err := h.getReport.Execute(c.Request.Context(), application.GetReportQuery{
+		TenantID:     tenantID,
 		RunID:        c.Param("runID"),
 		StatusFilter: c.Query("status"),
 		Limit:        limit,
@@ -116,6 +127,10 @@ func (h *ReconciliationHandler) GetReport(c *gin.Context) {
 //	POST /api/v1/reconciliation/runs/:runID/report
 //	Content-Type: text/csv
 func (h *ReconciliationHandler) UploadReport(c *gin.Context) {
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 	data, err := io.ReadAll(io.LimitReader(c.Request.Body, 50*1024*1024)) // 50 MB max
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read request body"})
@@ -127,6 +142,7 @@ func (h *ReconciliationHandler) UploadReport(c *gin.Context) {
 	}
 
 	if err := h.processReport.Execute(c.Request.Context(), application.ProcessReportCmd{
+		TenantID:   tenantID,
 		RunID:      c.Param("runID"),
 		ReportData: data,
 	}); err != nil {
@@ -140,8 +156,13 @@ func (h *ReconciliationHandler) UploadReport(c *gin.Context) {
 //
 //	POST /api/v1/reconciliation/runs/:runID/process-internal
 func (h *ReconciliationHandler) ProcessInternal(c *gin.Context) {
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 	if err := h.processInternal.Execute(c.Request.Context(), application.ProcessInternalCmd{
-		RunID: c.Param("runID"),
+		TenantID: tenantID,
+		RunID:    c.Param("runID"),
 	}); err != nil {
 		respondError(c, err)
 		return
@@ -153,6 +174,10 @@ func (h *ReconciliationHandler) ProcessInternal(c *gin.Context) {
 //
 //	POST /api/v1/reconciliation/discrepancies/:discrepancyID/resolve
 func (h *ReconciliationHandler) ResolveDiscrepancy(c *gin.Context) {
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 	var req struct {
 		Action     string `json:"action"      binding:"required"` // "resolve" | "ignore"
 		ResolvedBy string `json:"resolved_by" binding:"required"`
@@ -164,6 +189,7 @@ func (h *ReconciliationHandler) ResolveDiscrepancy(c *gin.Context) {
 	}
 
 	if err := h.resolveDisc.Execute(c.Request.Context(), application.ResolveDiscrepancyCmd{
+		TenantID:      tenantID,
 		DiscrepancyID: c.Param("discrepancyID"),
 		Action:        req.Action,
 		ResolvedBy:    req.ResolvedBy,
@@ -173,6 +199,18 @@ func (h *ReconciliationHandler) ResolveDiscrepancy(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// requireTenant obtiene el tenant autenticado. Sin tenant responde 401: un
+// tenant vacío en los casos de uso significa "runs globales de plataforma",
+// algo que la API pública nunca debe exponer.
+func requireTenant(c *gin.Context) (string, bool) {
+	tenantID, ok := postgres.TenantIDFromContext(c.Request.Context())
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing tenant"})
+		return "", false
+	}
+	return tenantID, true
 }
 
 // ── Error mapping ─────────────────────────────────────────────────────────────
