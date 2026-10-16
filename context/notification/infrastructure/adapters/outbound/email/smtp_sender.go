@@ -18,6 +18,11 @@ type SMTPSender struct {
 	password string
 	from     string
 	useTLS   bool
+
+	// tlsConfig permite inyectar una config TLS en tests (ej: con RootCAs de
+	// un cert self-signed). En producción queda nil y se usa la config por
+	// defecto que verifica contra las CAs del sistema.
+	tlsConfig *tls.Config
 }
 
 type SMTPConfig struct {
@@ -56,7 +61,10 @@ func (s *SMTPSender) sendSTARTTLS(addr, to string, msg []byte) error {
 }
 
 func (s *SMTPSender) sendTLS(addr, to string, msg []byte) error {
-	tlsCfg := &tls.Config{ServerName: s.host}
+	tlsCfg := s.tlsConfig
+	if tlsCfg == nil {
+		tlsCfg = &tls.Config{ServerName: s.host}
+	}
 	conn, err := tls.Dial("tcp", addr, tlsCfg)
 	if err != nil {
 		return fmt.Errorf("smtp tls dial: %w", err)

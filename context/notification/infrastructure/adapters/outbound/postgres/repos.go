@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/notification/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
@@ -15,9 +14,9 @@ import (
 
 // ── NotificationRepository ────────────────────────────────────────────────────
 
-type pgNotificationRepository struct{ pool *pgxpool.Pool }
+type pgNotificationRepository struct{ pool pkgpostgres.Conn }
 
-func NewNotificationRepository(pool *pgxpool.Pool) *pgNotificationRepository {
+func NewNotificationRepository(pool pkgpostgres.Conn) *pgNotificationRepository {
 	return &pgNotificationRepository{pool: pool}
 }
 
@@ -79,9 +78,9 @@ func (r *pgNotificationRepository) ListByTenant(ctx context.Context, tenantID do
 
 // ── PreferenceRepository ──────────────────────────────────────────────────────
 
-type pgPreferenceRepository struct{ pool *pgxpool.Pool }
+type pgPreferenceRepository struct{ pool pkgpostgres.Conn }
 
-func NewPreferenceRepository(pool *pgxpool.Pool) *pgPreferenceRepository {
+func NewPreferenceRepository(pool pkgpostgres.Conn) *pgPreferenceRepository {
 	return &pgPreferenceRepository{pool: pool}
 }
 
@@ -162,9 +161,9 @@ func (r *pgPreferenceRepository) ListByTenant(ctx context.Context, tenantID doma
 // ── UserContactReader ─────────────────────────────────────────────────────────
 
 // ContactReader implementa UserContactReader consultando users + memberships del contexto Auth.
-type ContactReader struct{ pool *pgxpool.Pool }
+type ContactReader struct{ pool pkgpostgres.Conn }
 
-func NewContactReader(pool *pgxpool.Pool) *ContactReader { return &ContactReader{pool: pool} }
+func NewContactReader(pool pkgpostgres.Conn) *ContactReader { return &ContactReader{pool: pool} }
 
 func (r *ContactReader) GetTenantAdminEmail(ctx context.Context, tenantID string) (string, error) {
 	var email string
