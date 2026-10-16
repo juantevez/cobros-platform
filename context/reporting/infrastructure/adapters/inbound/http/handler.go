@@ -83,6 +83,7 @@ func (h *ReportingHandler) GetBalances(c *gin.Context) {
 }
 
 // parseRange lee los parámetros from/to en formato RFC3339. Vacíos = sin filtro.
+// El rango es semiabierto: incluye from y excluye to.
 // Retorna ok=false y responde 400 si el formato es inválido.
 func parseRange(c *gin.Context) (from, to time.Time, ok bool) {
 	if s := c.Query("from"); s != "" {

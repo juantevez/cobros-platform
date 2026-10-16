@@ -6,14 +6,15 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // AccountReader resuelve el tipo de una cuenta contable consultando
 // directamente la tabla ledger_accounts (misma BD, patrón de lectura cruzada).
-type AccountReader struct{ pool *pgxpool.Pool }
+type AccountReader struct{ pool pkgpostgres.Conn }
 
-func NewAccountReader(pool *pgxpool.Pool) *AccountReader {
+func NewAccountReader(pool pkgpostgres.Conn) *AccountReader {
 	return &AccountReader{pool: pool}
 }
 

@@ -36,6 +36,9 @@ type PaymentCapturedCmd struct {
 	PlatformFee   int64
 	PSPFee        int64
 	PaymentMethod string
+	// OccurredAt es el instante del evento de origen. Cero = desconocido
+	// (se usa el reloj, con el riesgo de fechar mal re-entregas o replays).
+	OccurredAt time.Time
 }
 
 // ProjectPaymentCaptured proyecta un pago capturado como un PaymentFact.
@@ -51,7 +54,7 @@ func (uc *ProjectEventsUseCase) ProjectPaymentCaptured(ctx context.Context, cmd 
 		PlatformFee:   cmd.PlatformFee,
 		PSPFee:        cmd.PSPFee,
 		PaymentMethod: cmd.PaymentMethod,
-		CapturedAt:    uc.clock.Now(),
+		CapturedAt:    uc.factTime(cmd.OccurredAt),
 	})
 }
 
@@ -66,9 +69,10 @@ type PostingCmd struct {
 
 // EntryPostedCmd son los campos de ledger.entry.posted.v1 relevantes al reporting.
 type EntryPostedCmd struct {
-	EntryID  string
-	TenantID string
-	Postings []PostingCmd
+	EntryID    string
+	TenantID   string
+	Postings   []PostingCmd
+	OccurredAt time.Time // ver PaymentCapturedCmd.OccurredAt
 }
 
 // ProjectEntryPosted proyecta cada posting de un asiento como un LedgerMovement.
@@ -77,7 +81,7 @@ func (uc *ProjectEventsUseCase) ProjectEntryPosted(ctx context.Context, cmd Entr
 	if cmd.EntryID == "" || cmd.TenantID == "" {
 		return domain.ErrInvalidFact
 	}
-	now := uc.clock.Now()
+	postedAt := uc.factTime(cmd.OccurredAt)
 	for _, p := range cmd.Postings {
 		if p.AccountID == "" {
 			continue // posting sin cuenta: skip defensivo
@@ -97,10 +101,20 @@ func (uc *ProjectEventsUseCase) ProjectEntryPosted(ctx context.Context, cmd Entr
 			AccountType: accountType,
 			Currency:    p.Currency,
 			Amount:      p.Amount,
-			PostedAt:    now,
+			PostedAt:    postedAt,
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// factTime fecha un hecho con el instante del evento de origen, para que las
+// series agreguen por cuándo ocurrió y no por cuándo se proyectó (re-entregas
+// tardías o replays del read-model). Sin ese dato, cae al reloj.
+func (uc *ProjectEventsUseCase) factTime(occurredAt time.Time) time.Time {
+	if occurredAt.IsZero() {
+		return uc.clock.Now()
+	}
+	return occurredAt.UTC()
 }

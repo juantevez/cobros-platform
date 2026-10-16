@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/juantevez/cobros-platform/context/reporting/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
@@ -14,9 +12,9 @@ import (
 // ProjectionRepository persiste los hechos inmutables del read-model.
 // Todas las inserciones son idempotentes vía ON CONFLICT DO NOTHING: la
 // re-entrega de un evento de JetStream no altera el estado proyectado.
-type ProjectionRepository struct{ pool *pgxpool.Pool }
+type ProjectionRepository struct{ pool pkgpostgres.Conn }
 
-func NewProjectionRepository(pool *pgxpool.Pool) *ProjectionRepository {
+func NewProjectionRepository(pool pkgpostgres.Conn) *ProjectionRepository {
 	return &ProjectionRepository{pool: pool}
 }
 

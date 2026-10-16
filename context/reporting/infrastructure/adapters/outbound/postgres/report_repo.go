@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/juantevez/cobros-platform/context/reporting/application"
 	"github.com/juantevez/cobros-platform/context/reporting/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // ReportRepository ejecuta las consultas agregadas del dashboard.
@@ -16,9 +15,9 @@ import (
 // El aislamiento por comercio se garantiza con el filtro explícito
 // WHERE tenant_id=$1 (el rol de la app es owner y no está sujeto a RLS;
 // RLS actúa como defensa en profundidad para las escrituras transaccionales).
-type ReportRepository struct{ pool *pgxpool.Pool }
+type ReportRepository struct{ pool pkgpostgres.Conn }
 
-func NewReportRepository(pool *pgxpool.Pool) *ReportRepository {
+func NewReportRepository(pool pkgpostgres.Conn) *ReportRepository {
 	return &ReportRepository{pool: pool}
 }
 
@@ -119,6 +118,8 @@ func (r *ReportRepository) Balances(ctx context.Context, tenantID string) ([]dom
 
 // appendTimeBounds agrega condiciones de rango temporal a la cláusula WHERE
 // solo para los límites no-cero, ampliando args con los parámetros posicionales.
+// El rango es semiabierto [from, to): períodos contiguos (ej. 09-01..10-01 y
+// 10-01..11-01) no cuentan dos veces un hecho ocurrido justo en el límite.
 func appendTimeBounds(where string, args *[]any, from, to time.Time, col string) string {
 	if !from.IsZero() {
 		*args = append(*args, from)
@@ -126,7 +127,7 @@ func appendTimeBounds(where string, args *[]any, from, to time.Time, col string)
 	}
 	if !to.IsZero() {
 		*args = append(*args, to)
-		where += fmt.Sprintf(" AND %s <= $%d", col, len(*args))
+		where += fmt.Sprintf(" AND %s < $%d", col, len(*args))
 	}
 	return where
 }

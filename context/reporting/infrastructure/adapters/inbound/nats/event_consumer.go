@@ -3,9 +3,12 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/reporting/application"
+	"github.com/juantevez/cobros-platform/context/reporting/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 )
 
@@ -89,10 +92,9 @@ func (c *EventConsumer) handlePaymentCaptured(ctx context.Context, msg *eventbus
 		PlatformFee:   p.PlatformFee,
 		PSPFee:        p.PSPFee,
 		PaymentMethod: p.PaymentMethod,
+		OccurredAt:    occurredAt(msg),
 	}); err != nil {
-		c.logger.Error("reporting: project payment failed",
-			"payment_id", p.PaymentID, "error", err)
-		return err // nak → reintento con backoff
+		return c.projectionFailed(err, "payment_id", p.PaymentID)
 	}
 	return nil
 }
@@ -112,13 +114,35 @@ func (c *EventConsumer) handleEntryPosted(ctx context.Context, msg *eventbus.Mes
 		})
 	}
 	if err := c.project.ProjectEntryPosted(ctx, application.EntryPostedCmd{
-		EntryID:  e.EntryID,
-		TenantID: e.TenantID,
-		Postings: postings,
+		EntryID:    e.EntryID,
+		TenantID:   e.TenantID,
+		Postings:   postings,
+		OccurredAt: occurredAt(msg),
 	}); err != nil {
-		c.logger.Error("reporting: project entry failed",
-			"entry_id", e.EntryID, "error", err)
-		return err
+		return c.projectionFailed(err, "entry_id", e.EntryID)
 	}
 	return nil
+}
+
+// projectionFailed decide entre ack y nak ante un error de proyección.
+// ErrInvalidFact es permanente (al evento le falta un ID): reintentarlo solo
+// agota MaxDeliver y lo manda a la DLQ, así que se descarta igual que un
+// payload malformado. Cualquier otro error es transitorio → nak.
+func (c *EventConsumer) projectionFailed(err error, idKey, id string) error {
+	if errors.Is(err, domain.ErrInvalidFact) {
+		c.logger.Warn("reporting: discarding invalid event", idKey, id, "error", err)
+		return nil
+	}
+	c.logger.Error("reporting: projection failed", idKey, id, "error", err)
+	return err // nak → reintento con backoff
+}
+
+// occurredAt lee el instante del evento del header que agrega el outbox relay.
+// Si falta o es inválido retorna cero y el caso de uso cae al reloj.
+func occurredAt(msg *eventbus.Message) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, msg.Headers[eventbus.HeaderOccurredAt])
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
