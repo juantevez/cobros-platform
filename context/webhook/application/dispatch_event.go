@@ -54,14 +54,16 @@ func (uc *DispatchEventUseCase) Execute(ctx context.Context, event IncomingEvent
 		return nil // El tenant no tiene endpoints suscritos a este evento.
 	}
 
+	// Si falla una delivery se continúa con los otros endpoints, pero el error
+	// se devuelve: el consumer hace nak y la re-entrega reintenta solo los
+	// faltantes (createDelivery es idempotente por endpoint+evento).
+	var errs []error
 	for _, endpoint := range endpoints {
 		if err := uc.createDelivery(ctx, endpoint, event); err != nil {
-			// Si falla una delivery, continuar con los otros endpoints.
-			// No hay que bloquear la entrega al resto por un error de uno.
-			_ = fmt.Errorf("dispatch event: endpoint %s: %w", endpoint.ID(), err)
+			errs = append(errs, fmt.Errorf("dispatch event: endpoint %s: %w", endpoint.ID(), err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (uc *DispatchEventUseCase) createDelivery(

@@ -8,17 +8,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type pgDeliveryRepository struct {
-	pool *pgxpool.Pool
+	pool pkgpostgres.Conn
 }
 
-func NewDeliveryRepository(pool *pgxpool.Pool) *pgDeliveryRepository {
+func NewDeliveryRepository(pool pkgpostgres.Conn) *pgDeliveryRepository {
 	return &pgDeliveryRepository{pool: pool}
 }
 
@@ -117,11 +116,14 @@ func (r *pgDeliveryRepository) ListByTenant(ctx context.Context, tenantID domain
 
 func (r *pgDeliveryRepository) ListDueForRetry(ctx context.Context, now time.Time, limit int) ([]*domain.WebhookDelivery, error) {
 	// Sin ConnFromContext: el poller corre fuera de transacciones de usuario.
+	// El JOIN excluye endpoints desactivados: sus deliveries no deben ocupar
+	// lugar en el batch (quedarían re-seleccionadas en cada ciclo).
 	rows, err := r.pool.Query(ctx, `
 		SELECT d.id, d.endpoint_id, d.tenant_id, d.event_type, d.event_id,
 		       d.payload, d.status, d.attempt_count, d.next_retry_at,
 		       d.created_at, d.updated_at
 		FROM webhook_deliveries d
+		JOIN webhook_endpoints e ON e.id = d.endpoint_id AND e.active = true
 		WHERE d.status IN ('pending','failed')
 		  AND d.next_retry_at <= $1
 		ORDER BY d.next_retry_at ASC

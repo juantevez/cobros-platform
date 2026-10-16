@@ -168,6 +168,7 @@ func respondError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrEndpointInactive):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrEndpointURLEmpty),
+		errors.Is(err, domain.ErrInvalidEndpointURL),
 		errors.Is(err, domain.ErrNoEventsSubscribed):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:

@@ -9,17 +9,16 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type pgEndpointRepository struct {
-	pool *pgxpool.Pool
+	pool pkgpostgres.Conn
 }
 
-func NewEndpointRepository(pool *pgxpool.Pool) *pgEndpointRepository {
+func NewEndpointRepository(pool pkgpostgres.Conn) *pgEndpointRepository {
 	return &pgEndpointRepository{pool: pool}
 }
 

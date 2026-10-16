@@ -48,10 +48,12 @@ func NewWebhookEndpoint(
 	if rawURL == "" {
 		return nil, ErrEndpointURLEmpty
 	}
-	if _, err := url.ParseRequestURI(rawURL); err != nil {
-		return nil, fmt.Errorf("invalid webhook URL: %w", err)
+	if err := validateURL(rawURL); err != nil {
+		return nil, err
 	}
-	if len(events) == 0 {
+	// Se valida después de normalizar: ["", " "] no es una suscripción.
+	normalized := normalizeEvents(events)
+	if len(normalized) == 0 {
 		return nil, ErrNoEventsSubscribed
 	}
 
@@ -67,7 +69,7 @@ func NewWebhookEndpoint(
 		url:         rawURL,
 		secret:      secret,
 		secretHint:  hint,
-		events:      normalizeEvents(events),
+		events:      normalized,
 		active:      true,
 		description: description,
 		createdAt:   now,
@@ -154,6 +156,22 @@ func (e *WebhookEndpoint) PullEvents() []Event {
 func (e *WebhookEndpoint) record(ev Event) { e.domainEvents = append(e.domainEvents, ev) }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// validateURL exige una URL absoluta http(s) con host. ParseRequestURI por sí
+// solo acepta paths relativos ("/hooks") y cualquier esquema ("ftp://...").
+func validateURL(rawURL string) error {
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidEndpointURL, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%w: scheme must be http or https", ErrInvalidEndpointURL)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%w: missing host", ErrInvalidEndpointURL)
+	}
+	return nil
+}
 
 func normalizeEvents(events []string) []string {
 	seen := make(map[string]struct{})

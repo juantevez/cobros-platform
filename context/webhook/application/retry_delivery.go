@@ -4,12 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
 )
 
-const retryBatchSize = 50
+const (
+	retryBatchSize = 50
+	// retryConcurrency limita los despachos HTTP simultáneos por ciclo: un
+	// endpoint lento (timeout de 30s) no frena al resto del batch.
+	retryConcurrency = 10
+)
 
 // RetryDeliveryUseCase despacha una delivery hacia el endpoint del comercio.
 // Se usa tanto para el reintento automático (RetryPoller) como para el
@@ -69,6 +75,11 @@ func (uc *RetryDeliveryUseCase) dispatch(ctx context.Context, delivery *domain.W
 	if err != nil {
 		return fmt.Errorf("load endpoint %s: %w", delivery.EndpointID(), err)
 	}
+	// Un endpoint desactivado no recibe más entregas, ni siquiera las que ya
+	// estaban en cola. No se registra intento: la delivery queda como estaba.
+	if !endpoint.Active() {
+		return domain.ErrEndpointInactive
+	}
 
 	attempt, _ := uc.dispatcher.Dispatch(ctx, endpoint, delivery)
 
@@ -94,13 +105,14 @@ func (uc *RetryDeliveryUseCase) dispatch(ctx context.Context, delivery *domain.W
 //
 // Intervalo de polling: cada 5s. Por cada ciclo:
 //  1. Busca hasta 50 deliveries con nextRetryAt <= now
-//  2. Por cada una, carga el endpoint y ejecuta el HTTP call
+//  2. Las despacha con hasta 10 HTTP calls en paralelo
 //  3. Actualiza el estado (delivered / failed / exhausted)
 type RetryPoller struct {
-	retryUC  *RetryDeliveryUseCase
-	repo     DeliveryRepository
-	interval time.Duration
-	logger   *slog.Logger
+	retryUC     *RetryDeliveryUseCase
+	repo        DeliveryRepository
+	interval    time.Duration
+	concurrency int
+	logger      *slog.Logger
 }
 
 func NewRetryPoller(
@@ -112,7 +124,7 @@ func NewRetryPoller(
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	return &RetryPoller{retryUC: retryUC, repo: repo, interval: interval, logger: logger}
+	return &RetryPoller{retryUC: retryUC, repo: repo, interval: interval, concurrency: retryConcurrency, logger: logger}
 }
 
 // Start arranca el poller. Bloquea hasta que ctx sea cancelado.
@@ -143,13 +155,22 @@ func (p *RetryPoller) runCycle(ctx context.Context) {
 	}
 
 	p.logger.Info("retry poller: dispatching", "count", len(deliveries))
+	sem := make(chan struct{}, p.concurrency)
+	var wg sync.WaitGroup
 	for _, d := range deliveries {
-		if err := p.retryUC.dispatch(ctx, d); err != nil {
-			p.logger.Error("retry poller: dispatch failed",
-				"delivery_id", d.ID(),
-				"event_type", d.EventType(),
-				"error", err,
-			)
-		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d *domain.WebhookDelivery) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := p.retryUC.dispatch(ctx, d); err != nil {
+				p.logger.Error("retry poller: dispatch failed",
+					"delivery_id", d.ID(),
+					"event_type", d.EventType(),
+					"error", err,
+				)
+			}
+		}(d)
 	}
+	wg.Wait()
 }

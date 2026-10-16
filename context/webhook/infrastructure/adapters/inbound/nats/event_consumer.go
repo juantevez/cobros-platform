@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/webhook/application"
+	"github.com/juantevez/cobros-platform/context/webhook/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 )
 
@@ -75,6 +76,12 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 	if ev.TenantID == "" {
 		return nil // evento de plataforma sin tenant, ignorar
 	}
+	if _, err := domain.ParseTenantID(ev.TenantID); err != nil {
+		// Error permanente: reintentarlo solo agota MaxDeliver.
+		c.logger.Warn("webhook consumer: invalid tenant id, skipping",
+			"subject", msg.Subject, "tenant_id", ev.TenantID)
+		return nil
+	}
 
 	// Normalizar el eventID (algunos eventos usan "id", otros "event_id")
 	eventID := ev.EventID
@@ -86,6 +93,9 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 	}
 
 	occurredAt := ev.OccurredAt
+	if occurredAt.IsZero() {
+		occurredAt = occurredAtHeader(msg)
+	}
 	if occurredAt.IsZero() {
 		occurredAt = time.Now().UTC()
 	}
@@ -106,4 +116,15 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 	}
 
 	return nil
+}
+
+// occurredAtHeader lee el instante del evento del header que agrega el outbox
+// relay (los eventos de dominio no serializan occurred_at en el payload).
+// Retorna cero si falta o es inválido.
+func occurredAtHeader(msg *eventbus.Message) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, msg.Headers[eventbus.HeaderOccurredAt])
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
 }
