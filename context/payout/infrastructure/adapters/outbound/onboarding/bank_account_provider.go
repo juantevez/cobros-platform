@@ -7,17 +7,17 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juantevez/cobros-platform/context/payout/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // BankAccountProvider implementa application.BankAccountProvider consultando
 // directamente la tabla onboarding_bank_accounts en Postgres.
 type BankAccountProvider struct {
-	pool *pgxpool.Pool
+	pool pkgpostgres.Conn
 }
 
-func NewBankAccountProvider(pool *pgxpool.Pool) *BankAccountProvider {
+func NewBankAccountProvider(pool pkgpostgres.Conn) *BankAccountProvider {
 	return &BankAccountProvider{pool: pool}
 }
 

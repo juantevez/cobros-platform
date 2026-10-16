@@ -7,17 +7,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/payout/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type pgPayoutRepository struct {
-	pool *pgxpool.Pool
+	pool postgres.Conn
 }
 
-func NewPayoutRepository(pool *pgxpool.Pool) *pgPayoutRepository {
+func NewPayoutRepository(pool postgres.Conn) *pgPayoutRepository {
 	return &pgPayoutRepository{pool: pool}
 }
 

@@ -8,17 +8,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juantevez/cobros-platform/context/payout/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // BalanceChecker implementa application.BalanceChecker consultando
 // directamente la tabla account_balances del Ledger en Postgres.
 type BalanceChecker struct {
-	pool *pgxpool.Pool
+	pool pkgpostgres.Conn
 }
 
-func NewBalanceChecker(pool *pgxpool.Pool) *BalanceChecker {
+func NewBalanceChecker(pool pkgpostgres.Conn) *BalanceChecker {
 	return &BalanceChecker{pool: pool}
 }
 
