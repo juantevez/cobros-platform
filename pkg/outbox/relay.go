@@ -103,7 +103,7 @@ func (r *Relay) cycle(ctx context.Context) error {
 			Subject: msg.Subject,
 			ID:      msg.ID,
 			Payload: msg.Payload,
-			Headers: msg.Headers,
+			Headers: withOccurredAt(msg.Headers, msg.CreatedAt),
 		}
 
 		if err := r.publisher.Publish(ctx, busMsg); err != nil {
@@ -128,4 +128,20 @@ func (r *Relay) cycle(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// withOccurredAt agrega el header occurred-at a partir de CreatedAt, que el
+// EventPublisher guarda como OccurredAt del evento de dominio. Se calcula en
+// el relay (y no al guardar) para cubrir también mensajes ya pendientes.
+// Copia el mapa para no mutar el mensaje leído del store; respeta un valor
+// previo si ya existe.
+func withOccurredAt(headers map[string]string, createdAt time.Time) map[string]string {
+	out := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		out[k] = v
+	}
+	if _, ok := out[eventbus.HeaderOccurredAt]; !ok && !createdAt.IsZero() {
+		out[eventbus.HeaderOccurredAt] = createdAt.UTC().Format(time.RFC3339Nano)
+	}
+	return out
 }

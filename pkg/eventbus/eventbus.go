@@ -34,6 +34,11 @@ type Message struct {
 // Las implementaciones deben ser idempotentes.
 type Handler func(ctx context.Context, msg *Message) error
 
+// HeaderOccurredAt lleva el instante (RFC3339Nano, UTC) en que ocurrió el
+// evento de dominio. Lo agrega el outbox relay; los consumers lo usan para
+// fechar hechos sin depender del momento de entrega (re-entregas, replays).
+const HeaderOccurredAt = "occurred-at"
+
 // Publisher publica mensajes en el bus de eventos.
 // La implementación garantiza entrega al broker (ack de JetStream).
 type Publisher interface {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -106,6 +107,7 @@ func (c *NatsConsumer) process(ctx context.Context, msg jetstream.Msg, handler H
 	busMsg := &Message{
 		Subject: msg.Subject(),
 		Payload: msg.Data(),
+		Headers: headersFrom(msg.Headers()),
 	}
 	// Extraer el ID de deduplicación de los headers si está presente.
 	if h := msg.Headers(); h != nil {
@@ -125,4 +127,19 @@ func (c *NatsConsumer) process(ctx context.Context, msg jetstream.Msg, handler H
 	if err := msg.Ack(); err != nil {
 		c.logger.Error("eventbus: ack failed", "subject", msg.Subject(), "error", err)
 	}
+}
+
+// headersFrom aplana los headers NATS a un mapa simple (primer valor de cada
+// clave). Retorna nil si el mensaje no trae headers.
+func headersFrom(h nats.Header) map[string]string {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		if len(v) > 0 {
+			out[k] = v[0]
+		}
+	}
+	return out
 }
