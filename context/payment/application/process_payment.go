@@ -12,21 +12,22 @@ import (
 //
 // Flujo (Saga simplificada para Fase 2):
 //
-//  1. Verificar idempotencia → retornar existente si ya procesado.
-//  2. Validar inputs y construir el agregado Payment.
-//  3. Persistir en estado "initiated" (fuera de tx — checkpoint temprano).
-//  4. Evaluar riesgo → si rechazado, fallar y publicar PaymentFailed.
-//  5. Calcular comisión de la plataforma.
-//  6. Seleccionar PSP según método de pago del tenant.
-//  7. Marcar como "processing" y persistir.
+//  1. Validar inputs.
+//  2. Idempotencia → retornar el existente si ya avanzó; retomarlo si quedó en "initiated".
+//  3. Verificar que el tenant esté habilitado para cobrar (TenantGate).
+//  4. Construir el Payment y persistirlo en "initiated" (fuera de tx — checkpoint temprano).
+//  5. Evaluar riesgo → si rechazado, fallar y publicar PaymentFailed.
+//  6. Calcular comisión de la plataforma.
+//  7. Seleccionar PSP y reclamar el pago (initiated → processing, UPDATE condicional).
 //  8. Ejecutar captura contra el PSP.
-//  9. Si PSP falla → Payment.Fail() → publicar PaymentFailed.
+//  9. Si PSP falla → Payment.Fail() → publicar PaymentFailed → ErrPaymentDeclined.
 // 10. Si PSP ok → Payment.Capture() → RunInTx { Update + Publish PaymentCaptured }.
 //
 // Nota sobre consistencia: el Ledger registra el asiento al recibir PaymentCaptured
 // via NATS (consistencia eventual). No hay llamada directa al Ledger desde aquí.
 type ProcessPaymentUseCase struct {
 	repo          PaymentRepository
+	tenantGate    TenantGate
 	pspRouter     PSPRouter
 	riskEvaluator RiskEvaluator
 	feeCalculator FeeCalculator
@@ -36,6 +37,7 @@ type ProcessPaymentUseCase struct {
 
 func NewProcessPaymentUseCase(
 	repo PaymentRepository,
+	tenantGate TenantGate,
 	pspRouter PSPRouter,
 	riskEvaluator RiskEvaluator,
 	feeCalculator FeeCalculator,
@@ -44,6 +46,7 @@ func NewProcessPaymentUseCase(
 ) *ProcessPaymentUseCase {
 	return &ProcessPaymentUseCase{
 		repo:          repo,
+		tenantGate:    tenantGate,
 		pspRouter:     pspRouter,
 		riskEvaluator: riskEvaluator,
 		feeCalculator: feeCalculator,
@@ -75,20 +78,32 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 	}
 
 	// ── 2. Idempotencia ──────────────────────────────────────────────────────
+	// Un pago ya avanzado se devuelve tal cual. Uno que quedó en initiated
+	// (falló riesgo, Billing o el ruteo antes de llegar al PSP) se retoma: si
+	// se devolviera, ese pago no se procesaría nunca.
 
 	existing, err := uc.repo.FindByIdempotencyKey(ctx, tenantID, cmd.IdempotencyKey)
 	if err != nil && !errors.Is(err, domain.ErrPaymentNotFound) {
 		return ProcessPaymentResult{}, fmt.Errorf("check idempotency: %w", err)
 	}
-	if existing != nil {
+	if existing != nil && existing.Status() != domain.StatusInitiated {
 		return toResult(existing, true), nil
 	}
 
-	// ── 3. Construir y persistir el Payment en estado initiated ──────────────
+	// ── 3. El comercio debe estar habilitado (KYC aprobado, no suspendido) ───
 
-	id := domain.NewPaymentID()
+	if err := uc.tenantGate.EnsureCanProcessPayments(ctx, tenantID); err != nil {
+		return ProcessPaymentResult{}, err
+	}
+
+	if existing != nil {
+		return uc.process(ctx, existing, cmd, true)
+	}
+
+	// ── 4. Construir y persistir el Payment en estado initiated ──────────────
+
 	payment, err := domain.NewPayment(
-		id, tenantID, cmd.IdempotencyKey, amount,
+		domain.NewPaymentID(), tenantID, cmd.IdempotencyKey, amount,
 		domain.PayerInfo{
 			Name:    cmd.PayerName,
 			Email:   cmd.PayerEmail,
@@ -106,7 +121,21 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 		return ProcessPaymentResult{}, fmt.Errorf("save payment: %w", err)
 	}
 
-	// ── 4. Evaluación de riesgo ──────────────────────────────────────────────
+	return uc.process(ctx, payment, cmd, false)
+}
+
+// process lleva un pago en initiated hasta su estado final: riesgo, comisión,
+// claim de processing, captura en el PSP y persistencia del resultado.
+//
+// Los montos y el método salen del pago persistido (no del comando), para que
+// un reintento con otros valores no altere un pago existente. Del comando solo
+// se usan el token del PSP y la descripción, que no se persisten.
+func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Payment, cmd ProcessPaymentCmd, wasExisting bool) (ProcessPaymentResult, error) {
+	tenantID := payment.TenantID()
+	amount := payment.Amount()
+	method := payment.Method()
+
+	// ── 5. Evaluación de riesgo ──────────────────────────────────────────────
 
 	decision, err := uc.riskEvaluator.Evaluate(ctx, payment)
 	if err != nil {
@@ -126,14 +155,14 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 		return ProcessPaymentResult{}, domain.ErrRiskRejected
 	}
 
-	// ── 5. Calcular comisión ─────────────────────────────────────────────────
+	// ── 6. Calcular comisión ─────────────────────────────────────────────────
 
 	platformFee, err := uc.feeCalculator.Calculate(ctx, tenantID, amount, method)
 	if err != nil {
 		return ProcessPaymentResult{}, fmt.Errorf("calculate fee: %w", err)
 	}
 
-	// ── 6. Seleccionar PSP y marcar como processing ──────────────────────────
+	// ── 7. Seleccionar PSP y reclamar el pago (initiated → processing) ───────
 
 	psp, err := uc.pspRouter.Route(ctx, method, tenantID)
 	if err != nil {
@@ -143,25 +172,35 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 	if err := payment.MarkProcessing(); err != nil {
 		return ProcessPaymentResult{}, err
 	}
-	if err := uc.repo.Update(ctx, payment); err != nil {
+	claimed, err := uc.repo.ClaimProcessing(ctx, payment)
+	if err != nil {
 		return ProcessPaymentResult{}, fmt.Errorf("update to processing: %w", err)
 	}
+	if !claimed {
+		// Otra ejecución (request original o reintento concurrente) ya lo está
+		// procesando: no se vuelve a llamar al PSP; se informa el estado actual.
+		current, err := uc.repo.FindByID(ctx, payment.ID())
+		if err != nil {
+			return ProcessPaymentResult{}, fmt.Errorf("reload claimed payment: %w", err)
+		}
+		return toResult(current, true), nil
+	}
 
-	// ── 7. Ejecutar captura contra el PSP ────────────────────────────────────
+	// ── 8. Ejecutar captura contra el PSP ────────────────────────────────────
 
 	captureResult, pspErr := psp.AuthorizeAndCapture(ctx, PSPCaptureRequest{
-		PaymentID:      id.String(),
-		IdempotencyKey: cmd.IdempotencyKey,
+		PaymentID:      payment.ID().String(),
+		IdempotencyKey: payment.IdempotencyKey(),
 		Amount:         amount.Amount(),
 		Currency:       amount.Currency(),
 		PaymentMethod:  method.String(),
 		PaymentToken:   cmd.PaymentToken,
 		Description:    cmd.Description,
 		PayerInfo:      payment.PayerInfo(),
-		Metadata:       cmd.Metadata,
+		Metadata:       payment.Metadata(),
 	})
 
-	// ── 8. PSP rechazó ───────────────────────────────────────────────────────
+	// ── 9. PSP rechazó ───────────────────────────────────────────────────────
 
 	if pspErr != nil {
 		_ = payment.Fail(psp.Name(), pspErr.Error())
@@ -173,10 +212,12 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 		}); updateErr != nil {
 			return ProcessPaymentResult{}, fmt.Errorf("persist psp failure: %w", updateErr)
 		}
-		return ProcessPaymentResult{}, fmt.Errorf("psp rejected: %w", pspErr)
+		// Se retorna el resultado junto al error tipado: el handler responde
+		// 402 con el payment_id y el estado, sin exponer el error del PSP.
+		return toResult(payment, wasExisting), fmt.Errorf("%w: %w", domain.ErrPaymentDeclined, pspErr)
 	}
 
-	// ── 9. PSP aprobó: capturar y publicar ───────────────────────────────────
+	// ── 10. PSP aprobó: capturar y publicar ──────────────────────────────────
 
 	pspFee := domain.ReconstituteMoney(captureResult.PSPFee, amount.Currency())
 
@@ -196,7 +237,7 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 		return ProcessPaymentResult{}, fmt.Errorf("persist capture: %w", err)
 	}
 
-	return toResult(payment, false), nil
+	return toResult(payment, wasExisting), nil
 }
 
 func toResult(p *domain.Payment, wasExisting bool) ProcessPaymentResult {

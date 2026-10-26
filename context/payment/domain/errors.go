@@ -10,6 +10,8 @@ var (
 	ErrInvalidCurrency      = errors.New("invalid currency code")
 	ErrInvalidMethod        = errors.New("invalid payment method")
 	ErrRiskRejected         = errors.New("payment rejected by risk evaluation")
+	ErrPaymentDeclined      = errors.New("payment declined by the payment provider")
+	ErrTenantNotActive      = errors.New("tenant is not enabled to process payments")
 	ErrAlreadyCaptured      = errors.New("payment is already captured")
 	ErrNotCaptured          = errors.New("payment is not captured; cannot refund")
 	ErrRefundExceedsAmount  = errors.New("refund amount exceeds original payment amount")

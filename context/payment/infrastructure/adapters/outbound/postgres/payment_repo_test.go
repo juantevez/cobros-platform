@@ -300,3 +300,56 @@ func TestNullStrDeref(t *testing.T) {
 		t.Error("deref mismatch")
 	}
 }
+
+func TestPaymentRepository_ClaimProcessing(t *testing.T) {
+	// El WHERE condicional (status=$4 = initiated) es lo que hace atómico el claim.
+	claimSQL := `UPDATE payments SET status=\$2, updated_at=\$3\s+WHERE id=\$1 AND status=\$4`
+
+	t.Run("claims when the payment is still initiated", func(t *testing.T) {
+		mock := newMock(t)
+		repo := NewPaymentRepository(mock)
+		p := newPayment(t, nil)
+		_ = p.MarkProcessing()
+
+		mock.ExpectExec(claimSQL).
+			WithArgs(p.ID().String(), "processing", p.UpdatedAt(), "initiated").
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		claimed, err := repo.ClaimProcessing(context.Background(), p)
+		if err != nil || !claimed {
+			t.Fatalf("claimed=%v err=%v, want true nil", claimed, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("not claimed when another execution already moved it", func(t *testing.T) {
+		mock := newMock(t)
+		repo := NewPaymentRepository(mock)
+		p := newPayment(t, nil)
+		_ = p.MarkProcessing()
+
+		mock.ExpectExec(claimSQL).
+			WithArgs(anyArgs(4)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		claimed, err := repo.ClaimProcessing(context.Background(), p)
+		if err != nil || claimed {
+			t.Fatalf("claimed=%v err=%v, want false nil", claimed, err)
+		}
+	})
+
+	t.Run("db error is wrapped", func(t *testing.T) {
+		mock := newMock(t)
+		repo := NewPaymentRepository(mock)
+		p := newPayment(t, nil)
+
+		mock.ExpectExec(claimSQL).WithArgs(anyArgs(4)...).WillReturnError(errBoom)
+
+		_, err := repo.ClaimProcessing(context.Background(), p)
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "claim processing") {
+			t.Fatalf("expected wrapped errBoom, got %v", err)
+		}
+	})
+}

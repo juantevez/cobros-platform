@@ -70,6 +70,7 @@ import (
 	payouttransfer "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/transfer/mock"
 	paymenthttp "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/inbound/http"
 	paymentpg "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/postgres"
+	paymenttenant "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/tenant"
 	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/fees"
 	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/psp"
 	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/risk"
@@ -237,11 +238,25 @@ func main() {
 	// Fallback: 300 bps (3%) si el tenant no tiene plan asignado.
 	feeCalculator := fees.NewBillingFeeCalculator(calculateFeeUC)
 
-	processPayment := paymentapp.NewProcessPaymentUseCase(paymentRepo, pspRouter, riskEvaluator, feeCalculator, txManager, paymentPub)
+	// Solo tenants activos (KYC aprobado, no suspendidos) pueden cobrar.
+	tenantGate    := paymenttenant.NewStatusGate(pool)
+
+	processPayment := paymentapp.NewProcessPaymentUseCase(paymentRepo, tenantGate, pspRouter, riskEvaluator, feeCalculator, txManager, paymentPub)
 	refundPayment  := paymentapp.NewRefundPaymentUseCase(paymentRepo, pspRouter, txManager, paymentPub)
 	getPayment     := paymentapp.NewGetPaymentUseCase(paymentRepo)
 
-	paymenthttp.RegisterRoutes(protected, paymenthttp.NewPaymentHandler(processPayment, refundPayment, getPayment))
+	// Payments acepta JWT (panel del comercio) o API key (integraciones
+	// server-to-server), por eso usa su propio grupo y no `protected`.
+	paymentsAPI := router.Group("/api/v1")
+	paymentsAPI.Use(authttp.JWTOrApiKeyMiddleware(jwtIssuer, apiKeyRepo, hasher))
+	paymenthttp.RegisterRoutes(paymentsAPI,
+		paymenthttp.NewPaymentHandler(processPayment, refundPayment, getPayment),
+		paymenthttp.RouteGuards{
+			Create: authttp.RequirePermission(authdomain.ActionCreatePayment, authdomain.ScopePaymentsWrite),
+			Read:   authttp.RequirePermission(authdomain.ActionReadPayments, authdomain.ScopePaymentsRead, authdomain.ScopePaymentsWrite),
+			Refund: authttp.RequirePermission(authdomain.ActionRefundPayment, authdomain.ScopePaymentsWrite),
+		},
+	)
 
 	// ── Payouts ───────────────────────────────────────────────────────────────
 

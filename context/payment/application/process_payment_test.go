@@ -12,6 +12,7 @@ import (
 
 type processDeps struct {
 	repo   *fakeRepo
+	gate   *fakeGate
 	psp    *fakePSP
 	router *fakeRouter
 	risk   *fakeRisk
@@ -24,6 +25,7 @@ func newProcessDeps() *processDeps {
 	psp := &fakePSP{captureResult: PSPCaptureResult{PSPReference: "PSP-REF-1", PSPFee: 150, Status: "approved"}}
 	return &processDeps{
 		repo:   &fakeRepo{},
+		gate:   &fakeGate{},
 		psp:    psp,
 		router: &fakeRouter{psp: psp},
 		risk:   &fakeRisk{decision: RiskDecision{Approved: true}},
@@ -34,7 +36,7 @@ func newProcessDeps() *processDeps {
 }
 
 func (d *processDeps) uc() *ProcessPaymentUseCase {
-	return NewProcessPaymentUseCase(d.repo, d.router, d.risk, d.fees, d.tx, d.pub)
+	return NewProcessPaymentUseCase(d.repo, d.gate, d.router, d.risk, d.fees, d.tx, d.pub)
 }
 
 func validProcessCmd() ProcessPaymentCmd {
@@ -162,7 +164,7 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		if res.Status != "captured" || res.PlatformFee != 300 || res.PSPReference != "PSP-REF-1" {
 			t.Errorf("existing payment not mapped: %+v", res)
 		}
-		if len(d.repo.saved) != 0 || d.risk.calls != 0 || len(d.psp.captures) != 0 || d.pub.calls != 0 {
+		if len(d.repo.saved) != 0 || d.gate.calls != 0 || d.risk.calls != 0 || len(d.psp.captures) != 0 || d.pub.calls != 0 {
 			t.Error("idempotent retry must not touch any dependency")
 		}
 	})
@@ -333,9 +335,13 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		d := newProcessDeps()
 		d.psp.captureErr = errors.New("card declined")
 
-		_, err := d.uc().Execute(ctx, validProcessCmd())
-		if !errors.Is(err, d.psp.captureErr) || !strings.Contains(err.Error(), "psp rejected") {
-			t.Fatalf("expected wrapped psp error, got %v", err)
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if !errors.Is(err, domain.ErrPaymentDeclined) || !errors.Is(err, d.psp.captureErr) {
+			t.Fatalf("expected ErrPaymentDeclined wrapping the psp error, got %v", err)
+		}
+		// El resultado acompaña al error: el handler lo usa para responder 402.
+		if res.Status != domain.StatusFailed.String() || res.PaymentID != d.repo.saved[0].ID().String() {
+			t.Errorf("declined result not returned: %+v", res)
 		}
 
 		p := d.repo.saved[0]
@@ -400,6 +406,134 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 		if len(d.psp.captures) != 1 {
 			t.Error("PSP capture happens before the tx")
+		}
+	})
+}
+
+// ── Habilitación del tenant ───────────────────────────────────────────────────
+
+func TestProcessPayment_TenantGate(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("inactive tenant cannot create payments", func(t *testing.T) {
+		d := newProcessDeps()
+		d.gate.err = domain.ErrTenantNotActive
+
+		_, err := d.uc().Execute(ctx, validProcessCmd())
+		if !errors.Is(err, domain.ErrTenantNotActive) {
+			t.Fatalf("expected ErrTenantNotActive, got %v", err)
+		}
+		if len(d.repo.saved) != 0 || d.risk.calls != 0 || len(d.psp.captures) != 0 {
+			t.Error("nothing should be persisted or processed for an inactive tenant")
+		}
+	})
+
+	t.Run("inactive tenant cannot resume a stuck payment", func(t *testing.T) {
+		d := newProcessDeps()
+		d.repo.byKey = buildPayment(tenantA, domain.StatusInitiated)
+		d.gate.err = domain.ErrTenantNotActive
+
+		_, err := d.uc().Execute(ctx, validProcessCmd())
+		if !errors.Is(err, domain.ErrTenantNotActive) {
+			t.Fatalf("expected ErrTenantNotActive, got %v", err)
+		}
+		if len(d.psp.captures) != 0 {
+			t.Error("PSP must not be called")
+		}
+	})
+}
+
+// ── Reanudación de pagos trabados en initiated ────────────────────────────────
+
+func TestProcessPayment_ResumesInitiatedPayment(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("retry processes a payment stuck in initiated", func(t *testing.T) {
+		d := newProcessDeps()
+		stuck := buildPayment(tenantA, domain.StatusInitiated)
+		d.repo.byKey = stuck
+
+		cmd := validProcessCmd()
+		cmd.Amount = 99_999 // un reintento con otro monto no altera el pago existente
+		res, err := d.uc().Execute(ctx, cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.PaymentID != stuck.ID().String() || res.Status != domain.StatusCaptured.String() || !res.WasExisting {
+			t.Errorf("expected the stuck payment captured as existing, got %+v", res)
+		}
+		if len(d.repo.saved) != 0 {
+			t.Error("a resumed payment must not be saved again")
+		}
+		if len(d.psp.captures) != 1 || d.psp.captures[0].Amount != 10_000 || d.psp.captures[0].PaymentID != stuck.ID().String() {
+			t.Errorf("PSP must be called once with the persisted payment: %+v", d.psp.captures)
+		}
+		wantUpdates := []domain.PaymentStatus{domain.StatusProcessing, domain.StatusCaptured}
+		if !reflect.DeepEqual(d.repo.updates, wantUpdates) {
+			t.Errorf("updates = %v, want %v", d.repo.updates, wantUpdates)
+		}
+		if got := d.pub.eventTypes(); !reflect.DeepEqual(got, []string{"payment.captured.v1"}) {
+			t.Errorf("events = %v", got)
+		}
+	})
+
+	t.Run("fee error leaves the payment initiated so a retry can resume it", func(t *testing.T) {
+		d := newProcessDeps()
+		d.fees.err = errBoom
+
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); !errors.Is(err, errBoom) {
+			t.Fatalf("expected errBoom, got %v", err)
+		}
+		stuck := d.repo.saved[0]
+		if stuck.Status() != domain.StatusInitiated {
+			t.Fatalf("status = %q, want initiated", stuck.Status())
+		}
+
+		// Billing se recupera y el cliente reintenta con la misma clave.
+		d.fees.err = nil
+		d.repo.byKey = stuck
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil {
+			t.Fatalf("retry: unexpected error: %v", err)
+		}
+		if res.Status != domain.StatusCaptured.String() || res.PaymentID != stuck.ID().String() {
+			t.Errorf("retry did not capture the stuck payment: %+v", res)
+		}
+	})
+
+	t.Run("lost claim does not call the PSP and reports current state", func(t *testing.T) {
+		d := newProcessDeps()
+		stuck := buildPayment(tenantA, domain.StatusInitiated)
+		d.repo.byKey = stuck
+		d.repo.claimLost = true
+		// Lo que ve FindByID: la otra ejecución ya lo pasó a processing.
+		current := buildPayment(tenantA, domain.StatusProcessing)
+		d.repo.byID = map[domain.PaymentID]*domain.Payment{stuck.ID(): current}
+
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(d.psp.captures) != 0 {
+			t.Error("PSP must not be called when another execution holds the claim")
+		}
+		if res.Status != domain.StatusProcessing.String() || !res.WasExisting {
+			t.Errorf("expected current processing state, got %+v", res)
+		}
+		if d.pub.calls != 0 {
+			t.Error("no events should be published")
+		}
+	})
+
+	t.Run("lost claim reload error is wrapped", func(t *testing.T) {
+		d := newProcessDeps()
+		d.repo.byKey = buildPayment(tenantA, domain.StatusInitiated)
+		d.repo.claimLost = true
+		d.repo.findErr = errBoom
+
+		_, err := d.uc().Execute(ctx, validProcessCmd())
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "reload claimed payment") {
+			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
 }

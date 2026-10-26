@@ -78,6 +78,24 @@ func (r *pgPaymentRepository) Update(ctx context.Context, p *domain.Payment) err
 	return nil
 }
 
+// ClaimProcessing pasa el pago a processing solo si sigue en initiated.
+// El UPDATE condicional es atómico: entre ejecuciones concurrentes del mismo
+// pago, solo una afecta la fila y llega al PSP.
+func (r *pgPaymentRepository) ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error) {
+	conn := postgres.ConnFromContext(ctx, r.pool)
+
+	tag, err := conn.Exec(ctx, `
+		UPDATE payments SET status=$2, updated_at=$3
+		WHERE id=$1 AND status=$4`,
+		p.ID().String(), domain.StatusProcessing.String(), p.UpdatedAt(),
+		domain.StatusInitiated.String(),
+	)
+	if err != nil {
+		return false, fmt.Errorf("payment repo: claim processing: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (r *pgPaymentRepository) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
 	conn := postgres.ConnFromContext(ctx, r.pool)
 	row := conn.QueryRow(ctx, baseSelect+" WHERE id=$1", id.String())

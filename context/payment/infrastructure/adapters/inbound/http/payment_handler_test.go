@@ -41,6 +41,9 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payment) error {
 	return nil
 }
 func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment) error { return nil }
+func (r *fakeRepo) ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error) {
+	return true, nil
+}
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
 	p, ok := r.byID[id]
 	if !ok {
@@ -78,6 +81,12 @@ func (r fakeRouter) Route(ctx context.Context, m domain.PaymentMethod, t domain.
 	return r.psp, nil
 }
 
+type fakeGate struct{ err error }
+
+func (g fakeGate) EnsureCanProcessPayments(ctx context.Context, t domain.TenantID) error {
+	return g.err
+}
+
 type fakeRisk struct{ approved bool }
 
 func (r fakeRisk) Evaluate(ctx context.Context, p *domain.Payment) (application.RiskDecision, error) {
@@ -103,6 +112,7 @@ func (fakePublisher) Publish(ctx context.Context, events ...domain.Event) error 
 type handlerOpts struct {
 	riskApproved bool
 	psp          fakePSP
+	gateErr      error
 }
 
 func defaultOpts() handlerOpts { return handlerOpts{riskApproved: true} }
@@ -110,7 +120,7 @@ func defaultOpts() handlerOpts { return handlerOpts{riskApproved: true} }
 func newHandler(r *fakeRepo, o handlerOpts) *PaymentHandler {
 	router := fakeRouter{o.psp}
 	return NewPaymentHandler(
-		application.NewProcessPaymentUseCase(r, router, fakeRisk{o.riskApproved}, fakeFees{}, fakeTx{}, fakePublisher{}),
+		application.NewProcessPaymentUseCase(r, fakeGate{o.gateErr}, router, fakeRisk{o.riskApproved}, fakeFees{}, fakeTx{}, fakePublisher{}),
 		application.NewRefundPaymentUseCase(r, router, fakeTx{}, fakePublisher{}),
 		application.NewGetPaymentUseCase(r),
 	)
@@ -251,15 +261,43 @@ func TestProcess(t *testing.T) {
 		}
 	})
 
-	t.Run("psp rejection returns 500 without leaking details", func(t *testing.T) {
+	t.Run("psp rejection returns 402 with payment id, without leaking details", func(t *testing.T) {
 		o := defaultOpts()
 		o.psp.captureErr = errors.New("card 4111 declined")
-		rec := doRequest(newHandler(newRepo(), o).Process, http.MethodPost, "/payments", validBody, tid, nil)
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500", rec.Code)
+		r := newRepo()
+		rec := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
+		if rec.Code != http.StatusPaymentRequired {
+			t.Fatalf("status = %d, want 402", rec.Code)
 		}
-		if got := errorBody(t, rec); got != "internal server error" {
-			t.Errorf("error = %q", got)
+		var body struct {
+			Error     string `json:"error"`
+			PaymentID string `json:"payment_id"`
+			Status    string `json:"status"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("invalid body: %v", err)
+		}
+		if body.Error != domain.ErrPaymentDeclined.Error() || strings.Contains(rec.Body.String(), "4111") {
+			t.Errorf("error = %q (body must not leak psp details)", body.Error)
+		}
+		if body.Status != "failed" || body.PaymentID != r.byKey["order-1"].ID().String() {
+			t.Errorf("unexpected decline body: %+v", body)
+		}
+	})
+
+	t.Run("inactive tenant returns 403", func(t *testing.T) {
+		o := defaultOpts()
+		o.gateErr = fmt.Errorf("%w: status %q", domain.ErrTenantNotActive, "suspended")
+		r := newRepo()
+		rec := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		if got := errorBody(t, rec); got != domain.ErrTenantNotActive.Error() {
+			t.Errorf("error = %q (status detail must not leak)", got)
+		}
+		if len(r.byID) != 0 {
+			t.Error("nothing should be saved")
 		}
 	})
 }
@@ -368,6 +406,8 @@ func TestRespondDomainError(t *testing.T) {
 		{domain.ErrInvalidAmount, http.StatusBadRequest},
 		{domain.ErrInvalidCurrency, http.StatusBadRequest},
 		{domain.ErrInvalidMethod, http.StatusBadRequest},
+		{domain.ErrTenantNotActive, http.StatusForbidden},
+		{domain.ErrPaymentDeclined, http.StatusPaymentRequired},
 		{fmt.Errorf("find payment: %w", domain.ErrPaymentNotFound), http.StatusNotFound},
 		{domain.ErrRefundExceedsAmount, http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},
@@ -394,9 +434,15 @@ func TestRespondDomainError(t *testing.T) {
 
 // ── RegisterRoutes ────────────────────────────────────────────────────────────
 
+func allowAll(c *gin.Context) { c.Next() }
+
+func allowGuards() RouteGuards {
+	return RouteGuards{Create: allowAll, Read: allowAll, Refund: allowAll}
+}
+
 func TestRegisterRoutes(t *testing.T) {
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()))
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()), allowGuards())
 
 	var got []string
 	for _, r := range engine.Routes() {
@@ -411,5 +457,61 @@ func TestRegisterRoutes(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("routes = %v, want %v", got, want)
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	for name, guards := range map[string]RouteGuards{
+		"no guards":      {},
+		"missing read":   {Create: allowAll, Refund: allowAll},
+		"missing refund": {Create: allowAll, Read: allowAll},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected panic")
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/api/v1"), newHandler(newRepo(), defaultOpts()), guards)
+		})
+	}
+}
+
+// Cada ruta pasa por su guard: si el guard rechaza, el handler no corre.
+func TestRegisterRoutes_GuardsApplyPerRoute(t *testing.T) {
+	deny := func(c *gin.Context) { c.AbortWithStatus(http.StatusForbidden) }
+	tid := uuid.NewString()
+	withTenant := func(c *gin.Context) {
+		c.Request = c.Request.WithContext(postgres.WithTenantID(c.Request.Context(), tid))
+		c.Next()
+	}
+
+	cases := []struct {
+		name   string
+		guards RouteGuards
+		method string
+		path   string
+	}{
+		{"create", RouteGuards{Create: deny, Read: allowAll, Refund: allowAll}, http.MethodPost, "/api/v1/payments"},
+		{"read", RouteGuards{Create: allowAll, Read: deny, Refund: allowAll}, http.MethodGet, "/api/v1/payments/" + uuid.NewString()},
+		{"refund", RouteGuards{Create: allowAll, Read: allowAll, Refund: deny}, http.MethodPost, "/api/v1/payments/" + uuid.NewString() + "/refund"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRepo()
+			engine := gin.New()
+			grp := engine.Group("/api/v1")
+			grp.Use(withTenant)
+			RegisterRoutes(grp, newHandler(r, defaultOpts()), tc.guards)
+
+			rec := httptest.NewRecorder()
+			engine.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, strings.NewReader(validBody)))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rec.Code)
+			}
+			if len(r.byID) != 0 {
+				t.Error("handler must not run when the guard rejects")
+			}
+		})
 	}
 }

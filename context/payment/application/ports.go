@@ -12,6 +12,11 @@ import (
 type PaymentRepository interface {
 	Save(ctx context.Context, p *domain.Payment) error
 	Update(ctx context.Context, p *domain.Payment) error
+	// ClaimProcessing persiste la transición initiated → processing solo si el
+	// pago sigue en initiated (UPDATE condicional). Retorna false si otra
+	// ejecución ya lo reclamó: así un mismo pago llega una sola vez al PSP
+	// aunque haya reintentos concurrentes.
+	ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error)
 	FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error)
 	FindByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, key string) (*domain.Payment, error)
 }
@@ -69,6 +74,14 @@ type PSPRefundResult struct {
 // y la configuración del tenant. En Fase 2 devuelve siempre el Mock.
 type PSPRouter interface {
 	Route(ctx context.Context, method domain.PaymentMethod, tenantID domain.TenantID) (PSPAdapter, error)
+}
+
+// ── Habilitación del tenant ───────────────────────────────────────────────────
+
+// TenantGate verifica que el comercio esté habilitado para cobrar
+// (KYC aprobado y no suspendido). Retorna domain.ErrTenantNotActive si no.
+type TenantGate interface {
+	EnsureCanProcessPayments(ctx context.Context, tenantID domain.TenantID) error
 }
 
 // ── Riesgo ────────────────────────────────────────────────────────────────────

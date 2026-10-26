@@ -16,7 +16,16 @@ type AccessTokenClaims struct {
 	TenantID    domain.TenantID
 	Role        domain.Role
 	Environment domain.Environment
+
+	// ApiKeyID y Scopes solo se completan cuando el request se autenticó con
+	// una API key (ApiKeyMiddleware); no viajan en el JWT. En ese caso no hay
+	// UserID ni Role: la autorización se hace por scopes.
+	ApiKeyID domain.ApiKeyID
+	Scopes   []domain.Scope
 }
+
+// IsApiKey indica si los claims provienen de una API key y no de un JWT.
+func (c AccessTokenClaims) IsApiKey() bool { return c.ApiKeyID != "" }
 
 // RefreshToken es un token de larga duración para renovar el access token.
 //

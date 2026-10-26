@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -216,5 +217,145 @@ func TestClaimsFromContext_Absent(t *testing.T) {
 	c, _ := newTestCtx()
 	if _, ok := ClaimsFromContext(c); ok {
 		t.Error("expected no claims in a fresh context")
+	}
+}
+
+// ── API key: claims de integración ────────────────────────────────────────────
+
+func TestApiKeyMiddleware_SetsIntegrationClaimsAndActor(t *testing.T) {
+	tenantID := domain.NewTenantID()
+	key := newApiKey(t, tenantID)
+	mw := ApiKeyMiddleware(newFakeApiKeyRepo(key), &fakeHasher{verifyResult: true})
+
+	var claims application.AccessTokenClaims
+	var actor string
+	r := gin.New()
+	r.Use(mw)
+	r.GET("/probe", func(c *gin.Context) {
+		claims, _ = ClaimsFromContext(c)
+		actor = postgres.ActorFromContext(c.Request.Context())
+		c.Status(http.StatusOK)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	req.Header.Set("X-Api-Key", "production_"+key.Prefix()+"_s3cr3t")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !claims.IsApiKey() || claims.ApiKeyID != key.ID() || claims.TenantID != tenantID {
+		t.Errorf("unexpected claims: %+v", claims)
+	}
+	if len(claims.Scopes) != 1 || claims.Scopes[0] != domain.ScopePaymentsRead {
+		t.Errorf("scopes = %v, want [payments:read]", claims.Scopes)
+	}
+	if actor != "apikey:"+key.ID().String() {
+		t.Errorf("actor = %q", actor)
+	}
+}
+
+// ── JWTOrApiKeyMiddleware ─────────────────────────────────────────────────────
+
+func TestJWTOrApiKeyMiddleware(t *testing.T) {
+	tenantID := domain.NewTenantID()
+	key := newApiKey(t, tenantID)
+	jwtClaims := application.AccessTokenClaims{
+		UserID: domain.NewUserID(), TenantID: domain.NewTenantID(),
+		Role: domain.RoleOperator, Environment: domain.EnvironmentProduction,
+	}
+	issuer := &fakeTokenIssuer{claimsByToken: map[string]application.AccessTokenClaims{"good": jwtClaims}}
+	mw := JWTOrApiKeyMiddleware(issuer, newFakeApiKeyRepo(key), &fakeHasher{verifyResult: true})
+
+	t.Run("api key header authenticates with the key", func(t *testing.T) {
+		rec, reached := runMW(mw, func(r *http.Request) {
+			r.Header.Set("X-Api-Key", "production_"+key.Prefix()+"_s3cr3t")
+		})
+		if rec.Code != http.StatusOK || !*reached {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), tenantID.String()) {
+			t.Errorf("tenant of the api key not set: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("bearer token authenticates with JWT", func(t *testing.T) {
+		rec, reached := runMW(mw, func(r *http.Request) { r.Header.Set("Authorization", "Bearer good") })
+		if rec.Code != http.StatusOK || !*reached {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), jwtClaims.TenantID.String()) {
+			t.Errorf("tenant of the JWT not set: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("no credentials aborts 401", func(t *testing.T) {
+		rec, reached := runMW(mw, nil)
+		if rec.Code != http.StatusUnauthorized || *reached {
+			t.Fatalf("expected 401, got %d reached=%v", rec.Code, *reached)
+		}
+	})
+
+	t.Run("invalid api key aborts 401 without falling back to JWT", func(t *testing.T) {
+		rec, reached := runMW(mw, func(r *http.Request) {
+			r.Header.Set("X-Api-Key", "garbage")
+			r.Header.Set("Authorization", "Bearer good")
+		})
+		if rec.Code != http.StatusUnauthorized || *reached {
+			t.Fatalf("expected 401, got %d reached=%v", rec.Code, *reached)
+		}
+	})
+}
+
+// ── RequirePermission ─────────────────────────────────────────────────────────
+
+func TestRequirePermission(t *testing.T) {
+	run := func(claims *application.AccessTokenClaims, mw gin.HandlerFunc) (int, bool) {
+		r := gin.New()
+		if claims != nil {
+			r.Use(func(c *gin.Context) { c.Set(claimsKey, *claims); c.Next() })
+		}
+		r.Use(mw)
+		reached := false
+		r.GET("/probe", func(c *gin.Context) { reached = true; c.Status(http.StatusOK) })
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/probe", nil))
+		return rec.Code, reached
+	}
+	user := func(role domain.Role) *application.AccessTokenClaims {
+		return &application.AccessTokenClaims{UserID: domain.NewUserID(), TenantID: domain.NewTenantID(), Role: role}
+	}
+	apiKey := func(scopes ...domain.Scope) *application.AccessTokenClaims {
+		return &application.AccessTokenClaims{TenantID: domain.NewTenantID(), ApiKeyID: domain.NewApiKeyID(), Scopes: scopes}
+	}
+	createPayment := RequirePermission(domain.ActionCreatePayment, domain.ScopePaymentsWrite)
+
+	cases := []struct {
+		name   string
+		claims *application.AccessTokenClaims
+		mw     gin.HandlerFunc
+		want   int
+	}{
+		{"no claims → 401", nil, createPayment, http.StatusUnauthorized},
+		{"operator can create payments", user(domain.RoleOperator), createPayment, http.StatusOK},
+		{"read_only cannot create payments", user(domain.RoleReadOnly), createPayment, http.StatusForbidden},
+		{"operator cannot refund", user(domain.RoleOperator), RequirePermission(domain.ActionRefundPayment, domain.ScopePaymentsWrite), http.StatusForbidden},
+		{"admin can refund", user(domain.RoleAdmin), RequirePermission(domain.ActionRefundPayment, domain.ScopePaymentsWrite), http.StatusOK},
+		{"key with write scope can create", apiKey(domain.ScopePaymentsWrite), createPayment, http.StatusOK},
+		{"key with read scope cannot create", apiKey(domain.ScopePaymentsRead), createPayment, http.StatusForbidden},
+		{"key accepted by any of the listed scopes", apiKey(domain.ScopePaymentsWrite),
+			RequirePermission(domain.ActionReadPayments, domain.ScopePaymentsRead, domain.ScopePaymentsWrite), http.StatusOK},
+		{"key rejected on user-only route", apiKey(domain.ScopePaymentsWrite), RequirePermission(domain.ActionManageUsers), http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, reached := run(tc.claims, tc.mw)
+			if code != tc.want {
+				t.Fatalf("status = %d, want %d", code, tc.want)
+			}
+			if reached != (tc.want == http.StatusOK) {
+				t.Errorf("handler reached = %v", reached)
+			}
+		})
 	}
 }

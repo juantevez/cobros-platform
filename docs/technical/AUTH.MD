@@ -77,7 +77,7 @@ sequenceDiagram
 | Mecanismo | Header | Dónde se usa |
 |---|---|---|
 | JWT | `Authorization: Bearer <jwt>` | Todas las rutas protegidas de todos los BCs (`protected` en `cmd/api`). |
-| API key | `X-Api-Key: <env>_<prefix>_<secret>` | Solo el grupo `/api/v1/integrations`, que **hoy está vacío**. |
+| API key | `X-Api-Key: <env>_<prefix>_<secret>` | Rutas montadas con `JWTOrApiKeyMiddleware`: hoy **`/api/v1/payments`**. El grupo `/api/v1/integrations` sigue vacío. |
 
 El `JWTMiddleware` **no consulta la base**: valida firma y expiración y confía en los claims. Por eso un cambio de rol o una suspensión recién se refleja cuando el usuario obtiene un token nuevo (hasta 15 minutos después).
 
@@ -131,10 +131,11 @@ Clave `(user_id, tenant_id)` con `role` y `assignedBy`. Define una matriz de per
 | `apikeys:manage` | ✅ | | | | |
 | `payments:create` | ✅ | ✅ | | | |
 | `payments:read` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `payments:refund` | ✅ | | | | |
 | `reports:read` | ✅ | | ✅ | ✅ | ✅ |
 | `webhooks:manage` | ✅ | | | | |
 
-> ⚠️ `HasPermission` **no se usa en ningún lado**. La autorización efectiva es solo `RequireRole(...)` en el router de Auth (§6). El resto de los BCs no aplica ningún control por rol.
+La matriz se consulta con `RoleHasPermission(role, action)`, que usa el middleware `RequirePermission` (§6.7). Hoy la aplican **Payments** (cobrar, consultar, reembolsar). Las rutas de Auth usan `RequireRole`, y Onboarding y Ledger usan `RequireRole(platform_support)` en sus escrituras. Los demás BCs todavía no aplican control por rol.
 
 ### 4.4 Agregado `ApiKey`
 
@@ -150,7 +151,7 @@ test_Xk3mPQrS_Xk3mPQrS7fGhJ9kLpQrStUvWxYzAb12
 - Se persiste `prefix` (único global) y `key_hash` = Argon2id(secret). La key completa **solo se devuelve al emitirla**.
 - Requiere `name` y al menos un `scope`.
 - `Revoke()` es definitivo (`ErrApiKeyAlreadyRevoked` si se repite).
-- `HasScope()` existe pero **no se usa** (no hay rutas que exijan scopes).
+- Los scopes se aplican vía `RequirePermission` (§6.7). Hoy los usan las rutas de Payments.
 
 ### 4.5 Refresh token (artefacto de aplicación)
 
@@ -296,6 +297,16 @@ Errores particulares:
 { "reason": "Contracargos por encima del umbral" }
 ```
 
+### 6.7 Middlewares para otros BCs
+
+| Middleware | Qué hace |
+|---|---|
+| `JWTMiddleware` | Bearer JWT → claims (`sub`, `tid`, `role`, `env`) + tenant y actor en el contexto. |
+| `ApiKeyMiddleware` | `X-Api-Key` → claims de integración (`TenantID`, `Environment`, `ApiKeyID`, `Scopes`; sin `UserID` ni `Role`) + tenant y actor `apikey:<id>`. Sin header, deja pasar. |
+| `JWTOrApiKeyMiddleware` | Si viene `X-Api-Key` autentica con la key (una key inválida da 401, sin caer al JWT). Si no, con el JWT. |
+| `RequireRole(roles…)` | El rol del JWT debe estar en la lista. |
+| `RequirePermission(acción, scopes…)` | JWT: `RoleHasPermission(rol, acción)`. API key: tener al menos uno de los scopes; sin scopes, la ruta es solo para usuarios. |
+
 ---
 
 ## 7. Eventos de dominio
@@ -420,8 +431,8 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 | 2 | ~~Escalada a `platform_support`~~ ✅ **Resuelto** | `RegisterUser` y `AssignRole` rechazan `platform_support` con `ErrRoleNotAssignable` (403). Contrapartida: no hay forma de crear usuarios `platform_support` por API; se provisionan por fuera, igual que el primer usuario (#3). | — |
 | 3 | No hay alta del primer usuario | `POST /tenants` es público pero no crea usuario, y `POST /tenants/:id/users` requiere un JWT admin de ese tenant. Un comercio recién registrado no puede loguearse. No hay seed ni bootstrap en el repo. | **Alto (funcional)** |
 | 4 | Suspensión sin efecto operativo | El JWT no consulta el estado del tenant (vale hasta 15 min), `ApiKeyMiddleware` tampoco, y ningún BC reacciona a `auth.tenant.suspended.v1`. | Alto |
-| 5 | API keys sin uso real | `ApiKeyMiddleware` solo protege `/integrations`, que está vacío. No verifica que el `<env>` de la key coincida con el guardado, ni los scopes (`HasScope` no se usa), ni el estado del tenant. | Medio |
-| 6 | RBAC parcial | `HasPermission` no se usa. Fuera de Auth no hay control de rol: un `read_only` puede ejecutar cualquier endpoint de negocio. | Alto |
+| 5 | API keys — uso parcial | Ya se usan en Payments, con scopes vía `RequirePermission`. Pendiente: `ApiKeyMiddleware` no verifica que el `<env>` de la key coincida con el guardado, ni el estado del tenant (Payments lo cubre con su `TenantGate`). | Medio |
+| 6 | RBAC parcial | `RequirePermission` aplica la matriz en Payments; Onboarding y Ledger exigen `platform_support` en sus escrituras. El resto de los BCs de negocio todavía no aplica control por rol. | Medio |
 | 7 | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Combinado con el consumer de onboarding (§7.2), una activación manual previa en `test` bloquea el pase a producción. | Medio |
 | 8 | Errores no tipados → 500 | Scope inválido, key `production` en tenant `test`, `suspension reason is required`, `api key name is required`. | Bajo |
 | 9 | Enumeración en login | Tenant o usuario suspendido devuelven 403 antes de verificar la contraseña. Un email inexistente responde más rápido, porque no corre Argon2 (timing). | Bajo |

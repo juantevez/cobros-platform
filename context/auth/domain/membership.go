@@ -61,7 +61,14 @@ func (m *Membership) UpdateRole(newRole Role, assignedBy UserID) {
 // capacidades sobre un recurso dado. En Fase 1 usa lógica simple por rol;
 // en Fase 2 puede evolucionar a permisos granulares.
 func (m *Membership) HasPermission(action Action) bool {
-	return rolePermissions[m.role].contains(action)
+	return RoleHasPermission(m.role, action)
+}
+
+// RoleHasPermission indica si el rol puede ejecutar la acción.
+// Lo usa el middleware HTTP para autorizar con el rol del JWT sin cargar la
+// Membership (el rol ya viaja en los claims).
+func RoleHasPermission(role Role, action Action) bool {
+	return rolePermissions[role].contains(action)
 }
 
 // ── Getters ───────────────────────────────────────────────────────────────────
@@ -83,6 +90,7 @@ const (
 	ActionManageApiKeys  Action = "apikeys:manage"
 	ActionCreatePayment  Action = "payments:create"
 	ActionReadPayments   Action = "payments:read"
+	ActionRefundPayment  Action = "payments:refund" // devuelve dinero: solo admin
 	ActionReadReports    Action = "reports:read"
 	ActionManageWebhooks Action = "webhooks:manage"
 )
@@ -106,6 +114,7 @@ var rolePermissions = map[Role]permissionSet{
 		ActionManageApiKeys,
 		ActionCreatePayment,
 		ActionReadPayments,
+		ActionRefundPayment,
 		ActionReadReports,
 		ActionManageWebhooks,
 	},

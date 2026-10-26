@@ -119,17 +119,76 @@ func ApiKeyMiddleware(
 			return
 		}
 
-		// Poblar contexto con el tenant de la API key.
+		// Poblar contexto con el tenant de la API key. El actor identifica la
+		// key para auditoría (no hay usuario detrás).
 		ctx := postgres.WithTenantID(c.Request.Context(), apiKey.TenantID().String())
+		ctx = postgres.WithActor(ctx, "apikey:"+apiKey.ID().String())
 		c.Request = c.Request.WithContext(ctx)
 
-		// Guardar claims parciales (sin userID, sin role: es una integración).
+		// Claims de integración: sin userID ni role; se autoriza por scopes.
 		c.Set(claimsKey, application.AccessTokenClaims{
 			TenantID:    apiKey.TenantID(),
 			Environment: apiKey.Environment(),
+			ApiKeyID:    apiKey.ID(),
+			Scopes:      apiKey.Scopes(),
 		})
 
 		c.Next()
+	}
+}
+
+// JWTOrApiKeyMiddleware autentica con X-Api-Key si el header está presente y,
+// si no, con el Bearer JWT. Es para rutas que usan tanto el panel del comercio
+// (JWT) como sus integraciones server-to-server (API key), por ejemplo cobrar.
+// Combinarlo con RequirePermission para autorizar ambos casos.
+func JWTOrApiKeyMiddleware(
+	tokenIssuer application.TokenIssuer,
+	apiKeyRepo application.ApiKeyRepository,
+	hasher application.PasswordHasher,
+) gin.HandlerFunc {
+	apiKeyMW := ApiKeyMiddleware(apiKeyRepo, hasher)
+	jwtMW := JWTMiddleware(tokenIssuer)
+	return func(c *gin.Context) {
+		if c.GetHeader("X-Api-Key") != "" {
+			apiKeyMW(c)
+			return
+		}
+		jwtMW(c)
+	}
+}
+
+// RequirePermission autoriza según cómo se autenticó el request:
+//   - JWT: el rol debe tener la acción en la matriz de permisos del dominio.
+//   - API key: la key debe tener al menos uno de los scopes indicados.
+//
+// Sin scopes, las API keys no pasan (la ruta es solo para usuarios).
+func RequirePermission(action domain.Action, scopes ...domain.Scope) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		claims, ok := ClaimsFromContext(c)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
+				Error: "authentication required",
+			})
+			return
+		}
+
+		if claims.IsApiKey() {
+			for _, required := range scopes {
+				for _, granted := range claims.Scopes {
+					if granted == required {
+						c.Next()
+						return
+					}
+				}
+			}
+		} else if domain.RoleHasPermission(claims.Role, action) {
+			c.Next()
+			return
+		}
+
+		c.AbortWithStatusJSON(http.StatusForbidden, ErrorResponse{
+			Error: "insufficient permissions",
+		})
 	}
 }
 

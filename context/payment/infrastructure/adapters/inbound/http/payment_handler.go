@@ -68,6 +68,16 @@ func (h *PaymentHandler) Process(c *gin.Context) {
 		PayerDocNum:    req.PayerDocNum,
 		Metadata:       req.Metadata,
 	})
+	if errors.Is(err, domain.ErrPaymentDeclined) {
+		// El pago existe y quedó failed: se informa su id y estado para que el
+		// cliente pueda consultarlo. El detalle del PSP no se expone.
+		c.JSON(http.StatusPaymentRequired, gin.H{
+			"error":      domain.ErrPaymentDeclined.Error(),
+			"payment_id": result.PaymentID,
+			"status":     result.Status,
+		})
+		return
+	}
 	if err != nil {
 		respondDomainError(c, err)
 		return
@@ -126,6 +136,11 @@ func respondDomainError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrPaymentAlreadyExists):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrTenantNotActive):
+		// Mensaje fijo: el detalle (pending/suspended) no se expone al caller.
+		c.JSON(http.StatusForbidden, gin.H{"error": domain.ErrTenantNotActive.Error()})
+	case errors.Is(err, domain.ErrPaymentDeclined):
+		c.JSON(http.StatusPaymentRequired, gin.H{"error": domain.ErrPaymentDeclined.Error()})
 	case errors.Is(err, domain.ErrRiskRejected):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrNotCaptured),
@@ -141,12 +156,26 @@ func respondDomainError(c *gin.Context, err error) {
 	}
 }
 
-// RegisterRoutes registra las rutas de Payment en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, handler *PaymentHandler) {
+// RouteGuards autoriza cada operación. Se inyectan desde el composition root
+// para no acoplar este contexto con Auth; en producción son
+// RequirePermission(acción del rol, scopes de API key).
+type RouteGuards struct {
+	Create gin.HandlerFunc // cobrar
+	Read   gin.HandlerFunc // consultar
+	Refund gin.HandlerFunc // reembolsar (devuelve dinero)
+}
+
+// RegisterRoutes registra las rutas de Payment. El grupo debe autenticar
+// (JWT o API key) y poblar el tenant en el contexto; los guards autorizan.
+func RegisterRoutes(rg *gin.RouterGroup, handler *PaymentHandler, guards RouteGuards) {
+	if guards.Create == nil || guards.Read == nil || guards.Refund == nil {
+		panic("payment: RegisterRoutes requires Create, Read and Refund guards")
+	}
+
 	payments := rg.Group("/payments")
 	{
-		payments.POST("", handler.Process)
-		payments.GET("/:paymentID", handler.Get)
-		payments.POST("/:paymentID/refund", handler.Refund)
+		payments.POST("", guards.Create, handler.Process)
+		payments.GET("/:paymentID", guards.Read, handler.Get)
+		payments.POST("/:paymentID/refund", guards.Refund, handler.Refund)
 	}
 }

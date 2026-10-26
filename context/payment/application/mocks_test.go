@@ -29,6 +29,8 @@ type fakeRepo struct {
 	updateErrAt int // si > 0, sólo falla el Update número N (1-based)
 	findErr     error
 	findKeyErr  error
+	// claimLost simula que otra ejecución ya reclamó el pago (ClaimProcessing → false).
+	claimLost bool
 
 	// capturados para aserciones
 	keyLookups    int
@@ -50,6 +52,16 @@ func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment) error {
 		return r.updateErr
 	}
 	return nil
+}
+
+// ClaimProcessing registra la transición como un Update más, para que las
+// aserciones sobre la secuencia de estados sigan valiendo.
+func (r *fakeRepo) ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error) {
+	r.updates = append(r.updates, p.Status())
+	if r.updateErr != nil && (r.updateErrAt == 0 || r.updateErrAt == len(r.updates)) {
+		return false, r.updateErr
+	}
+	return !r.claimLost, nil
 }
 
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
@@ -121,6 +133,17 @@ func (r *fakeRouter) Route(ctx context.Context, method domain.PaymentMethod, ten
 		return nil, r.err
 	}
 	return r.psp, nil
+}
+
+// fakeGate habilita o rechaza al tenant.
+type fakeGate struct {
+	err   error
+	calls int
+}
+
+func (g *fakeGate) EnsureCanProcessPayments(ctx context.Context, tenantID domain.TenantID) error {
+	g.calls++
+	return g.err
 }
 
 // fakeRisk devuelve una decisión fija o un error.

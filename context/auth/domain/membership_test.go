@@ -62,10 +62,12 @@ func TestMembershipHasPermission(t *testing.T) {
 		{RoleAdmin, ActionManageUsers, true},
 		{RoleAdmin, ActionManageApiKeys, true},
 		{RoleAdmin, ActionManageWebhooks, true},
+		{RoleAdmin, ActionRefundPayment, true},
 		// operator: crear/leer pagos, nada de gestión
 		{RoleOperator, ActionCreatePayment, true},
 		{RoleOperator, ActionReadPayments, true},
 		{RoleOperator, ActionManageUsers, false},
+		{RoleOperator, ActionRefundPayment, false},
 		{RoleOperator, ActionReadReports, false},
 		// accountant: solo lectura de pagos y reportes
 		{RoleAccountant, ActionReadReports, true},
@@ -85,6 +87,18 @@ func TestMembershipHasPermission(t *testing.T) {
 		if got := m.HasPermission(tt.action); got != tt.want {
 			t.Errorf("role %q action %q: got %v, want %v", tt.role, tt.action, got, tt.want)
 		}
+	}
+}
+
+// Reembolsar devuelve dinero: solo admin, ningún otro rol.
+func TestRefundIsAdminOnly(t *testing.T) {
+	for _, r := range []Role{RoleOperator, RoleAccountant, RoleReadOnly, RolePlatformSupport} {
+		if RoleHasPermission(r, ActionRefundPayment) {
+			t.Errorf("role %q must not refund payments", r)
+		}
+	}
+	if !RoleHasPermission(RoleAdmin, ActionRefundPayment) {
+		t.Error("admin must be able to refund payments")
 	}
 }
 
