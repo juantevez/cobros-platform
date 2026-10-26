@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/juantevez/cobros-platform/context/ledger/domain"
 )
 
 func TestPostEntry_Success(t *testing.T) {
@@ -12,7 +14,7 @@ func TestPostEntry_Success(t *testing.T) {
 	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
 		"idempotency_key": "pay-123",
 		"description":     "pago",
-		"lines":           balancedLines(),
+		"lines":           env.balancedLines(),
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -32,7 +34,7 @@ func TestPostEntry_Idempotent200(t *testing.T) {
 
 	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
 		"idempotency_key": "pay-123",
-		"lines":           balancedLines(),
+		"lines":           env.balancedLines(),
 	})
 	// Idempotente: 200 (no 201) y was_existing=true.
 	if rec.Code != http.StatusOK {
@@ -63,10 +65,7 @@ func TestPostEntry_Unbalanced422(t *testing.T) {
 	env := newTestEnv(t)
 	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
 		"idempotency_key": "k",
-		"lines": []map[string]any{
-			{"account_id": uuid.NewString(), "direction": "debit", "amount": 100, "currency": "ARS"},
-			{"account_id": uuid.NewString(), "direction": "credit", "amount": 50, "currency": "ARS"},
-		},
+		"lines":           env.lines(100, 50),
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", rec.Code)
@@ -94,5 +93,59 @@ func TestReverseEntry_NotFound(t *testing.T) {
 	rec := env.do(http.MethodPost, "/api/v1/ledger/entries/"+uuid.NewString()+"/reverse", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// ── Autorización y aislamiento ────────────────────────────────────────────────
+
+// Sin autorización (platform_support en producción) no se puede postear: un
+// comercio podría acreditar su propio merchant_balance y retirarlo vía payout.
+func TestPostEntry_GuardRejects(t *testing.T) {
+	env := newTestEnvWithGuard(t, denyWrites)
+	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
+		"idempotency_key": "k",
+		"lines":           env.balancedLines(),
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if len(env.entries.byID) != 0 || len(env.pub.published) != 0 {
+		t.Error("entry must not be posted when the guard rejects")
+	}
+}
+
+func TestReverseEntry_GuardRejects(t *testing.T) {
+	env := newTestEnvWithGuard(t, denyWrites)
+	original := buildEntry(t, env.tenantID, "orig-key")
+	env.entries.byID[original.ID()] = original
+
+	rec := env.do(http.MethodPost, "/api/v1/ledger/entries/"+original.ID().String()+"/reverse", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestPostEntry_AccountOfAnotherTenant404(t *testing.T) {
+	env := newTestEnv(t)
+	foreign := newTestAccount(t, domain.TenantID(uuid.NewString()), domain.AccountTypeMerchantBalance, "ARS")
+	env.accounts.byID[foreign.ID()] = foreign
+
+	lines := env.balancedLines()
+	lines[1]["account_id"] = foreign.ID().String()
+	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{"idempotency_key": "k", "lines": lines})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestPostEntry_CurrencyDifferentFromAccount422(t *testing.T) {
+	env := newTestEnv(t)
+	lines := env.balancedLines()
+	for _, l := range lines {
+		l["currency"] = "USD" // las cuentas del tenant son ARS
+	}
+	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{"idempotency_key": "k", "lines": lines})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
 	}
 }

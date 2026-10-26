@@ -24,7 +24,7 @@ func TestDispute_Opened(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypeDisputeHold, "ARS")
 
-	postEntry, entryRepo, _ := newPostEntry()
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewDisputeConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	if err := consumer.handle(context.Background(), disputeMsg("dispute.opened.v1", tenantID.String(), validUUID(), "", 5000)); err != nil {
@@ -41,7 +41,7 @@ func TestDispute_ResolvedWon(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypeDisputeHold, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
 
-	postEntry, entryRepo, _ := newPostEntry()
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewDisputeConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	if err := consumer.handle(context.Background(), disputeMsg("dispute.resolved.v1", tenantID.String(), validUUID(), "won", 5000)); err != nil {
@@ -58,7 +58,7 @@ func TestDispute_ResolvedLost(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypeDisputeHold, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypePlatformFees, "ARS")
 
-	postEntry, entryRepo, _ := newPostEntry()
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewDisputeConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	// outcome lost → contrapartida en platform_fees.
@@ -94,7 +94,7 @@ func TestDispute_ResolvedWon_MissingMerchantAccount(t *testing.T) {
 	tenantID := testTenantID(t)
 	accountRepo := newFakeAccountRepo()
 	accountRepo.seed(t, tenantID, domain.AccountTypeDisputeHold, "ARS") // falta merchant_balance
-	postEntry, _, _ := newPostEntry()
+	postEntry, _, _ := newPostEntry(accountRepo)
 	consumer := NewDisputeConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	if err := consumer.handle(context.Background(), disputeMsg("dispute.resolved.v1", tenantID.String(), validUUID(), "won", 100)); err == nil {

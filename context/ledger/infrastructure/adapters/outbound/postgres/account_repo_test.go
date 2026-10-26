@@ -79,10 +79,11 @@ func TestAccountRepo_DuplicateTypeCurrency(t *testing.T) {
 	tenantID := testTenantID(t)
 	seedAccount(t, pool, tenantID, domain.AccountTypeMerchantBalance, "ARS")
 
-	// El índice único (tenant, type, currency) rechaza el duplicado.
+	// El índice único (tenant, type, currency) rechaza el duplicado, y el repo
+	// lo traduce a ErrAccountAlreadyExists (CreateAccount lo usa para ser idempotente).
 	dup, _ := domain.NewAccount(domain.NewAccountID(), tenantID, domain.AccountTypeMerchantBalance, "ARS", "otra")
 	dup.PullEvents()
-	if err := repo.Save(ctx, dup); err == nil {
-		t.Fatal("expected unique-violation error for duplicate (tenant, type, currency)")
+	if err := repo.Save(ctx, dup); !errors.Is(err, domain.ErrAccountAlreadyExists) {
+		t.Fatalf("expected ErrAccountAlreadyExists, got %v", err)
 	}
 }

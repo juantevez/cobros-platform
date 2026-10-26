@@ -56,7 +56,11 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		return
 	}
 
-	respondJSON(c, http.StatusCreated, createAccountResponse{AccountID: result.AccountID})
+	status := http.StatusCreated
+	if result.WasExisting {
+		status = http.StatusOK // idempotente: la cuenta ya existía
+	}
+	respondJSON(c, status, createAccountResponse{AccountID: result.AccountID})
 }
 
 // ── Balance ───────────────────────────────────────────────────────────────────

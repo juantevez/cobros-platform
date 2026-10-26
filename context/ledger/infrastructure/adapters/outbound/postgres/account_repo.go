@@ -7,11 +7,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
+
+const pgErrUniqueViolation = "23505"
 
 type pgAccountRepository struct {
 	pool *pgxpool.Pool
@@ -34,6 +37,12 @@ func (r *pgAccountRepository) Save(ctx context.Context, a *domain.Account) error
 		a.CreatedAt(),
 	)
 	if err != nil {
+		// UNIQUE (tenant_id, type, currency): el caso de uso lo trata como
+		// "ya existe" para que la creación sea idempotente ante carreras.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUniqueViolation {
+			return domain.ErrAccountAlreadyExists
+		}
 		return fmt.Errorf("account repo: save: %w", err)
 	}
 

@@ -24,7 +24,7 @@ func TestPayout_Initiated(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypePayoutTransit, "ARS")
 
-	postEntry, entryRepo, _ := newPostEntry()
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewPayoutConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	if err := consumer.handle(context.Background(), payoutMsg("payout.initiated.v1", tenantID.String(), validUUID(), 9700)); err != nil {
@@ -41,7 +41,7 @@ func TestPayout_Confirmed(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypePayoutTransit, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypePayoutSent, "ARS")
 
-	postEntry, entryRepo, _ := newPostEntry()
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewPayoutConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	if err := consumer.handle(context.Background(), payoutMsg("payout.confirmed.v1", tenantID.String(), validUUID(), 9700)); err != nil {
@@ -58,7 +58,7 @@ func TestPayout_Failed(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypePayoutTransit, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
 
-	postEntry, entryRepo, _ := newPostEntry()
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewPayoutConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	if err := consumer.handle(context.Background(), payoutMsg("payout.failed.v1", tenantID.String(), validUUID(), 9700)); err != nil {
@@ -96,7 +96,7 @@ func TestPayout_SecondAccountMissing(t *testing.T) {
 	t.Run("confirmed without payout_sent", func(t *testing.T) {
 		accountRepo := newFakeAccountRepo()
 		accountRepo.seed(t, tenantID, domain.AccountTypePayoutTransit, "ARS") // falta payout_sent
-		postEntry, _, _ := newPostEntry()
+		postEntry, _, _ := newPostEntry(accountRepo)
 		consumer := NewPayoutConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 		if err := consumer.handle(context.Background(), payoutMsg("payout.confirmed.v1", tenantID.String(), validUUID(), 100)); err == nil {
 			t.Fatal("expected error when payout_sent is missing")
@@ -106,7 +106,7 @@ func TestPayout_SecondAccountMissing(t *testing.T) {
 	t.Run("failed without merchant_balance", func(t *testing.T) {
 		accountRepo := newFakeAccountRepo()
 		accountRepo.seed(t, tenantID, domain.AccountTypePayoutTransit, "ARS") // falta merchant_balance
-		postEntry, _, _ := newPostEntry()
+		postEntry, _, _ := newPostEntry(accountRepo)
 		consumer := NewPayoutConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 		if err := consumer.handle(context.Background(), payoutMsg("payout.failed.v1", tenantID.String(), validUUID(), 100)); err == nil {
 			t.Fatal("expected error when merchant_balance is missing")

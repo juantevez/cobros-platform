@@ -64,6 +64,11 @@ func (r *fakeAccountRepo) Save(ctx context.Context, a *domain.Account) error {
 	return nil
 }
 func (r *fakeAccountRepo) FindByID(ctx context.Context, id domain.AccountID) (*domain.Account, error) {
+	for _, a := range r.byType {
+		if a.ID() == id {
+			return a, nil
+		}
+	}
 	return nil, domain.ErrAccountNotFound
 }
 func (r *fakeAccountRepo) FindByTenantAndType(ctx context.Context, tid domain.TenantID, at domain.AccountType, cur string) (*domain.Account, error) {
@@ -130,10 +135,18 @@ func testTenantID(t *testing.T) domain.TenantID {
 
 // newPostEntry arma un PostEntryUseCase real con fakes y devuelve el entryRepo
 // y el publisher para inspeccionar el resultado.
-func newPostEntry() (*application.PostEntryUseCase, *fakeEntryRepo, *fakePublisher) {
+//
+// PostEntry valida que las cuentas existan y sean del tenant, así que recibe el
+// mismo accountRepo que usa el consumer. Sin él usa un repo vacío (para tests
+// que fallan antes de postear).
+func newPostEntry(accountRepo ...*fakeAccountRepo) (*application.PostEntryUseCase, *fakeEntryRepo, *fakePublisher) {
+	accounts := newFakeAccountRepo()
+	if len(accountRepo) > 0 {
+		accounts = accountRepo[0]
+	}
 	entryRepo := newFakeEntryRepo()
 	pub := &fakePublisher{}
-	uc := application.NewPostEntryUseCase(entryRepo, fakeBalanceRepo{}, fakeTx{}, pub, fakeClock{})
+	uc := application.NewPostEntryUseCase(entryRepo, accounts, fakeBalanceRepo{}, fakeTx{}, pub, fakeClock{})
 	return uc, entryRepo, pub
 }
 

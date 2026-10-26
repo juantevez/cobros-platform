@@ -36,6 +36,16 @@ func TestNewAccount(t *testing.T) {
 		}
 	})
 
+	t.Run("currency is normalized to uppercase", func(t *testing.T) {
+		acc, err := NewAccount(NewAccountID(), NewTenantID_forTest(t), AccountTypeReserve, " ars ", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if acc.Currency() != "ARS" {
+			t.Errorf("currency = %q, want ARS", acc.Currency())
+		}
+	})
+
 	t.Run("invalid currency rejected", func(t *testing.T) {
 		_, err := NewAccount(NewAccountID(), NewTenantID_forTest(t), AccountTypeReserve, "XX", "bad")
 		if !errors.Is(err, ErrInvalidCurrency) {

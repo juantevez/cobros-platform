@@ -56,6 +56,11 @@ func (r *fakeAccountRepo) FindByID(ctx context.Context, id domain.AccountID) (*d
 	return a, nil
 }
 func (r *fakeAccountRepo) FindByTenantAndType(ctx context.Context, tid domain.TenantID, at domain.AccountType, cur string) (*domain.Account, error) {
+	for _, a := range r.byID {
+		if a.TenantID() == tid && a.AccountType() == at && a.Currency() == cur {
+			return a, nil
+		}
+	}
 	return nil, domain.ErrAccountNotFound
 }
 
@@ -124,9 +129,25 @@ type testEnv struct {
 	pub      *fakePublisher
 	engine   *gin.Engine
 	tenantID domain.TenantID
+	// debit y credit son cuentas ARS del tenant, para asientos válidos.
+	debit  *domain.Account
+	credit *domain.Account
+}
+
+// allowWrites es el writeGuard por defecto en los tests: deja pasar.
+func allowWrites(c *gin.Context) { c.Next() }
+
+// denyWrites simula RequireRole(platform_support) rechazando al caller.
+func denyWrites(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusForbidden, ErrorResponse{Error: "insufficient permissions"})
 }
 
 func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	return newTestEnvWithGuard(t, allowWrites)
+}
+
+func newTestEnvWithGuard(t *testing.T, writeGuard gin.HandlerFunc) *testEnv {
 	t.Helper()
 	accounts := newFakeAccountRepo()
 	entries := newFakeEntryRepo()
@@ -137,13 +158,17 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	createAccount := application.NewCreateAccountUseCase(accounts, tx, pub)
 	getBalance := application.NewGetBalanceUseCase(accounts, balances)
-	postEntry := application.NewPostEntryUseCase(entries, balances, tx, pub, clock)
+	postEntry := application.NewPostEntryUseCase(entries, accounts, balances, tx, pub, clock)
 	reverseEntry := application.NewReverseEntryUseCase(entries, balances, tx, pub)
 
 	tenantID, err := domain.ParseTenantID(uuid.NewString())
 	if err != nil {
 		t.Fatalf("tenant id: %v", err)
 	}
+	debit := newTestAccount(t, tenantID, domain.AccountTypeInTransit, "ARS")
+	credit := newTestAccount(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
+	accounts.byID[debit.ID()] = debit
+	accounts.byID[credit.ID()] = credit
 
 	r := gin.New()
 	grp := r.Group("/api/v1")
@@ -152,11 +177,12 @@ func newTestEnv(t *testing.T) *testEnv {
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
 	})
-	RegisterRoutes(grp, NewAccountHandler(createAccount, getBalance), NewEntryHandler(postEntry, reverseEntry))
+	RegisterRoutes(grp, NewAccountHandler(createAccount, getBalance), NewEntryHandler(postEntry, reverseEntry), writeGuard)
 
 	return &testEnv{
 		accounts: accounts, entries: entries, balances: balances,
 		pub: pub, engine: r, tenantID: tenantID,
+		debit: debit, credit: credit,
 	}
 }
 
@@ -203,10 +229,23 @@ func buildEntry(t *testing.T, tenantID domain.TenantID, key string) *domain.Jour
 	return e
 }
 
-// balancedLines retorna 2 líneas de request balanceadas.
-func balancedLines() []map[string]any {
+func newTestAccount(t *testing.T, tenantID domain.TenantID, at domain.AccountType, currency string) *domain.Account {
+	t.Helper()
+	acc, err := domain.NewAccount(domain.NewAccountID(), tenantID, at, currency, "")
+	if err != nil {
+		t.Fatalf("build account: %v", err)
+	}
+	acc.PullEvents()
+	return acc
+}
+
+// lines retorna un débito y un crédito ARS sobre las cuentas del tenant.
+func (e *testEnv) lines(debitAmount, creditAmount int64) []map[string]any {
 	return []map[string]any{
-		{"account_id": uuid.NewString(), "direction": "debit", "amount": 100, "currency": "ARS"},
-		{"account_id": uuid.NewString(), "direction": "credit", "amount": 100, "currency": "ARS"},
+		{"account_id": e.debit.ID().String(), "direction": "debit", "amount": debitAmount, "currency": "ARS"},
+		{"account_id": e.credit.ID().String(), "direction": "credit", "amount": creditAmount, "currency": "ARS"},
 	}
 }
+
+// balancedLines retorna 2 líneas de request balanceadas.
+func (e *testEnv) balancedLines() []map[string]any { return e.lines(100, 100) }

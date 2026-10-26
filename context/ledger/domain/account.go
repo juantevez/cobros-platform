@@ -24,10 +24,14 @@ type Account struct {
 // NewAccount crea una nueva cuenta contable.
 // Emite AccountCreatedEvent.
 func NewAccount(id AccountID, tenantID TenantID, accountType AccountType, currency string, description string) (*Account, error) {
-	// Validar currency reutilizando Money
-	if _, err := NewMoney(0, currency); err != nil {
+	// Validar y normalizar currency reutilizando Money: la cuenta debe guardar el
+	// mismo código que los postings ("ars" → "ARS") para que coincidan en las
+	// búsquedas por (tenant, tipo, moneda) y en la validación de PostEntry.
+	money, err := NewMoney(0, currency)
+	if err != nil {
 		return nil, err
 	}
+	currency = money.Currency()
 
 	a := &Account{
 		id:          id,

@@ -27,6 +27,7 @@ func respondDomainError(c *gin.Context, err error) {
 
 	case errors.Is(err, domain.ErrEntryNotBalanced),
 		errors.Is(err, domain.ErrCurrencyMismatch),
+		errors.Is(err, domain.ErrAccountCurrencyMismatch),
 		errors.Is(err, domain.ErrNotEnoughPostings),
 		errors.Is(err, domain.ErrZeroAmount),
 		errors.Is(err, domain.ErrInvalidDirection),
@@ -35,7 +36,8 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrNegativeAmount):
 		respondError(c, http.StatusUnprocessableEntity, err.Error())
 
-	case errors.Is(err, domain.ErrEntryAlreadyExists):
+	case errors.Is(err, domain.ErrEntryAlreadyExists),
+		errors.Is(err, domain.ErrAccountAlreadyExists):
 		respondError(c, http.StatusConflict, err.Error())
 
 	default:

@@ -25,6 +25,9 @@ type fakeAccountRepo struct {
 	saved   *domain.Account
 	saveErr error
 	findErr error
+	// raceAccount simula una carrera: Save la "inserta" (como si otra ejecución
+	// la hubiera creado) y falla con ErrAccountAlreadyExists.
+	raceAccount *domain.Account
 }
 
 func newFakeAccountRepo(accs ...*domain.Account) *fakeAccountRepo {
@@ -36,6 +39,10 @@ func newFakeAccountRepo(accs ...*domain.Account) *fakeAccountRepo {
 }
 
 func (r *fakeAccountRepo) Save(ctx context.Context, a *domain.Account) error {
+	if r.raceAccount != nil {
+		r.byID[r.raceAccount.ID()] = r.raceAccount
+		return domain.ErrAccountAlreadyExists
+	}
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -54,6 +61,14 @@ func (r *fakeAccountRepo) FindByID(ctx context.Context, id domain.AccountID) (*d
 	return a, nil
 }
 func (r *fakeAccountRepo) FindByTenantAndType(ctx context.Context, tid domain.TenantID, at domain.AccountType, cur string) (*domain.Account, error) {
+	if r.findErr != nil {
+		return nil, r.findErr
+	}
+	for _, a := range r.byID {
+		if a.TenantID() == tid && a.AccountType() == at && a.Currency() == cur {
+			return a, nil
+		}
+	}
 	return nil, domain.ErrAccountNotFound
 }
 
@@ -167,12 +182,47 @@ func testTenantID(t *testing.T) domain.TenantID {
 	return id
 }
 
-func balancedLines() []PostingLine {
-	return []PostingLine{
-		{AccountID: validUUID(), Direction: "debit", Amount: 100, Currency: "ARS"},
-		{AccountID: validUUID(), Direction: "credit", Amount: 100, Currency: "ARS"},
+func newTestAccount(t *testing.T, tenantID domain.TenantID, at domain.AccountType, currency string) *domain.Account {
+	t.Helper()
+	acc, err := domain.NewAccount(domain.NewAccountID(), tenantID, at, currency, "")
+	if err != nil {
+		t.Fatalf("build account: %v", err)
+	}
+	acc.PullEvents()
+	return acc
+}
+
+// entryFixture es un tenant con dos cuentas ARS existentes, para postear
+// asientos que pasen la validación de cuentas de PostEntry.
+type entryFixture struct {
+	tenantID domain.TenantID
+	accounts *fakeAccountRepo
+	debit    *domain.Account
+	credit   *domain.Account
+}
+
+func newEntryFixture(t *testing.T) *entryFixture {
+	t.Helper()
+	tenantID := testTenantID(t)
+	debit := newTestAccount(t, tenantID, domain.AccountTypeInTransit, "ARS")
+	credit := newTestAccount(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
+	return &entryFixture{
+		tenantID: tenantID,
+		accounts: newFakeAccountRepo(debit, credit),
+		debit:    debit,
+		credit:   credit,
 	}
 }
+
+// lines retorna un débito y un crédito ARS sobre las cuentas del fixture.
+func (f *entryFixture) lines(debitAmount, creditAmount int64) []PostingLine {
+	return []PostingLine{
+		{AccountID: f.debit.ID().String(), Direction: "debit", Amount: debitAmount, Currency: "ARS"},
+		{AccountID: f.credit.ID().String(), Direction: "credit", Amount: creditAmount, Currency: "ARS"},
+	}
+}
+
+func (f *entryFixture) balancedLines() []PostingLine { return f.lines(100, 100) }
 
 func buildEntry(t *testing.T, tenantID domain.TenantID, key string) *domain.JournalEntry {
 	t.Helper()

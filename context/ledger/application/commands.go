@@ -12,7 +12,8 @@ type CreateAccountCmd struct {
 }
 
 type CreateAccountResult struct {
-	AccountID string
+	AccountID   string
+	WasExisting bool // true si la cuenta (tenant, tipo, moneda) ya existía
 }
 
 type GetBalanceQuery struct {

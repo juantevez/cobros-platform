@@ -11,8 +11,9 @@ import (
 
 func TestCreateAccount_Success(t *testing.T) {
 	env := newTestEnv(t)
+	// reserve no está sembrada en el testEnv → se crea (201).
 	rec := env.do(http.MethodPost, "/api/v1/ledger/accounts", map[string]string{
-		"account_type": "merchant_balance", "currency": "ARS", "description": "saldo",
+		"account_type": "reserve", "currency": "ARS", "description": "reserva",
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -68,6 +69,55 @@ func TestGetBalance_Success(t *testing.T) {
 func TestGetBalance_NotFound(t *testing.T) {
 	env := newTestEnv(t)
 	rec := env.do(http.MethodGet, "/api/v1/ledger/accounts/"+uuid.NewString()+"/balance", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// Crear una cuenta que ya existe es idempotente: 200 con la cuenta existente.
+func TestCreateAccount_Existing200(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(http.MethodPost, "/api/v1/ledger/accounts", map[string]string{
+		"account_type": "merchant_balance", "currency": "ARS",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var body createAccountResponse
+	decodeBody(t, rec, &body)
+	if body.AccountID != env.credit.ID().String() {
+		t.Errorf("account_id = %q, want existing %q", body.AccountID, env.credit.ID())
+	}
+	if len(env.pub.published) != 0 {
+		t.Error("no event should be published for an existing account")
+	}
+}
+
+func TestCreateAccount_GuardRejects(t *testing.T) {
+	env := newTestEnvWithGuard(t, denyWrites)
+	rec := env.do(http.MethodPost, "/api/v1/ledger/accounts", map[string]string{
+		"account_type": "reserve", "currency": "ARS",
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
+// El saldo es de lectura para el comercio: el guard de escritura no aplica.
+func TestGetBalance_NotAffectedByWriteGuard(t *testing.T) {
+	env := newTestEnvWithGuard(t, denyWrites)
+	rec := env.do(http.MethodGet, "/api/v1/ledger/accounts/"+env.credit.ID().String()+"/balance", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestGetBalance_AccountOfAnotherTenant404(t *testing.T) {
+	env := newTestEnv(t)
+	foreign := newTestAccount(t, domain.TenantID(uuid.NewString()), domain.AccountTypeMerchantBalance, "ARS")
+	env.accounts.byID[foreign.ID()] = foreign
+
+	rec := env.do(http.MethodGet, "/api/v1/ledger/accounts/"+foreign.ID().String()+"/balance", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}

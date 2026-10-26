@@ -5,9 +5,11 @@ import "errors"
 var (
 	// ── Account ──────────────────────────────────────────────────────────────
 
-	ErrAccountNotFound    = errors.New("account not found")
-	ErrInvalidAccountType = errors.New("invalid account type")
-	ErrCurrencyMismatch   = errors.New("all postings in an entry must share the same currency")
+	ErrAccountNotFound         = errors.New("account not found")
+	ErrAccountAlreadyExists    = errors.New("account already exists for this tenant, type and currency")
+	ErrInvalidAccountType      = errors.New("invalid account type")
+	ErrCurrencyMismatch        = errors.New("all postings in an entry must share the same currency")
+	ErrAccountCurrencyMismatch = errors.New("posting currency does not match the account currency")
 
 	// ── JournalEntry ─────────────────────────────────────────────────────────
 

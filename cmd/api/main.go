@@ -177,11 +177,15 @@ func main() {
 	balanceRepo := ledgerpg.NewBalanceRepository(pool)
 
 	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txManager, ledgerPub)
-	postEntry     := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txManager, ledgerPub, ledgerapp.RealClock())
+	postEntry     := ledgerapp.NewPostEntryUseCase(entryRepo, accountRepo, balanceRepo, txManager, ledgerPub, ledgerapp.RealClock())
 	reverseEntry  := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerPub)
 	getBalance    := ledgerapp.NewGetBalanceUseCase(accountRepo, balanceRepo)
 
-	ledgerhttp.RegisterRoutes(protected, ledgerhttp.NewAccountHandler(createAccount, getBalance), ledgerhttp.NewEntryHandler(postEntry, reverseEntry))
+	ledgerhttp.RegisterRoutes(protected,
+		ledgerhttp.NewAccountHandler(createAccount, getBalance),
+		ledgerhttp.NewEntryHandler(postEntry, reverseEntry),
+		authttp.RequireRole(authdomain.RolePlatformSupport),
+	)
 
 	// ── Audit ─────────────────────────────────────────────────────────────────
 

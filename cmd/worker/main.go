@@ -127,7 +127,7 @@ func main() {
 	txMgr       := postgres.NewTxManager(pool)
 
 	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txMgr, ledgerPub)
-	postEntry     := ledgerapp.NewPostEntryUseCase(entryRepo, balanceRepo, txMgr, ledgerPub, ledgerapp.RealClock())
+	postEntry     := ledgerapp.NewPostEntryUseCase(entryRepo, accountRepo, balanceRepo, txMgr, ledgerPub, ledgerapp.RealClock())
 
 	ledgerOnboardingConsumer := ledgernats.NewOnboardingConsumer(
 		eventbus.NewConsumer(natsClient, logger.With("component", "ledger_onboarding")),

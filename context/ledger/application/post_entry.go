@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
@@ -17,7 +18,8 @@ import (
 // Flujo:
 //  1. Validar y parsear el comando.
 //  2. Verificar idempotencia: si ya existe un entry con esa clave, retornarlo.
-//  3. Crear el JournalEntry en el dominio (valida doble partida).
+//  3. Verificar que cada cuenta exista, sea del tenant y tenga la moneda del posting.
+//     Crear el JournalEntry en el dominio (valida doble partida).
 //  4. En una sola transacción:
 //     a. Persistir el entry y sus postings.
 //     b. Actualizar los saldos de cada cuenta afectada.
@@ -29,6 +31,7 @@ import (
 //   - El evento EntryPosted solo se publica si el asiento fue persistido.
 type PostEntryUseCase struct {
 	entryRepo   EntryRepository
+	accountRepo AccountRepository
 	balanceRepo BalanceRepository
 	txManager   TxManager
 	publisher   EventPublisher
@@ -37,6 +40,7 @@ type PostEntryUseCase struct {
 
 func NewPostEntryUseCase(
 	entryRepo EntryRepository,
+	accountRepo AccountRepository,
 	balanceRepo BalanceRepository,
 	txManager TxManager,
 	publisher EventPublisher,
@@ -44,6 +48,7 @@ func NewPostEntryUseCase(
 ) *PostEntryUseCase {
 	return &PostEntryUseCase{
 		entryRepo:   entryRepo,
+		accountRepo: accountRepo,
 		balanceRepo: balanceRepo,
 		txManager:   txManager,
 		publisher:   publisher,
@@ -106,6 +111,10 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 		}
 	}
 
+	if err := uc.validateAccounts(ctx, tenantID, inputs); err != nil {
+		return PostEntryResult{}, err
+	}
+
 	entryID := domain.NewEntryID()
 	entry, err := domain.NewJournalEntry(
 		entryID, tenantID,
@@ -146,6 +155,35 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 	}, nil
 }
 
+// validateAccounts verifica que cada cuenta referenciada exista, pertenezca al
+// tenant del asiento y tenga la moneda del posting.
+//
+// Sin esto, un caller podría postear contra cuentas de otro tenant (el UPDATE de
+// saldo es por account_id) o mezclar monedas entre posting y cuenta. Una cuenta
+// de otro tenant se reporta como inexistente para no revelar que existe.
+func (uc *PostEntryUseCase) validateAccounts(ctx context.Context, tenantID domain.TenantID, inputs []domain.PostingInput) error {
+	checked := make(map[domain.AccountID]*domain.Account, len(inputs))
+	for i, inp := range inputs {
+		account, ok := checked[inp.AccountID]
+		if !ok {
+			found, err := uc.accountRepo.FindByID(ctx, inp.AccountID)
+			if err != nil {
+				return fmt.Errorf("line %d: %w", i, err)
+			}
+			if found.TenantID() != tenantID {
+				return fmt.Errorf("line %d: %w", i, domain.ErrAccountNotFound)
+			}
+			account = found
+			checked[inp.AccountID] = found
+		}
+		if !strings.EqualFold(account.Currency(), inp.Currency) {
+			return fmt.Errorf("line %d: %w: account %s is %s, posting is %s",
+				i, domain.ErrAccountCurrencyMismatch, account.ID(), account.Currency(), inp.Currency)
+		}
+	}
+	return nil
+}
+
 // ── GetBalance ────────────────────────────────────────────────────────────────
 
 // GetBalanceUseCase consulta el saldo de una cuenta contable.
@@ -159,6 +197,11 @@ func NewGetBalanceUseCase(accountRepo AccountRepository, balanceRepo BalanceRepo
 }
 
 func (uc *GetBalanceUseCase) Execute(ctx context.Context, q GetBalanceQuery) (GetBalanceResult, error) {
+	tenantID, err := domain.ParseTenantID(q.TenantID)
+	if err != nil {
+		return GetBalanceResult{}, err
+	}
+
 	accountID, err := domain.ParseAccountID(q.AccountID)
 	if err != nil {
 		return GetBalanceResult{}, err
@@ -167,6 +210,10 @@ func (uc *GetBalanceUseCase) Execute(ctx context.Context, q GetBalanceQuery) (Ge
 	account, err := uc.accountRepo.FindByID(ctx, accountID)
 	if err != nil {
 		return GetBalanceResult{}, err
+	}
+	// Aislamiento: una cuenta de otro tenant se reporta como inexistente.
+	if account.TenantID() != tenantID {
+		return GetBalanceResult{}, domain.ErrAccountNotFound
 	}
 
 	balance, err := uc.balanceRepo.GetBalance(ctx, accountID)

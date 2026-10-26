@@ -18,6 +18,7 @@ func TestRespondDomainError(t *testing.T) {
 		{"entry not found", domain.ErrEntryNotFound, http.StatusNotFound},
 		{"not balanced", domain.ErrEntryNotBalanced, http.StatusUnprocessableEntity},
 		{"currency mismatch", domain.ErrCurrencyMismatch, http.StatusUnprocessableEntity},
+		{"account currency mismatch", domain.ErrAccountCurrencyMismatch, http.StatusUnprocessableEntity},
 		{"not enough postings", domain.ErrNotEnoughPostings, http.StatusUnprocessableEntity},
 		{"zero amount", domain.ErrZeroAmount, http.StatusUnprocessableEntity},
 		{"invalid direction", domain.ErrInvalidDirection, http.StatusUnprocessableEntity},
@@ -25,6 +26,7 @@ func TestRespondDomainError(t *testing.T) {
 		{"invalid currency", domain.ErrInvalidCurrency, http.StatusUnprocessableEntity},
 		{"negative amount", domain.ErrNegativeAmount, http.StatusUnprocessableEntity},
 		{"already exists", domain.ErrEntryAlreadyExists, http.StatusConflict},
+		{"account already exists", domain.ErrAccountAlreadyExists, http.StatusConflict},
 		{"unknown internal", errors.New("db exploded"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {

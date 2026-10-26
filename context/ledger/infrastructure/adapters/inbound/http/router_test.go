@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -34,4 +35,13 @@ func TestRouter_UnknownRoute404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
+}
+
+func TestRegisterRoutes_PanicsWithoutWriteGuard(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when writeGuard is nil")
+		}
+	}()
+	RegisterRoutes(gin.New().Group("/api/v1"), &AccountHandler{}, &EntryHandler{}, nil)
 }

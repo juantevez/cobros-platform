@@ -25,7 +25,7 @@ func TestPayment_PostsBalancedEntry(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypePlatformFees, "ARS")
 
-	postEntry, entryRepo, pub := newPostEntry()
+	postEntry, entryRepo, pub := newPostEntry(accountRepo)
 	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	// amount 10000, platform_fee 300, psp_fee 0 → net 9700; debits 9700+300 = 10000 = credit.
@@ -52,7 +52,7 @@ func TestPayment_NoPlatformFeeTwoPostings(t *testing.T) {
 	accountRepo.seed(t, tenantID, domain.AccountTypeInTransit, "ARS")
 	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
 
-	postEntry, entryRepo, _ := newPostEntry()
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
 	// platform_fee 0, psp_fee 0 → net = amount → 2 postings balanceados.
@@ -88,7 +88,7 @@ func TestPayment_MissingAccounts(t *testing.T) {
 	t.Run("merchant_balance missing", func(t *testing.T) {
 		accountRepo := newFakeAccountRepo()
 		accountRepo.seed(t, tenantID, domain.AccountTypeInTransit, "ARS")
-		postEntry, _, _ := newPostEntry()
+		postEntry, _, _ := newPostEntry(accountRepo)
 		consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 		if err := consumer.handle(context.Background(), paymentMsg(tenantID.String(), validUUID(), 1000, 0, 0)); err == nil {
 			t.Fatal("expected error when merchant_balance account is missing")
