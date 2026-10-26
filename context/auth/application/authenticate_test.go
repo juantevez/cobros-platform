@@ -62,8 +62,8 @@ func TestAuthenticate_Success(t *testing.T) {
 	if refreshRepo.saved == nil {
 		t.Fatal("refresh token not persisted")
 	}
-	if refreshRepo.saved.TokenHash != "hash:raw-refresh" {
-		t.Errorf("stored hash = %q, want hash:raw-refresh", refreshRepo.saved.TokenHash)
+	if refreshRepo.saved.TokenHash != hashRefreshToken("raw-refresh") {
+		t.Errorf("stored hash = %q, want hashRefreshToken(raw-refresh)", refreshRepo.saved.TokenHash)
 	}
 	if refreshRepo.saved.TokenHash == "raw-refresh" {
 		t.Error("refresh token must not be stored in plaintext")

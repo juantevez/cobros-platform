@@ -73,6 +73,10 @@ var (
 	// ErrInvalidRole se retorna cuando el rol especificado no existe en el sistema.
 	ErrInvalidRole = errors.New("invalid role")
 
+	// ErrRoleNotAssignable se retorna cuando se intenta otorgar desde un tenant
+	// un rol reservado a la plataforma (platform_support).
+	ErrRoleNotAssignable = errors.New("role cannot be assigned by a tenant")
+
 	// ── Value Objects ────────────────────────────────────────────────────────
 
 	// ErrInvalidID se retorna cuando un UUID tiene formato inválido.

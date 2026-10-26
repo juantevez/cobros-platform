@@ -122,6 +122,17 @@ func TestParseRole(t *testing.T) {
 	}
 }
 
+func TestRole_IsTenantAssignable(t *testing.T) {
+	for _, r := range []Role{RoleAdmin, RoleOperator, RoleAccountant, RoleReadOnly} {
+		if !r.IsTenantAssignable() {
+			t.Errorf("role %q should be assignable by a tenant", r)
+		}
+	}
+	if RolePlatformSupport.IsTenantAssignable() {
+		t.Error("platform_support must not be assignable by a tenant")
+	}
+}
+
 func TestParseEnvironment(t *testing.T) {
 	test, err := ParseEnvironment("test")
 	if err != nil || !test.IsTest() || test.IsProd() {

@@ -12,13 +12,13 @@ import (
 var refreshNow = time.Unix(1_700_000_000, 0).UTC()
 
 // storedToken construye un refresh token persistido para el usuario/tenant dados,
-// accesible por el hash "hash:<raw>" (según el fakeHasher).
+// accesible por hashRefreshToken(raw).
 func storedToken(id, raw string, user *domain.User, tenant *domain.Tenant, expires time.Time, revoked bool) (*RefreshToken, map[string]*RefreshToken) {
 	rt := &RefreshToken{
 		ID:        id,
 		UserID:    user.ID(),
 		TenantID:  tenant.ID(),
-		TokenHash: "hash:" + raw,
+		TokenHash: hashRefreshToken(raw),
 		IssuedAt:  refreshNow.Add(-time.Minute),
 		ExpiresAt: expires,
 	}
@@ -43,7 +43,7 @@ func newRefreshUC(
 	}
 	return NewRefreshTokenUseCase(
 		userRepo, newFakeMembershipRepo(memberships...), tenantRepo,
-		refreshRepo, &fakeHasher{}, issuer, fakeClock{now: refreshNow},
+		refreshRepo, issuer, fakeClock{now: refreshNow},
 	)
 }
 
@@ -69,7 +69,7 @@ func TestRefreshToken_SuccessRotates(t *testing.T) {
 		t.Errorf("claims role = %q, want accountant", issuer.gotClaims.Role)
 	}
 	// Nuevo token persistido, hasheado.
-	if refreshRepo.saved == nil || refreshRepo.saved.TokenHash != "hash:new-raw" {
+	if refreshRepo.saved == nil || refreshRepo.saved.TokenHash != hashRefreshToken("new-raw") {
 		t.Fatalf("new refresh token not persisted hashed: %+v", refreshRepo.saved)
 	}
 	// El token viejo se revoca registrando al sucesor.
@@ -161,7 +161,7 @@ func TestLogout_Success(t *testing.T) {
 	user := newActiveUser(t, tenant.ID(), "user@example.com")
 	stored, byHash := storedToken("tok-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), false)
 	refreshRepo := &fakeRefreshRepo{byHash: byHash}
-	uc := NewLogoutUseCase(refreshRepo, &fakeHasher{})
+	uc := NewLogoutUseCase(refreshRepo)
 
 	if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: "raw-refresh"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -177,7 +177,7 @@ func TestLogout_Success(t *testing.T) {
 func TestLogout_Idempotent(t *testing.T) {
 	t.Run("empty token is a no-op", func(t *testing.T) {
 		refreshRepo := &fakeRefreshRepo{}
-		uc := NewLogoutUseCase(refreshRepo, &fakeHasher{})
+		uc := NewLogoutUseCase(refreshRepo)
 		if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: ""}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -188,7 +188,7 @@ func TestLogout_Idempotent(t *testing.T) {
 
 	t.Run("unknown token is a no-op", func(t *testing.T) {
 		refreshRepo := &fakeRefreshRepo{} // sin preload → FindByHash falla
-		uc := NewLogoutUseCase(refreshRepo, &fakeHasher{})
+		uc := NewLogoutUseCase(refreshRepo)
 		if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: "ghost"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -202,7 +202,7 @@ func TestLogout_Idempotent(t *testing.T) {
 		user := newActiveUser(t, tenant.ID(), "user@example.com")
 		_, byHash := storedToken("tok-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), true)
 		refreshRepo := &fakeRefreshRepo{byHash: byHash}
-		uc := NewLogoutUseCase(refreshRepo, &fakeHasher{})
+		uc := NewLogoutUseCase(refreshRepo)
 		if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: "raw-refresh"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

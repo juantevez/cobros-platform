@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/juantevez/cobros-platform/context/onboarding/domain"
@@ -227,6 +228,49 @@ func TestReview_BadBody400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
+}
+
+// Sin la autorización del guard (rol platform_support en producción), la revisión
+// no debe ejecutarse: el comercio no puede aprobar su propia solicitud.
+func TestReview_GuardRejects_DoesNotApprove(t *testing.T) {
+	deny := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+	}
+	env := newTestEnvWithGuard(t, deny)
+	app := inReviewApp(t, env.tenantID)
+	env.repo.byID[app.ID()] = app
+
+	rec := env.do(http.MethodPost, "/api/v1/onboarding/applications/"+app.ID().String()+"/review",
+		map[string]string{"decision": "approve"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if app.Status() != domain.StatusInReview {
+		t.Errorf("status = %q, want in_review (review must not run)", app.Status())
+	}
+}
+
+// El guard aplica solo a la revisión: los endpoints del comercio siguen abiertos.
+func TestReview_GuardDoesNotAffectMerchantRoutes(t *testing.T) {
+	deny := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+	}
+	env := newTestEnvWithGuard(t, deny)
+	env.repo.byTenant[env.tenantID] = inReviewApp(t, env.tenantID)
+
+	rec := env.do(http.MethodGet, "/api/v1/onboarding", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutReviewGuard(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when reviewGuard is nil")
+		}
+	}()
+	RegisterRoutes(gin.New().Group("/api/v1"), &OnboardingHandler{}, &ReviewHandler{}, nil)
 }
 
 // ── respondDomainError ────────────────────────────────────────────────────────

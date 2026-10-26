@@ -61,6 +61,9 @@ func (uc *RegisterUserUseCase) Execute(ctx context.Context, cmd RegisterUserCmd)
 	if err != nil {
 		return RegisterUserResult{}, err
 	}
+	if !role.IsTenantAssignable() {
+		return RegisterUserResult{}, domain.ErrRoleNotAssignable
+	}
 
 	// ── 2. Verificar que el tenant existe y no está suspendido ───────────────
 

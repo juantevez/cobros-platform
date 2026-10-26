@@ -22,7 +22,6 @@ type RefreshTokenUseCase struct {
 	membershipRepo MembershipRepository
 	tenantRepo     TenantRepository
 	refreshRepo    RefreshTokenRepository
-	hasher         PasswordHasher
 	tokenIssuer    TokenIssuer
 	clock          Clock
 }
@@ -32,7 +31,6 @@ func NewRefreshTokenUseCase(
 	membershipRepo MembershipRepository,
 	tenantRepo TenantRepository,
 	refreshRepo RefreshTokenRepository,
-	hasher PasswordHasher,
 	tokenIssuer TokenIssuer,
 	clock Clock,
 ) *RefreshTokenUseCase {
@@ -41,7 +39,6 @@ func NewRefreshTokenUseCase(
 		membershipRepo: membershipRepo,
 		tenantRepo:     tenantRepo,
 		refreshRepo:    refreshRepo,
-		hasher:         hasher,
 		tokenIssuer:    tokenIssuer,
 		clock:          clock,
 	}
@@ -55,12 +52,7 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 	// ── 1. Hashear el token presentado y buscarlo ────────────────────────────
 	// Hasheamos el raw para buscar por hash (nunca almacenamos en claro).
 
-	tokenHash, err := uc.hasher.Hash(cmd.RawRefreshToken)
-	if err != nil {
-		return TokenPair{}, fmt.Errorf("hash token: %w", err)
-	}
-
-	stored, err := uc.refreshRepo.FindByHash(ctx, tokenHash)
+	stored, err := uc.refreshRepo.FindByHash(ctx, hashRefreshToken(cmd.RawRefreshToken))
 	if err != nil {
 		if errors.Is(err, domain.ErrUserNotFound) {
 			return TokenPair{}, domain.ErrInvalidCredentials
@@ -125,17 +117,12 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 		return TokenPair{}, fmt.Errorf("issue refresh token: %w", err)
 	}
 
-	newHash, err := uc.hasher.Hash(rawRefresh)
-	if err != nil {
-		return TokenPair{}, fmt.Errorf("hash new refresh token: %w", err)
-	}
-
 	newID := uuid.NewString()
 	newToken := RefreshToken{
 		ID:        newID,
 		UserID:    stored.UserID,
 		TenantID:  stored.TenantID,
-		TokenHash: newHash,
+		TokenHash: hashRefreshToken(rawRefresh),
 		IssuedAt:  now,
 		ExpiresAt: now.Add(refreshTokenDuration),
 	}
@@ -159,11 +146,10 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 // LogoutUseCase revoca el refresh token activo del usuario, cerrando la sesión.
 type LogoutUseCase struct {
 	refreshRepo RefreshTokenRepository
-	hasher      PasswordHasher
 }
 
-func NewLogoutUseCase(refreshRepo RefreshTokenRepository, hasher PasswordHasher) *LogoutUseCase {
-	return &LogoutUseCase{refreshRepo: refreshRepo, hasher: hasher}
+func NewLogoutUseCase(refreshRepo RefreshTokenRepository) *LogoutUseCase {
+	return &LogoutUseCase{refreshRepo: refreshRepo}
 }
 
 func (uc *LogoutUseCase) Execute(ctx context.Context, cmd LogoutCmd) error {
@@ -171,12 +157,7 @@ func (uc *LogoutUseCase) Execute(ctx context.Context, cmd LogoutCmd) error {
 		return nil // idempotente: sin token, ya está "deslogueado"
 	}
 
-	tokenHash, err := uc.hasher.Hash(cmd.RawRefreshToken)
-	if err != nil {
-		return fmt.Errorf("hash token: %w", err)
-	}
-
-	stored, err := uc.refreshRepo.FindByHash(ctx, tokenHash)
+	stored, err := uc.refreshRepo.FindByHash(ctx, hashRefreshToken(cmd.RawRefreshToken))
 	if err != nil {
 		return nil // token no encontrado = ya expiró o nunca existió
 	}

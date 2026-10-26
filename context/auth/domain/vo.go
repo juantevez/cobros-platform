@@ -114,6 +114,14 @@ func ParseRole(s string) (Role, error) {
 
 func (r Role) String() string { return string(r) }
 
+// IsTenantAssignable indica si el rol puede otorgarse desde los flujos del tenant
+// (alta de usuario, asignación de rol).
+//
+// platform_support no lo es: habilita operaciones sobre cualquier tenant
+// (activar, suspender), así que si un admin pudiera otorgarlo escalaría
+// privilegios fuera de su comercio. Esos usuarios se provisionan por fuera de la API.
+func (r Role) IsTenantAssignable() bool { return r != RolePlatformSupport }
+
 // ── Environment ───────────────────────────────────────────────────────────────
 
 // Environment distingue si el tenant opera en modo prueba o producción.

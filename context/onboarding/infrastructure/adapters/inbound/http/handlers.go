@@ -228,7 +228,16 @@ func respondDomainError(c *gin.Context, err error) {
 }
 
 // RegisterRoutes registra las rutas de onboarding en el grupo protegido por JWT.
-func RegisterRoutes(rg *gin.RouterGroup, onboarding *OnboardingHandler, review *ReviewHandler) {
+//
+// reviewGuard autoriza las acciones del operador (aprobar/rechazar/pedir info).
+// Se inyecta desde el composition root para no acoplar este contexto con Auth;
+// en producción es RequireRole(platform_support). Sin él, cualquier usuario
+// autenticado podría aprobar su propia solicitud y saltear el KYC.
+func RegisterRoutes(rg *gin.RouterGroup, onboarding *OnboardingHandler, review *ReviewHandler, reviewGuard gin.HandlerFunc) {
+	if reviewGuard == nil {
+		panic("onboarding: RegisterRoutes requires a reviewGuard")
+	}
+
 	ob := rg.Group("/onboarding")
 	{
 		ob.POST("", onboarding.Submit)
@@ -237,6 +246,6 @@ func RegisterRoutes(rg *gin.RouterGroup, onboarding *OnboardingHandler, review *
 		ob.POST("/persons", onboarding.AddPerson)
 		ob.PUT("/bank-account", onboarding.SetBankAccount)
 		ob.POST("/submit", onboarding.SubmitForReview)
-		ob.POST("/applications/:id/review", review.Review)
+		ob.POST("/applications/:id/review", reviewGuard, review.Review)
 	}
 }

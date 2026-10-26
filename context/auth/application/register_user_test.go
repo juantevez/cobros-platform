@@ -130,3 +130,26 @@ func TestRegisterUser_DuplicateEmail(t *testing.T) {
 		t.Fatalf("expected ErrEmailAlreadyExists, got %v", err)
 	}
 }
+
+// Un admin de tenant no puede crear usuarios platform_support: ese rol habilita
+// activar/suspender cualquier tenant (escalada de privilegios).
+func TestRegisterUser_RejectsPlatformSupportRole(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	userRepo := newFakeUserRepo()
+	memberRepo := newFakeMembershipRepo()
+	pub := &fakePublisher{}
+	uc := NewRegisterUserUseCase(newFakeTenantRepo(tenant), userRepo, memberRepo, &fakeHasher{}, fakeTx{}, pub)
+
+	_, err := uc.Execute(context.Background(), RegisterUserCmd{
+		TenantID: tenant.ID().String(),
+		Email:    "staff@example.com",
+		Password: "s3cret",
+		Role:     "platform_support",
+	})
+	if !errors.Is(err, domain.ErrRoleNotAssignable) {
+		t.Fatalf("expected ErrRoleNotAssignable, got %v", err)
+	}
+	if len(userRepo.byID) != 0 || memberRepo.saved != nil || len(pub.published) != 0 {
+		t.Error("nothing should be persisted or published")
+	}
+}

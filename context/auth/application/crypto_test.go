@@ -44,3 +44,22 @@ func TestGenerateSecret_ZeroLength(t *testing.T) {
 		t.Errorf("expected empty string, got %q", s)
 	}
 }
+
+// El hash del refresh token debe ser determinístico: FindByHash busca por
+// igualdad. Con un hash con salt aleatorio el refresh nunca encontraba el token.
+func TestHashRefreshToken_IsDeterministic(t *testing.T) {
+	a := hashRefreshToken("raw-refresh")
+	b := hashRefreshToken("raw-refresh")
+	if a != b {
+		t.Fatalf("hash is not deterministic: %q != %q", a, b)
+	}
+	if len(a) != 64 {
+		t.Errorf("length = %d, want 64 (sha256 hex)", len(a))
+	}
+	if a == hashRefreshToken("other-refresh") {
+		t.Error("different tokens produced the same hash")
+	}
+	if strings.Contains(a, "raw-refresh") {
+		t.Error("hash leaks the raw token")
+	}
+}

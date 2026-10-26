@@ -24,6 +24,7 @@ func TestRespondDomainError(t *testing.T) {
 		{"tenant suspended", domain.ErrTenantSuspended, http.StatusForbidden},
 		{"user suspended", domain.ErrUserSuspended, http.StatusForbidden},
 		{"tenant not active", domain.ErrTenantNotActive, http.StatusForbidden},
+		{"role not assignable", domain.ErrRoleNotAssignable, http.StatusForbidden},
 		{"tenant not found", domain.ErrTenantNotFound, http.StatusNotFound},
 		{"user not found", domain.ErrUserNotFound, http.StatusNotFound},
 		{"api key not found", domain.ErrApiKeyNotFound, http.StatusNotFound},

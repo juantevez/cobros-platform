@@ -139,3 +139,28 @@ func assertRoleAssignedEvent(t *testing.T, pub *fakePublisher, wantUserID, wantR
 		t.Errorf("event = %+v, want user=%s role=%s", ev, wantUserID, wantRole)
 	}
 }
+
+// Un admin de tenant no puede otorgar platform_support a un usuario propio.
+func TestAssignRole_RejectsPlatformSupportRole(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	user := newActiveUser(t, tenant.ID(), "user@example.com")
+	admin := newActiveUser(t, tenant.ID(), "admin@example.com")
+	existing := domain.NewMembership(user.ID(), tenant.ID(), domain.RoleReadOnly, admin.ID())
+
+	memberRepo := newFakeMembershipRepo(existing)
+	pub := &fakePublisher{}
+	uc := NewAssignRoleUseCase(newFakeTenantRepo(tenant), newFakeUserRepo(user, admin), memberRepo, fakeTx{}, pub)
+
+	err := uc.Execute(context.Background(), AssignRoleCmd{
+		TenantID:   tenant.ID().String(),
+		UserID:     user.ID().String(),
+		Role:       "platform_support",
+		AssignedBy: admin.ID().String(),
+	})
+	if !errors.Is(err, domain.ErrRoleNotAssignable) {
+		t.Fatalf("expected ErrRoleNotAssignable, got %v", err)
+	}
+	if memberRepo.saved != nil || memberRepo.updated != nil || len(pub.published) != 0 {
+		t.Error("nothing should be persisted or published")
+	}
+}

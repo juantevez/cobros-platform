@@ -154,8 +154,8 @@ func main() {
 	suspendTenant   := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
 	registerUser    := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
 	authenticate    := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock)
-	refreshTokenUC  := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, hasher, jwtIssuer, clock)
-	logoutUC        := application.NewLogoutUseCase(refreshRepo, hasher)
+	refreshTokenUC  := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock)
+	logoutUC        := application.NewLogoutUseCase(refreshRepo)
 	issueApiKey     := application.NewIssueApiKeyUseCase(tenantRepo, apiKeyRepo, hasher, txManager, authPub)
 	revokeApiKey    := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)
 	assignRole      := application.NewAssignRoleUseCase(tenantRepo, userRepo, membershipRepo, txManager, authPub)
@@ -205,6 +205,7 @@ func main() {
 	onboardinghttp.RegisterRoutes(protected,
 		onboardinghttp.NewOnboardingHandler(submitApp, uploadDoc, addPerson, setBankAcct, submitForReview, getApp),
 		onboardinghttp.NewReviewHandler(reviewApp),
+		authttp.RequireRole(authdomain.RolePlatformSupport),
 	)
 
 	// ── Billing & Fees ────────────────────────────────────────────────────────

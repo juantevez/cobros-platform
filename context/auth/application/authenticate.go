@@ -139,17 +139,12 @@ func (uc *AuthenticateUseCase) Execute(ctx context.Context, cmd AuthenticateCmd)
 		return TokenPair{}, fmt.Errorf("issue refresh token: %w", err)
 	}
 
-	refreshHash, err := uc.hasher.Hash(rawRefresh)
-	if err != nil {
-		return TokenPair{}, fmt.Errorf("hash refresh token: %w", err)
-	}
-
 	now := uc.clock.Now()
 	rt := RefreshToken{
 		ID:        uuid.NewString(),
 		UserID:    user.ID(),
 		TenantID:  tenantID,
-		TokenHash: refreshHash,
+		TokenHash: hashRefreshToken(rawRefresh),
 		IssuedAt:  now,
 		ExpiresAt: now.Add(refreshTokenDuration),
 	}

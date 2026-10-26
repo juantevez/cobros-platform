@@ -58,6 +58,9 @@ func (uc *AssignRoleUseCase) Execute(ctx context.Context, cmd AssignRoleCmd) err
 	if err != nil {
 		return err
 	}
+	if !role.IsTenantAssignable() {
+		return domain.ErrRoleNotAssignable
+	}
 
 	// ── 2. Verificar que el tenant está activo ───────────────────────────────
 

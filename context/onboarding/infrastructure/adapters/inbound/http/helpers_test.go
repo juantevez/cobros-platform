@@ -120,7 +120,15 @@ type testEnv struct {
 	tenantID domain.TenantID
 }
 
+// allowReview es el guard de revisión por defecto en los tests: deja pasar.
+func allowReview(c *gin.Context) { c.Next() }
+
 func newTestEnv(t *testing.T, apps ...*domain.OnboardingApplication) *testEnv {
+	t.Helper()
+	return newTestEnvWithGuard(t, allowReview, apps...)
+}
+
+func newTestEnvWithGuard(t *testing.T, reviewGuard gin.HandlerFunc, apps ...*domain.OnboardingApplication) *testEnv {
 	t.Helper()
 	repo := newFakeRepo(apps...)
 	pub := &fakePublisher{}
@@ -149,6 +157,7 @@ func newTestEnv(t *testing.T, apps ...*domain.OnboardingApplication) *testEnv {
 	RegisterRoutes(grp,
 		NewOnboardingHandler(submit, uploadDoc, addPerson, setBank, submitReview, getApp),
 		NewReviewHandler(review),
+		reviewGuard,
 	)
 
 	return &testEnv{repo: repo, engine: r, tenantID: tenantID}

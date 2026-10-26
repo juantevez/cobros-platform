@@ -2,6 +2,8 @@ package application
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 )
 
@@ -26,4 +28,15 @@ func generateSecret(n int) (string, error) {
 		result[i] = base62Alphabet[int(byteVal)%62]
 	}
 	return string(result), nil
+}
+
+// hashRefreshToken calcula el hash con el que se persiste y busca un refresh token.
+//
+// Debe ser determinístico: FindByHash busca por igualdad, por lo que un hash con
+// salt aleatorio (argon2id del PasswordHasher) nunca encontraría el token.
+// SHA-256 es suficiente porque el token es un secreto aleatorio de 256 bits,
+// no una contraseña elegida por una persona: no hay diccionario que atacar.
+func hashRefreshToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
