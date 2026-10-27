@@ -22,7 +22,7 @@ type MethodRateInput struct {
 }
 
 type CreatePlanResult struct {
-	PlanID string
+	PlanID string `json:"plan_id"`
 }
 
 // ── AssignPlan ────────────────────────────────────────────────────────────────
@@ -38,8 +38,8 @@ type AssignPlanCmd struct {
 }
 
 type AssignPlanResult struct {
-	TenantPlanID string
-	PlanName     string
+	TenantPlanID string `json:"tenant_plan_id"`
+	PlanName     string `json:"plan_name"`
 }
 
 // ── CalculateFee ──────────────────────────────────────────────────────────────
@@ -48,21 +48,21 @@ type AssignPlanResult struct {
 // Este es el contrato que el contexto Payment usará para obtener la fee real.
 type CalculateFeeQuery struct {
 	TenantID      string
-	Amount        int64  // en centavos
+	Amount        int64 // en centavos
 	Currency      string
 	PaymentMethod string // "card" | "wallet" | "transfer" | "qr"
 }
 
 type CalculateFeeResult struct {
-	FeeAmount      int64  // comisión total en centavos
+	FeeAmount      int64 // comisión total en centavos
 	Currency       string
-	RateBpsApplied int64  // tasa usada (para auditoría)
-	RateAmount     int64  // parte proporcional de la comisión
-	FixedAmount    int64  // parte fija de la comisión
+	RateBpsApplied int64 // tasa usada (para auditoría)
+	RateAmount     int64 // parte proporcional de la comisión
+	FixedAmount    int64 // parte fija de la comisión
 	PlanID         string
 	PlanName       string
-	MethodOverride bool   // true si se usó override por método de pago
-	TenantOverride bool   // true si el tenant tiene tarifas negociadas
+	MethodOverride bool // true si se usó override por método de pago
+	TenantOverride bool // true si el tenant tiene tarifas negociadas
 }
 
 // ── GetPlan / ListPlans ───────────────────────────────────────────────────────
@@ -72,17 +72,17 @@ type GetPlanQuery struct {
 }
 
 type PlanView struct {
-	ID              string            `json:"id"`
-	Name            string            `json:"name"`
-	Description     string            `json:"description"`
-	BaseRateBps     int64             `json:"base_rate_bps"`
-	BaseRatePercent string            `json:"base_rate_percent"` // "2.50%"
-	BaseFixedAmount int64             `json:"base_fixed_amount"`
-	MonthlyFee      int64             `json:"monthly_fee"`
-	Currency        string            `json:"currency"`
-	Active          bool              `json:"active"`
-	MethodRates     []MethodRateView  `json:"method_rates,omitempty"`
-	CreatedAt       string            `json:"created_at"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	Description     string           `json:"description"`
+	BaseRateBps     int64            `json:"base_rate_bps"`
+	BaseRatePercent string           `json:"base_rate_percent"` // "2.50%"
+	BaseFixedAmount int64            `json:"base_fixed_amount"`
+	MonthlyFee      int64            `json:"monthly_fee"`
+	Currency        string           `json:"currency"`
+	Active          bool             `json:"active"`
+	MethodRates     []MethodRateView `json:"method_rates,omitempty"`
+	CreatedAt       string           `json:"created_at"`
 }
 
 type MethodRateView struct {

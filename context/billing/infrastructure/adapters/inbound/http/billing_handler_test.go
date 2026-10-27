@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	authdomain "github.com/juantevez/cobros-platform/context/auth/domain"
 	"github.com/juantevez/cobros-platform/context/billing/domain"
 )
 
@@ -56,6 +58,39 @@ func TestCreatePlan_InvalidMethodMapsTo400(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (invalid payment method), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// Zero rate es un plan válido (comisión 0%); no debe rechazarse por binding.
+func TestCreatePlan_ZeroRateAccepted(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(http.MethodPost, "/api/v1/billing/plans", map[string]any{
+		"name": "Plan Gratis", "base_rate_bps": 0, "currency": "ARS",
+		"method_rates": []map[string]any{{"method": "card", "rate_bps": 0, "fixed_amount": 0}},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (zero rate is valid), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreatePlan_InvalidCurrencyMapsTo400(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(http.MethodPost, "/api/v1/billing/plans", map[string]any{
+		"name": "Plan", "base_rate_bps": 250, "currency": "PESOS",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (invalid currency), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreatePlan_NegativeFixedAmountMapsTo400(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(http.MethodPost, "/api/v1/billing/plans", map[string]any{
+		"name": "Plan", "base_rate_bps": 250, "currency": "ARS",
+		"base_fixed_amount": -1,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (negative fixed amount), body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -130,8 +165,8 @@ func TestAssignPlan_Success(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		TenantPlanID string `json:"TenantPlanID"`
-		PlanName     string `json:"PlanName"`
+		TenantPlanID string `json:"tenant_plan_id"`
+		PlanName     string `json:"plan_name"`
 	}
 	decodeBody(t, rec, &body)
 	if body.TenantPlanID == "" || body.PlanName != "Plan Base" {
@@ -193,6 +228,98 @@ func TestAssignPlan_InactivePlanConflict(t *testing.T) {
 	})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (plan inactive), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// ── Autorización (RouteGuards) ───────────────────────────────────────────────
+
+func TestRegisterRoutes_PanicsWithoutMandatoryGuards(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when mandatory guards are missing")
+		}
+	}()
+	r := gin.New()
+	RegisterRoutes(r.Group("/api/v1"), &BillingHandler{}, RouteGuards{})
+}
+
+func TestAuthorization_PlatformSupportCanManagePlans(t *testing.T) {
+	env := newTestEnvWithGuards(t, RouteGuards{
+		ManagePlans: allowRole(authdomain.RolePlatformSupport),
+		AssignPlan:  allowRole(authdomain.RolePlatformSupport),
+		ReadMyPlan:  allowRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+	}, authdomain.RolePlatformSupport)
+
+	rec := env.do(http.MethodPost, "/api/v1/billing/plans", map[string]any{
+		"name": "Plan Pro", "base_rate_bps": 250, "currency": "ARS",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 for platform_support, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthorization_TenantAdminCannotCreatePlans(t *testing.T) {
+	env := newTestEnvWithGuards(t, RouteGuards{
+		ManagePlans: allowRole(authdomain.RolePlatformSupport),
+		AssignPlan:  allowRole(authdomain.RolePlatformSupport),
+		ReadMyPlan:  allowRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+	}, authdomain.RoleAdmin)
+
+	rec := env.do(http.MethodPost, "/api/v1/billing/plans", map[string]any{
+		"name": "Plan Pro", "base_rate_bps": 250, "currency": "ARS",
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for tenant admin creating plans, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthorization_TenantAdminCannotAssignPlans(t *testing.T) {
+	env := newTestEnvWithGuards(t, RouteGuards{
+		ManagePlans: allowRole(authdomain.RolePlatformSupport),
+		AssignPlan:  allowRole(authdomain.RolePlatformSupport),
+		ReadMyPlan:  allowRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+	}, authdomain.RoleAdmin)
+	p := env.seedPlan(t, "Plan Base", 250)
+
+	rec := env.do(http.MethodPost, "/api/v1/billing/tenants/"+uuid.NewString()+"/plan", map[string]any{
+		"plan_id": p.ID().String(),
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for tenant admin assigning plans, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthorization_TenantAdminCanReadMyPlan(t *testing.T) {
+	env := newTestEnvWithGuards(t, RouteGuards{
+		ManagePlans: allowRole(authdomain.RolePlatformSupport),
+		AssignPlan:  allowRole(authdomain.RolePlatformSupport),
+		ReadMyPlan:  allowRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+	}, authdomain.RoleAdmin)
+	p := env.seedPlan(t, "Plan Base", 250)
+
+	tp, err := domain.NewTenantPlan(domain.NewTenantPlanID(), env.tenantID, p, -1, -1, timeNow())
+	if err != nil {
+		t.Fatalf("build tenant plan: %v", err)
+	}
+	tp.PullEvents()
+	env.tenantPlans.active[env.tenantID] = tp
+
+	rec := env.do(http.MethodGet, "/api/v1/billing/my-plan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for tenant admin reading own plan, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthorization_ReadonlyCannotReadMyPlan(t *testing.T) {
+	env := newTestEnvWithGuards(t, RouteGuards{
+		ManagePlans: allowRole(authdomain.RolePlatformSupport),
+		AssignPlan:  allowRole(authdomain.RolePlatformSupport),
+		ReadMyPlan:  allowRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+	}, authdomain.RoleReadOnly)
+
+	rec := env.do(http.MethodGet, "/api/v1/billing/my-plan", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for read_only, body=%s", rec.Code, rec.Body.String())
 	}
 }
 
