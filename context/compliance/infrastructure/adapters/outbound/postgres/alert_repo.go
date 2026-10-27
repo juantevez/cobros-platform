@@ -46,14 +46,22 @@ func (r *AlertRepository) Save(ctx context.Context, a *domain.Alert) error {
 	return nil
 }
 
+// Update dispone la alerta con concurrencia optimista: el UPDATE solo aplica
+// si la fila sigue en estado 'open'. Si otra resolución concurrente ya la
+// dispuso, RowsAffected == 0 y retornamos ErrAlertNotOpen para que el caso de
+// uso responda 409 en lugar de publicar un segundo AlertResolvedEvent.
 func (r *AlertRepository) Update(ctx context.Context, a *domain.Alert) error {
 	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	_, err := conn.Exec(ctx, `
-		UPDATE aml_alerts SET status=$2, note=$3, resolved_at=$4 WHERE id=$1`,
+	tag, err := conn.Exec(ctx, `
+		UPDATE aml_alerts SET status=$2, note=$3, resolved_at=$4
+		WHERE id=$1 AND status='open'`,
 		a.ID().String(), a.Status().String(), nullStr(a.Note()), a.ResolvedAt(),
 	)
 	if err != nil {
 		return fmt.Errorf("compliance repo: update alert: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrAlertNotOpen
 	}
 	return nil
 }

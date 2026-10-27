@@ -3,6 +3,7 @@
 package domain
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -11,18 +12,25 @@ import (
 type AlertID string
 type TenantID string
 
+// Errores tipados de los value objects: permiten a la capa HTTP distinguir
+// entrada inválida (400) de fallos internos (500) sin comparar cadenas.
+var (
+	ErrInvalidTenantID = errors.New("compliance: invalid tenant id")
+	ErrInvalidAlertID  = errors.New("compliance: invalid alert id")
+)
+
 func NewAlertID() AlertID { return AlertID(uuid.NewString()) }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: %q", ErrInvalidTenantID, s)
 	}
 	return TenantID(s), nil
 }
 
 func ParseAlertID(s string) (AlertID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid alert id: %w", err)
+		return "", fmt.Errorf("%w: %q", ErrInvalidAlertID, s)
 	}
 	return AlertID(s), nil
 }
