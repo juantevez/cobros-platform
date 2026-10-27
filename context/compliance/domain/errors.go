@@ -11,4 +11,6 @@ var (
 	ErrAlertNotOpen = errors.New("compliance: alert is not open")
 	// ErrInvalidDisposition indica una disposición de revisión inválida.
 	ErrInvalidDisposition = errors.New("compliance: invalid disposition")
+	// ErrInvalidListType indica un tipo de lista de vigilancia inválido.
+	ErrInvalidListType = errors.New("compliance: invalid list type, must be sanctions or pep")
 )

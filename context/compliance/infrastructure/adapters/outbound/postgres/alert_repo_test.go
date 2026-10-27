@@ -138,6 +138,25 @@ func TestAlertRepository_Update(t *testing.T) {
 			t.Fatal("expected error")
 		}
 	})
+
+	t.Run("concurrent resolution yields ErrAlertNotOpen", func(t *testing.T) {
+		// Concurrencia optimista: si el UPDATE no toca ninguna fila porque otra
+		// transacción ya dispuso la alerta (status != 'open'), el repo reporta
+		// ErrAlertNotOpen y el caso de uso aborta antes de publicar eventos.
+		mock := newMock(t)
+		repo := NewAlertRepository(mock)
+		a := domain.ReconstituteAlert(domain.NewAlertID(), tenantID(t), domain.AlertSanctionsMatch,
+			domain.RiskHigh, domain.StatusCleared, "s", 1, nil, "", now, &resolved)
+		mock.ExpectExec(`UPDATE aml_alerts .* AND status='open'`).
+			WithArgs(a.ID().String(), "cleared", pgxmock.AnyArg(), &resolved).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		if err := repo.Update(context.Background(), a); !errors.Is(err, domain.ErrAlertNotOpen) {
+			t.Fatalf("err = %v, want ErrAlertNotOpen", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
 }
 
 func TestAlertRepository_FindByID(t *testing.T) {

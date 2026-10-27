@@ -63,11 +63,14 @@ func (h *ComplianceHandler) GetAlert(c *gin.Context) {
 		AlertID:  c.Param("alertID"),
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrAlertNotFound) {
+		switch {
+		case errors.Is(err, domain.ErrAlertNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "alert not found"})
-			return
+		case errors.Is(err, domain.ErrInvalidTenantID), errors.Is(err, domain.ErrInvalidAlertID):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant or alert id"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, view)
@@ -100,8 +103,10 @@ func (h *ComplianceHandler) ResolveAlert(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "alert not found"})
 		case errors.Is(err, domain.ErrAlertNotOpen):
 			c.JSON(http.StatusConflict, gin.H{"error": "alert already resolved"})
-		default:
+		case errors.Is(err, domain.ErrInvalidTenantID), errors.Is(err, domain.ErrInvalidAlertID), errors.Is(err, domain.ErrInvalidDisposition):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		}
 		return
 	}
@@ -139,7 +144,12 @@ func (h *ComplianceHandler) AddWatchlistEntry(c *gin.Context) {
 		FullName: req.FullName, ListType: req.ListType,
 		Country: req.Country, Source: req.Source,
 	}); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		switch {
+		case errors.Is(err, domain.ErrInvalidListType):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		}
 		return
 	}
 	c.Status(http.StatusCreated)
