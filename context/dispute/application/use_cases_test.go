@@ -239,7 +239,7 @@ func TestAcceptDisputeUseCase_Execute(t *testing.T) {
 		tid := tenantID(t)
 		d := seedOpen(r, tid, future)
 		p := &fakePublisher{}
-		uc := NewAcceptDisputeUseCase(r, fakeTx{}, p)
+		uc := NewAcceptDisputeUseCase(r, fakeTx{}, p, newClock())
 
 		cmd := AcceptDisputeCmd{TenantID: tid.String(), DisputeID: d.ID().String(), Note: "acepto"}
 		if err := uc.Execute(context.Background(), cmd); err != nil {
@@ -254,14 +254,14 @@ func TestAcceptDisputeUseCase_Execute(t *testing.T) {
 	})
 
 	t.Run("invalid tenant rejected", func(t *testing.T) {
-		uc := NewAcceptDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewAcceptDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{}, newClock())
 		if err := uc.Execute(context.Background(), AcceptDisputeCmd{TenantID: "bad", DisputeID: uuid.NewString()}); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 
 	t.Run("invalid dispute id rejected", func(t *testing.T) {
-		uc := NewAcceptDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewAcceptDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{}, newClock())
 		if err := uc.Execute(context.Background(), AcceptDisputeCmd{TenantID: validTenant(), DisputeID: "bad"}); err == nil {
 			t.Fatal("expected error")
 		}
@@ -270,7 +270,7 @@ func TestAcceptDisputeUseCase_Execute(t *testing.T) {
 	t.Run("cross-tenant denied", func(t *testing.T) {
 		r := newRepo()
 		d := seedOpen(r, tenantID(t), future)
-		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := AcceptDisputeCmd{TenantID: validTenant(), DisputeID: d.ID().String()}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrDisputeNotFound) {
 			t.Fatalf("expected ErrDisputeNotFound, got %v", err)
@@ -281,9 +281,9 @@ func TestAcceptDisputeUseCase_Execute(t *testing.T) {
 		r := newRepo()
 		tid := tenantID(t)
 		d := seedOpen(r, tid, future)
-		_ = d.Accept("")
+		_ = d.Accept("", testNow)
 		d.PullEvents()
-		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := AcceptDisputeCmd{TenantID: tid.String(), DisputeID: d.ID().String()}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
@@ -293,7 +293,7 @@ func TestAcceptDisputeUseCase_Execute(t *testing.T) {
 	t.Run("find error propagated", func(t *testing.T) {
 		r := newRepo()
 		r.findErr = errBoom
-		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := AcceptDisputeCmd{TenantID: validTenant(), DisputeID: uuid.NewString()}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
@@ -305,7 +305,7 @@ func TestAcceptDisputeUseCase_Execute(t *testing.T) {
 		tid := tenantID(t)
 		d := seedOpen(r, tid, future)
 		r.updateErr = errBoom
-		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewAcceptDisputeUseCase(r, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := AcceptDisputeCmd{TenantID: tid.String(), DisputeID: d.ID().String()}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
@@ -321,7 +321,13 @@ func TestResolveDisputeUseCase_Execute(t *testing.T) {
 	// seedUnderReview crea una disputa ya contestada (under_review).
 	seedUnderReview := func(r *fakeRepo, tid domain.TenantID) *domain.Dispute {
 		d := seedOpen(r, tid, future)
-		_ = d.Contest([]domain.Evidence{domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d")}, "", testNow)
+		ev, err := domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d", testNow)
+		if err != nil {
+			t.Fatalf("evidence: %v", err)
+		}
+		if err := d.Contest([]domain.Evidence{ev}, "", testNow); err != nil {
+			t.Fatalf("contest: %v", err)
+		}
 		d.PullEvents()
 		return d
 	}
@@ -330,7 +336,7 @@ func TestResolveDisputeUseCase_Execute(t *testing.T) {
 		r := newRepo()
 		d := seedUnderReview(r, tenantID(t))
 		p := &fakePublisher{}
-		uc := NewResolveDisputeUseCase(r, fakeTx{}, p)
+		uc := NewResolveDisputeUseCase(r, fakeTx{}, p, newClock())
 
 		cmd := ResolveDisputeCmd{DisputeID: d.ID().String(), Outcome: "won", Note: "ganada"}
 		if err := uc.Execute(context.Background(), cmd); err != nil {
@@ -345,14 +351,14 @@ func TestResolveDisputeUseCase_Execute(t *testing.T) {
 	})
 
 	t.Run("invalid dispute id rejected", func(t *testing.T) {
-		uc := NewResolveDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewResolveDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{}, newClock())
 		if err := uc.Execute(context.Background(), ResolveDisputeCmd{DisputeID: "bad", Outcome: "won"}); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 
 	t.Run("invalid outcome rejected", func(t *testing.T) {
-		uc := NewResolveDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewResolveDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{}, newClock())
 		cmd := ResolveDisputeCmd{DisputeID: uuid.NewString(), Outcome: "bogus"}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrInvalidResolutionOutcome) {
 			t.Fatalf("expected ErrInvalidResolutionOutcome, got %v", err)
@@ -360,7 +366,7 @@ func TestResolveDisputeUseCase_Execute(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		uc := NewResolveDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewResolveDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{}, newClock())
 		cmd := ResolveDisputeCmd{DisputeID: uuid.NewString(), Outcome: "won"}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrDisputeNotFound) {
 			t.Fatalf("expected ErrDisputeNotFound, got %v", err)
@@ -370,7 +376,7 @@ func TestResolveDisputeUseCase_Execute(t *testing.T) {
 	t.Run("domain error surfaces (resolve from open)", func(t *testing.T) {
 		r := newRepo()
 		d := seedOpen(r, tenantID(t), future) // sigue en open
-		uc := NewResolveDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewResolveDisputeUseCase(r, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := ResolveDisputeCmd{DisputeID: d.ID().String(), Outcome: "won"}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
@@ -381,7 +387,7 @@ func TestResolveDisputeUseCase_Execute(t *testing.T) {
 		r := newRepo()
 		d := seedUnderReview(r, tenantID(t))
 		r.updateErr = errBoom
-		uc := NewResolveDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewResolveDisputeUseCase(r, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := ResolveDisputeCmd{DisputeID: d.ID().String(), Outcome: "lost"}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)

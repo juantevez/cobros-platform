@@ -52,9 +52,18 @@ func disputeRow(id, tenantID string) []any {
 	}
 }
 
+// capturedRef arma el PaymentRef que OpenDisputeUseCase lee vía PaymentReader
+// antes de construir la disputa.
+func capturedRef(id string) domain.PaymentRef {
+	return domain.PaymentRef{ID: id, Status: "captured", Amount: 5000, Currency: "ARS"}
+}
+
 func TestDisputeRepository_Save(t *testing.T) {
-	d, _ := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
-		"pay-1", "psp-1", 5000, "ARS", domain.ReasonFraudulent, testDeadline)
+	d, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+		capturedRef("pay-1"), "psp-1", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
+	if err != nil {
+		t.Fatalf("new dispute: %v", err)
+	}
 
 	t.Run("inserts dispute and its evidence", func(t *testing.T) {
 		mock := newMock(t)
@@ -74,9 +83,18 @@ func TestDisputeRepository_Save(t *testing.T) {
 	t.Run("also inserts evidence rows", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewDisputeRepository(mock)
-		withEv, _ := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
-			"pay-2", "psp-2", 5000, "ARS", domain.ReasonFraudulent, testDeadline)
-		_ = withEv.Contest([]domain.Evidence{domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d")}, "", testTime)
+		withEv, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+			capturedRef("pay-2"), "psp-2", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
+		if err != nil {
+			t.Fatalf("new dispute: %v", err)
+		}
+		ev, err := domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d", testTime)
+		if err != nil {
+			t.Fatalf("new evidence: %v", err)
+		}
+		if err := withEv.Contest([]domain.Evidence{ev}, "", testTime); err != nil {
+			t.Fatalf("contest: %v", err)
+		}
 
 		mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(14)...).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -102,8 +120,11 @@ func TestDisputeRepository_Save(t *testing.T) {
 }
 
 func TestDisputeRepository_Update(t *testing.T) {
-	d, _ := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
-		"pay-1", "psp-1", 5000, "ARS", domain.ReasonFraudulent, testDeadline)
+	d, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+		capturedRef("pay-1"), "psp-1", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
+	if err != nil {
+		t.Fatalf("new dispute: %v", err)
+	}
 
 	t.Run("updates dispute", func(t *testing.T) {
 		mock := newMock(t)
@@ -297,9 +318,18 @@ func TestDisputeRepository_ListOverdue(t *testing.T) {
 func TestDisputeRepository_Save_evidenceError(t *testing.T) {
 	mock := newMock(t)
 	repo := NewDisputeRepository(mock)
-	d, _ := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
-		"pay-1", "psp-1", 5000, "ARS", domain.ReasonFraudulent, testDeadline)
-	_ = d.Contest([]domain.Evidence{domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d")}, "", testTime)
+	d, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+		capturedRef("pay-1"), "psp-1", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
+	if err != nil {
+		t.Fatalf("new dispute: %v", err)
+	}
+	ev, err := domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d", testTime)
+	if err != nil {
+		t.Fatalf("new evidence: %v", err)
+	}
+	if err := d.Contest([]domain.Evidence{ev}, "", testTime); err != nil {
+		t.Fatalf("contest: %v", err)
+	}
 
 	mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(14)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
