@@ -16,6 +16,11 @@
 #
 #   docker compose run --rm migrate
 
+# Nombre de proyecto explícito: sin él, Compose usa el nombre del directorio
+# ("docker") y comparte volúmenes (docker_postgres_data) con cualquier otro
+# proyecto cuyo compose también viva en una carpeta docker/.
+name: cobros-platform
+
 services:
 
   # ── Infraestructura ────────────────────────────────────────────────────────
