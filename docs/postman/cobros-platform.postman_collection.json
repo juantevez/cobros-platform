@@ -1,0 +1,1619 @@
+{
+	"info": {
+		"_postman_id": "9eb89daa-3010-4247-bf01-3e967c5ab334",
+		"name": "cobros-platform",
+		"description": "API completa de cobros-platform — Plataforma de pagos multi-tenant\n\n## Flujo rápido para empezar:\n1. Auth > Register Tenant\n2. Auth > Login\n3. Billing > Create Plan → Assign Plan to Tenant\n4. Payments > Process Payment\n5. Payouts > Initiate Payout",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "8588472"
+	},
+	"item": [
+		{
+			"name": "🔍 Health",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/health",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"health"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🔐 Auth & Tenants",
+			"item": [
+				{
+					"name": "Register Tenant",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('tenantID', r.tenant_id);",
+									"  console.log('tenantID:', r.tenant_id);",
+									"}"
+								],
+								"type": "text/javascript",
+								"packages": {},
+								"requests": {}
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"legal_name\": \"Mi Comercio SA\",\n  \"email\": \"admin@micomercio.com\",\n  \"password\": \"Secure123!\",\n  \"tax_id\": \"30-71234567-0\",\n  \"country\": \"AR\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/tenants",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"tenants"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('token', r.access_token);",
+									"  pm.collectionVariables.set('tenantID', r.tenant_id);",
+									"  console.log('Token capturado OK');",
+									"}"
+								],
+								"type": "text/javascript",
+								"packages": {},
+								"requests": {}
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"tenant_id\": \"2cc6f8c4-9efe-4f73-b86f-21cfadbbeb23\",\n  \"email\": \"admin@micomercio.com\",\n  \"password\": \"Secure123!\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/login",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"login"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Refresh Token",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh_token\": \"<refresh_token_aqui>\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/refresh",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"refresh"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Logout",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/logout",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"logout"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Register User in Tenant",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"operador@micomercio.com\",\n  \"password\": \"Secure123!\",\n  \"first_name\": \"Juan\",\n  \"last_name\": \"Tevez\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/tenants/{{tenantID}}/users",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"tenants",
+								"{{tenantID}}",
+								"users"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Assign Role to Member",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"role\": \"admin\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/tenants/{{tenantID}}/members/:userID/role",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"tenants",
+								"{{tenantID}}",
+								"members",
+								":userID",
+								"role"
+							],
+							"variable": [
+								{
+									"key": "userID",
+									"value": "<user_id>"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Create API Key",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Integración producción\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/api-keys",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"api-keys"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "List API Keys",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/api-keys",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"api-keys"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Revoke API Key",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/api-keys/:keyID",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"api-keys",
+								":keyID"
+							],
+							"variable": [
+								{
+									"key": "keyID",
+									"value": "<key_id>"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📋 Onboarding (KYC/KYB)",
+			"item": [
+				{
+					"name": "Start Application",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('appID', r.application_id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"legal_name\": \"Mi Comercio SA\",\n  \"tax_id\": \"30-71234567-0\",\n  \"business_type\": \"llc\",\n  \"website\": \"https://micomercio.com\",\n  \"bank_account_type\": \"CBU\",\n  \"bank_account_number\": \"0720003720000012345678\",\n  \"holder_name\": \"Mi Comercio SA\",\n  \"currency\": \"ARS\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/onboarding/applications",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"onboarding",
+								"applications"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Application",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/onboarding/applications/{{appID}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"onboarding",
+								"applications",
+								"{{appID}}"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Submit Application",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/onboarding/applications/{{appID}}/submit",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"onboarding",
+								"applications",
+								"{{appID}}",
+								"submit"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "[Operator] Approve Application",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"note\": \"Documentación verificada OK\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/onboarding/applications/{{appID}}/approve",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"onboarding",
+								"applications",
+								"{{appID}}",
+								"approve"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "[Operator] Reject Application",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"reason\": \"Documentación incompleta\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/onboarding/applications/{{appID}}/reject",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"onboarding",
+								"applications",
+								"{{appID}}",
+								"reject"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "💰 Billing & Fees",
+			"item": [
+				{
+					"name": "Create Plan",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('planID', r.plan_id);",
+									"  console.log('planID:', r.plan_id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Plan Pro\",\n  \"description\": \"Para comercios con alto volumen\",\n  \"base_rate_bps\": 250,\n  \"base_fixed_amount\": 50,\n  \"monthly_fee\": 0,\n  \"currency\": \"ARS\",\n  \"method_rates\": [\n    { \"method\": \"card\",   \"rate_bps\": 280, \"fixed_amount\": 50 },\n    { \"method\": \"wallet\", \"rate_bps\": 200, \"fixed_amount\": 0  }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/billing/plans",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"billing",
+								"plans"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "List Plans",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/billing/plans",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"billing",
+								"plans"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Plan",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/billing/plans/{{planID}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"billing",
+								"plans",
+								"{{planID}}"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Assign Plan to Tenant",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"plan_id\": \"{{planID}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/billing/tenants/{{tenantID}}/plan",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"billing",
+								"tenants",
+								"{{tenantID}}",
+								"plan"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get My Plan",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/billing/my-plan",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"billing",
+								"my-plan"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "💳 Payments",
+			"item": [
+				{
+					"name": "Process Payment",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('paymentID', r.payment_id);",
+									"  console.log('paymentID:', r.payment_id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"amount\": 10000,\n  \"currency\": \"ARS\",\n  \"payment_method\": \"card\",\n  \"idempotency_key\": \"pay-{{$randomUUID}}\",\n  \"description\": \"Compra en Mi Comercio\",\n  \"psp\": \"mock\",\n  \"metadata\": {\n    \"order_id\": \"ORD-001\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/payments",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"payments"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Payment",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/payments/{{paymentID}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"payments",
+								"{{paymentID}}"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Refund Payment",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"amount\": 10000,\n  \"reason\": \"Solicitud del cliente\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/payments/{{paymentID}}/refund",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"payments",
+								"{{paymentID}}",
+								"refund"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🏦 Payouts",
+			"item": [
+				{
+					"name": "Initiate Payout (saldo completo)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('payoutID', r.payout_id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"currency\": \"ARS\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/payouts",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"payouts"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Initiate Payout (monto específico)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"amount\": 5000,\n  \"currency\": \"ARS\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/payouts",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"payouts"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "List Payouts",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/payouts",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"payouts"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Payout",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/payouts/{{payoutID}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"payouts",
+								"{{payoutID}}"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🔔 Webhooks",
+			"item": [
+				{
+					"name": "Register Endpoint",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('endpointID', r.endpoint_id);",
+									"  console.log('SECRET (guardalo!):', r.secret);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"url\": \"https://webhook.site/<tu-id-aqui>\",\n  \"events\": [\n    \"payment.captured\",\n    \"payment.failed\",\n    \"payout.confirmed\",\n    \"payout.failed\",\n    \"kyc.approved\"\n  ],\n  \"description\": \"Endpoint de pruebas\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/webhooks/endpoints",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"webhooks",
+								"endpoints"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "List Endpoints",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/webhooks/endpoints",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"webhooks",
+								"endpoints"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Deactivate Endpoint",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/webhooks/endpoints/{{endpointID}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"webhooks",
+								"endpoints",
+								"{{endpointID}}"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "List Deliveries",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/webhooks/deliveries?limit=50",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"webhooks",
+								"deliveries"
+							],
+							"query": [
+								{
+									"key": "limit",
+									"value": "50"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Delivery",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('deliveryID', r.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/webhooks/deliveries/{{deliveryID}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"webhooks",
+								"deliveries",
+								"{{deliveryID}}"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Retry Delivery",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/webhooks/deliveries/{{deliveryID}}/retry",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"webhooks",
+								"deliveries",
+								"{{deliveryID}}",
+								"retry"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🔁 Reconciliation",
+			"item": [
+				{
+					"name": "Start Run — Payment vs PSP",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('runID', r.run_id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"type\": \"payment\",\n  \"period_from\": \"2026-06-01T00:00:00Z\",\n  \"period_to\":   \"2026-06-18T23:59:59Z\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/reconciliation/runs",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"reconciliation",
+								"runs"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Start Run — Ledger Internal",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"type\": \"internal_ledger\",\n  \"period_from\": \"2026-06-01T00:00:00Z\",\n  \"period_to\":   \"2026-06-18T23:59:59Z\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/reconciliation/runs",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"reconciliation",
+								"runs"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Upload PSP Report (CSV)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "text/csv"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "transaction_id,amount,currency,status,processed_at\nPSP-REF-001,10000,ARS,captured,2026-06-01T12:00:00Z\nPSP-REF-002,5000,ARS,rejected,2026-06-01T12:05:00Z\nPSP-REF-003,25000,ARS,captured,2026-06-01T13:00:00Z"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/reconciliation/runs/{{runID}}/report",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"reconciliation",
+								"runs",
+								"{{runID}}",
+								"report"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Process Internal Ledger Check",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/reconciliation/runs/{{runID}}/process-internal",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"reconciliation",
+								"runs",
+								"{{runID}}",
+								"process-internal"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "List Runs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/reconciliation/runs?limit=20",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"reconciliation",
+								"runs"
+							],
+							"query": [
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Report (open discrepancies)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/reconciliation/runs/{{runID}}?status=open",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"reconciliation",
+								"runs",
+								"{{runID}}"
+							],
+							"query": [
+								{
+									"key": "status",
+									"value": "open"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Resolve Discrepancy",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"action\": \"resolve\",\n  \"resolved_by\": \"admin@micomercio.com\",\n  \"notes\": \"Confirmado con soporte del PSP — registro perdido en su sistema\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/reconciliation/discrepancies/:discrepancyID/resolve",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"reconciliation",
+								"discrepancies",
+								":discrepancyID",
+								"resolve"
+							],
+							"variable": [
+								{
+									"key": "discrepancyID",
+									"value": "<discrepancy_id>"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🔔 Notifications",
+			"item": [
+				{
+					"name": "List Notifications",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/notifications?limit=50",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"notifications"
+							],
+							"query": [
+								{
+									"key": "limit",
+									"value": "50"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Preferences",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/notifications/preferences",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"notifications",
+								"preferences"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update Preference — Disable payment.failed",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"enabled\": false\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/notifications/preferences/payment.failed",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"notifications",
+								"preferences",
+								"payment.failed"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update Preference — Custom email",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"enabled\": true,\n  \"recipient_email\": \"finanzas@micomercio.com\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/notifications/preferences/payout.confirmed",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"notifications",
+								"preferences",
+								"payout.confirmed"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "⚖️ Disputes & Chargebacks",
+			"item": [
+				{
+					"name": "Open Dispute",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"  const r = pm.response.json();",
+									"  pm.collectionVariables.set('disputeID', r.dispute_id);",
+									"  console.log('disputeID:', r.dispute_id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"payment_id\": \"{{paymentID}}\",\n  \"psp_reference\": \"PSP-DISPUTE-001\",\n  \"amount\": 10000,\n  \"currency\": \"ARS\",\n  \"reason\": \"fraudulent\",\n  \"deadline\": \"2026-06-25T23:59:59Z\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/disputes",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"disputes"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "List Disputes",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/disputes?status=open&limit=50",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"disputes"
+							],
+							"query": [
+								{
+									"key": "status",
+									"value": "open"
+								},
+								{
+									"key": "limit",
+									"value": "50"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Dispute",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/disputes/{{disputeID}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"disputes",
+								"{{disputeID}}"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Contest Dispute (con evidencia)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"evidence\": [\n    {\n      \"evidence_type\": \"receipt\",\n      \"reference\": \"https://s3.amazonaws.com/bucket/receipts/receipt-001.pdf\",\n      \"description\": \"Comprobante de compra firmado por el cliente\"\n    },\n    {\n      \"evidence_type\": \"tracking\",\n      \"reference\": \"https://tracking.andreani.com/envio/AR123456789\",\n      \"description\": \"Código de seguimiento del envío entregado\"\n    }\n  ],\n  \"note\": \"El cliente firmó el comprobante y recibió el producto el 2026-06-05\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/disputes/{{disputeID}}/contest",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"disputes",
+								"{{disputeID}}",
+								"contest"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Accept Dispute",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"note\": \"Aceptamos la devolución — no tenemos evidencia suficiente\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/disputes/{{disputeID}}/accept",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"disputes",
+								"{{disputeID}}",
+								"accept"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "[Operator] Resolve Dispute — Won",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"outcome\": \"won\",\n  \"note\": \"Banco confirmó: la evidencia del comercio fue aceptada\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/disputes/{{disputeID}}/resolve",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"disputes",
+								"{{disputeID}}",
+								"resolve"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "[Operator] Resolve Dispute — Lost",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"outcome\": \"lost\",\n  \"note\": \"Banco resolvió a favor del pagador\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/disputes/{{disputeID}}/resolve",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"disputes",
+								"{{disputeID}}",
+								"resolve"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{token}}",
+				"type": "string"
+			}
+		]
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8080",
+			"type": "string"
+		},
+		{
+			"key": "token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "tenantID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "planID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "paymentID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "payoutID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "disputeID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "endpointID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "deliveryID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "runID",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "appID",
+			"value": "",
+			"type": "string"
+		}
+	]
+}
