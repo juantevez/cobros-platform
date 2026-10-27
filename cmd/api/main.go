@@ -150,7 +150,7 @@ func main() {
 	refreshRepo    := authpg.NewRefreshTokenRepository(pool)
 	clock          := realClock{}
 
-	registerTenant  := application.NewRegisterTenantUseCase(tenantRepo, txManager, authPub)
+	registerTenant  := application.NewRegisterTenantUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
 	activateTenant  := application.NewActivateTenantUseCase(tenantRepo, txManager, authPub)
 	suspendTenant   := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
 	registerUser    := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
