@@ -207,7 +207,7 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 				return uc.publisher.Publish(ctx, payout.PullEvents()...)
 			})
 			return resultOf(payout, false),
-				fmt.Errorf("transfer result unknown, awaiting reconciliation: %w", transferErr)
+				fmt.Errorf("transfer result unknown, awaiting reconciliation: %w", errors.Join(domain.ErrBankTransferUnknown, transferErr))
 		}
 
 		// Rechazo conocido del banco (cuenta inválida, titular distinto, etc.):

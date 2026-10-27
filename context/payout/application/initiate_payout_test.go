@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 	t.Run("happy path confirms payout and publishes initiated + confirmed", func(t *testing.T) {
 		d := newInitiateDeps()
 
-		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 4_000, Currency: "ARS"})
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 4_000, Currency: "ARS", IdempotencyKey: "k1"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -86,7 +87,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 	t.Run("transfer request is built from payout and bank account", func(t *testing.T) {
 		d := newInitiateDeps()
 
-		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 2_500, Currency: "ARS"})
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 2_500, Currency: "ARS", IdempotencyKey: "k1"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -115,7 +116,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.balance.balance = 7_777
 
-		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Currency: "ARS"})
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Currency: "ARS", IdempotencyKey: "k1"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -130,7 +131,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 	t.Run("amount equal to available balance is allowed", func(t *testing.T) {
 		d := newInitiateDeps()
 
-		if _, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 10_000, Currency: "ARS"}); err != nil {
+		if _, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 10_000, Currency: "ARS", IdempotencyKey: "k1"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -138,7 +139,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 	t.Run("empty currency defaults to ARS", func(t *testing.T) {
 		d := newInitiateDeps()
 
-		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -153,7 +154,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 	t.Run("invalid tenant id rejected before calling dependencies", func(t *testing.T) {
 		d := newInitiateDeps()
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: "not-a-uuid", Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: "not-a-uuid", Amount: 100, IdempotencyKey: "k1"})
 		if err == nil || !strings.Contains(err.Error(), "invalid tenant id") {
 			t.Fatalf("expected invalid tenant id error, got %v", err)
 		}
@@ -166,7 +167,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.bank.err = errBoom
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -182,7 +183,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.bank.account = domain.BankAccountInfo{AccountType: "CBU"}
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, domain.ErrNoBankAccount) {
 			t.Fatalf("expected ErrNoBankAccount, got %v", err)
 		}
@@ -195,7 +196,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.balance.err = errBoom
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -219,12 +220,17 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 			d := newInitiateDeps()
 			d.balance.balance = tc.available
 
-			_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: tc.amount, Currency: "ARS"})
+			_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: tc.amount, Currency: "ARS", IdempotencyKey: "k1"})
 			if !errors.Is(err, domain.ErrInsufficientBalance) {
 				t.Fatalf("expected ErrInsufficientBalance, got %v", err)
 			}
-			if len(d.repo.saved) != 0 || d.tx.calls != 0 || len(d.transfer.reqs) != 0 {
+			// El payout se crea dentro de la tx y luego se hace rollback: no queda
+			// persistido (saved/updates vacíos) y nunca se transfiere.
+			if len(d.repo.saved) != 0 || len(d.repo.updates) != 0 || len(d.transfer.reqs) != 0 {
 				t.Error("nothing should be persisted or transferred")
+			}
+			if d.tx.calls == 0 {
+				t.Error("balance check must happen inside the advisory-lock transaction")
 			}
 		})
 	}
@@ -232,11 +238,12 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 	t.Run("invalid currency rejected before persisting", func(t *testing.T) {
 		d := newInitiateDeps()
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, Currency: "PESOS"})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, Currency: "PESOS", IdempotencyKey: "k1"})
 		if !errors.Is(err, domain.ErrInvalidCurrency) {
 			t.Fatalf("expected ErrInvalidCurrency, got %v", err)
 		}
-		if len(d.repo.saved) != 0 || d.tx.calls != 0 {
+		// NewMoney falla dentro de la tx → rollback: nada persistido.
+		if len(d.repo.saved) != 0 || len(d.repo.updates) != 0 {
 			t.Error("nothing should be persisted")
 		}
 	})
@@ -245,7 +252,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.repo.saveErr = errBoom
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -264,7 +271,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.pub.err = errBoom
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -277,7 +284,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.tx.err = errBoom
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -291,7 +298,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d.repo.updateErr = errBoom
 		d.repo.updateErrAt = 1
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -307,7 +314,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.transfer.err = errors.New("account closed")
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if err == nil || !strings.Contains(err.Error(), "transfer failed") {
 			t.Fatalf("expected transfer failed error, got %v", err)
 		}
@@ -341,7 +348,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d.pub.err = errBoom
 		d.pub.errAt = 2
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, d.transfer.err) {
 			t.Fatalf("expected transfer error, got %v", err)
 		}
@@ -355,7 +362,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d.repo.updateErr = errBoom
 		d.repo.updateErrAt = 2
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -372,9 +379,142 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d.pub.err = errBoom
 		d.pub.errAt = 2
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
+		}
+	})
+
+	// ── Idempotencia de negocio (§10.2) ────────────────────────────────────────
+
+	t.Run("missing idempotency key is rejected", func(t *testing.T) {
+		d := newInitiateDeps()
+
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100})
+		if !errors.Is(err, domain.ErrIdempotencyKeyRequired) {
+			t.Fatalf("expected ErrIdempotencyKeyRequired, got %v", err)
+		}
+		if len(d.repo.saved) != 0 || d.tx.calls != 0 || len(d.transfer.reqs) != 0 {
+			t.Error("nothing should be persisted or transferred")
+		}
+	})
+
+	t.Run("retry with same key replays existing payout without second transfer", func(t *testing.T) {
+		d := newInitiateDeps()
+		cmd := InitiatePayoutCmd{TenantID: tenantA, Amount: 4_000, Currency: "ARS", IdempotencyKey: "same-key"}
+
+		first, err := d.uc().Execute(ctx, cmd)
+		if err != nil {
+			t.Fatalf("first execute: %v", err)
+		}
+		if first.Replayed {
+			t.Error("first call should not be a replay")
+		}
+
+		second, err := d.uc().Execute(ctx, cmd)
+		if err != nil {
+			t.Fatalf("retry execute: %v", err)
+		}
+		if !second.Replayed {
+			t.Error("retry should be flagged as replay")
+		}
+		if second.PayoutID != first.PayoutID {
+			t.Errorf("replay returned different payout: %q vs %q", second.PayoutID, first.PayoutID)
+		}
+		if second.Status != domain.StatusConfirmed.String() {
+			t.Errorf("replay status = %q, want confirmed (final state)", second.Status)
+		}
+		// Un solo payout persistido y una sola transferencia al banco.
+		if len(d.repo.saved) != 1 {
+			t.Errorf("expected 1 saved payout, got %d", len(d.repo.saved))
+		}
+		if len(d.transfer.reqs) != 1 {
+			t.Errorf("expected exactly 1 bank transfer, got %d", len(d.transfer.reqs))
+		}
+	})
+
+	t.Run("same key with different amount returns conflict", func(t *testing.T) {
+		d := newInitiateDeps()
+		if _, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 4_000, Currency: "ARS", IdempotencyKey: "dup"}); err != nil {
+			t.Fatalf("first execute: %v", err)
+		}
+
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 5_000, Currency: "ARS", IdempotencyKey: "dup"})
+		if !errors.Is(err, domain.ErrIdempotencyKeyConflict) {
+			t.Fatalf("expected ErrIdempotencyKeyConflict, got %v", err)
+		}
+		if len(d.transfer.reqs) != 1 {
+			t.Error("conflicting retry must not trigger a second transfer")
+		}
+	})
+
+	t.Run("lookup by key error aborts before balance check", func(t *testing.T) {
+		d := newInitiateDeps()
+		d.repo.findKeyErr = errBoom
+
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("expected errBoom, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "lookup idempotency key") {
+			t.Errorf("error not wrapped with context: %v", err)
+		}
+		if len(d.transfer.reqs) != 0 {
+			t.Error("transfer should not run when lookup fails")
+		}
+	})
+
+	// ── Resultado indeterminado de transferencia (§10.3) ───────────────────────
+
+	t.Run("timeout marks payout unknown and does not revert funds", func(t *testing.T) {
+		d := newInitiateDeps()
+		d.transfer.err = fmt.Errorf("call bank: %w", context.DeadlineExceeded)
+
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
+		if err == nil || !errors.Is(err, domain.ErrBankTransferUnknown) {
+			t.Fatalf("expected ErrBankTransferUnknown, got %v", err)
+		}
+		if res.Status != domain.StatusUnknown.String() {
+			t.Errorf("status = %q, want unknown", res.Status)
+		}
+		saved := d.repo.saved[0]
+		if saved.Status() != domain.StatusUnknown {
+			t.Errorf("aggregate status = %q, want unknown", saved.Status())
+		}
+		// No se emite payout.failed.v1: los fondos quedan en payout_transit.
+		wantEvents := []string{"payout.initiated.v1", "payout.unknown.v1"}
+		if got := d.pub.eventTypes(); !reflect.DeepEqual(got, wantEvents) {
+			t.Errorf("events = %v, want %v", got, wantEvents)
+		}
+		wantUpdates := []domain.PayoutStatus{domain.StatusProcessing, domain.StatusUnknown}
+		if !reflect.DeepEqual(d.repo.updates, wantUpdates) {
+			t.Errorf("updates = %v, want %v", d.repo.updates, wantUpdates)
+		}
+	})
+
+	t.Run("network error classified as indeterminate also goes to unknown", func(t *testing.T) {
+		d := newInitiateDeps()
+		d.transfer.err = errors.New("dial tcp: i/o timeout")
+
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
+		if !errors.Is(err, domain.ErrBankTransferUnknown) {
+			t.Fatalf("expected ErrBankTransferUnknown, got %v", err)
+		}
+		if res.Status != domain.StatusUnknown.String() {
+			t.Errorf("status = %q, want unknown", res.Status)
+		}
+	})
+
+	t.Run("known rejection still fails definitively", func(t *testing.T) {
+		d := newInitiateDeps()
+		d.transfer.err = errors.New("CBU invalido")
+
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
+		if errors.Is(err, domain.ErrBankTransferUnknown) {
+			t.Fatal("explicit rejection must not be treated as unknown")
+		}
+		if d.repo.saved[0].Status() != domain.StatusFailed {
+			t.Errorf("status = %q, want failed", d.repo.saved[0].Status())
 		}
 	})
 }

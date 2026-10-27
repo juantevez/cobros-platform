@@ -31,18 +31,28 @@ func (r *pgPayoutRepository) Save(ctx context.Context, p *domain.Payout) error {
 			id, tenant_id, amount, currency,
 			bank_acct_type, bank_acct_num, bank_name, holder_name,
 			status, bank_reference, failure_reason, ledger_entry_key,
+			idempotency_key,
 			initiated_at, confirmed_at, failed_at,
 			created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		p.ID().String(), p.TenantID().String(),
 		p.Amount().Amount(), p.Amount().Currency(),
 		ba.AccountType, ba.AccountNumber(), nullStr(ba.BankName), ba.HolderName,
 		p.Status().String(), nullStr(p.BankReference()), nullStr(p.FailureReason()),
-		p.LedgerEntryKey(),
+		p.LedgerEntryKey(), p.IdempotencyKey(),
 		p.InitiatedAt(), p.ConfirmedAt(), p.FailedAt(),
 		p.CreatedAt(), p.UpdatedAt(),
 	)
-	return wrapErr("save", err)
+	if err != nil {
+		// Violación del UNIQUE (tenant_id, idempotency_key): otro request con la
+		// misma clave ganó la carrera. El caso de uso la mapea a un retry.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUniqueViolation {
+			return fmt.Errorf("payout repo: save: %w", domain.ErrPayoutAlreadyExists)
+		}
+		return wrapErr("save", err)
+	}
+	return nil
 }
 
 func (r *pgPayoutRepository) Update(ctx context.Context, p *domain.Payout) error {
@@ -101,6 +111,7 @@ const baseSelect = `
 	SELECT id, tenant_id, amount, currency,
 	       bank_acct_type, bank_acct_num, COALESCE(bank_name,''), holder_name,
 	       status, COALESCE(bank_reference,''), COALESCE(failure_reason,''), ledger_entry_key,
+	       COALESCE(idempotency_key,''),
 	       initiated_at, confirmed_at, failed_at,
 	       created_at, updated_at
 	FROM payouts`
@@ -119,6 +130,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		&idStr, &tenantIDStr, &amount, &currency,
 		&acctType, &acctNum, &bankName, &holderName,
 		&status, &bankRef, &failReason, &ledgerKey,
+		&idemKey,
 		&initiatedAt, &confirmedAt, &failedAt,
 		&createdAt, &updatedAt,
 	); err != nil {
@@ -134,7 +146,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		domain.ReconstituteMoney(amount, currency),
 		domain.MustBankAccountInfo(acctType, acctNum, bankName, holderName, currency),
 		domain.PayoutStatus(status),
-		bankRef, failReason, ledgerKey,
+		bankRef, failReason, ledgerKey, idemKey,
 		initiatedAt, confirmedAt, failedAt,
 		createdAt.UTC(), updatedAt.UTC(),
 	), nil

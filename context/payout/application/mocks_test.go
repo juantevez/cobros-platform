@@ -23,11 +23,13 @@ type fakeRepo struct {
 	saved       []*domain.Payout
 	updates     []domain.PayoutStatus
 	byID        map[domain.PayoutID]*domain.Payout
+	byKey       map[string]*domain.Payout // payouts indexados por idempotency key
 	list        []*domain.Payout
 	saveErr     error
 	updateErr   error
 	updateErrAt int // si > 0, sólo falla el Update número N (1-based)
 	findErr     error
+	findKeyErr  error // error inyectado en FindByIdempotencyKey (distinto de NotFound)
 	listErr     error
 
 	// capturados para aserciones
@@ -40,6 +42,16 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payout) error {
 		return r.saveErr
 	}
 	r.saved = append(r.saved, p)
+	// Simula el índice UNIQUE (tenant, idempotency_key): los replays de retry
+	// encuentran el payout por FindByIdempotencyKey igual que en Postgres.
+	if r.byID == nil {
+		r.byID = map[domain.PayoutID]*domain.Payout{}
+	}
+	if r.byKey == nil {
+		r.byKey = map[string]*domain.Payout{}
+	}
+	r.byID[p.ID()] = p
+	r.byKey[p.IdempotencyKey()] = p
 	return nil
 }
 
@@ -47,6 +59,11 @@ func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout) error {
 	r.updates = append(r.updates, p.Status())
 	if r.updateErr != nil && (r.updateErrAt == 0 || r.updateErrAt == len(r.updates)) {
 		return r.updateErr
+	}
+	// El update persiste la transición sobre la copia canónica del repo, de
+	// modo que un replay posterior observe el estado final (confirmed/failed).
+	if r.byID != nil {
+		r.byID[p.ID()] = p
 	}
 	return nil
 }
@@ -56,6 +73,17 @@ func (r *fakeRepo) FindByID(ctx context.Context, id domain.PayoutID) (*domain.Pa
 		return nil, r.findErr
 	}
 	p, ok := r.byID[id]
+	if !ok {
+		return nil, domain.ErrPayoutNotFound
+	}
+	return p, nil
+}
+
+func (r *fakeRepo) FindByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, key string) (*domain.Payout, error) {
+	if r.findKeyErr != nil {
+		return nil, r.findKeyErr
+	}
+	p, ok := r.byKey[key]
 	if !ok {
 		return nil, domain.ErrPayoutNotFound
 	}
@@ -168,7 +196,7 @@ func validBankAccount() domain.BankAccountInfo {
 // buildPayout crea un payout real en estado initiated (sin eventos pendientes).
 func buildPayout(tenantID string, amount int64) *domain.Payout {
 	money, _ := domain.NewMoney(amount, "ARS")
-	p, _ := domain.NewPayout(domain.NewPayoutID(), domain.TenantID(tenantID), money, validBankAccount())
+	p, _ := domain.NewPayout(domain.NewPayoutID(), domain.TenantID(tenantID), money, validBankAccount(), "build_"+tenantID)
 	p.PullEvents()
 	return p
 }

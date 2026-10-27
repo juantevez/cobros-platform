@@ -29,25 +29,45 @@ func NewPayoutHandler(
 // Initiate solicita un desembolso.
 //
 //	POST /api/v1/payouts
+//
+// La clave de idempotencia es obligatoria (header `Idempotency-Key`, o campo
+// `idempotency_key` en el body). Un retry con la misma clave retorna el payout
+// existente (200) en lugar de desembolsar dos veces; reutilizar la clave con
+// otro monto o moneda devuelve 409.
 func (h *PayoutHandler) Initiate(c *gin.Context) {
 	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
 
 	var req struct {
-		Amount   int64  `json:"amount"`   // 0 = usar saldo completo
-		Currency string `json:"currency"` // default ARS
+		Amount         int64  `json:"amount"`          // 0 = usar saldo completo
+		Currency       string `json:"currency"`        // default ARS
+		IdempotencyKey string `json:"idempotency_key"` // opcional si se envía por header
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
+	// El header tiene prioridad; el campo del body es alternativa para clients
+	// que no pueden setear headers (mismo patrón que otros endpoints no usan,
+	// pero ambos caminos son válidos).
+	key := c.GetHeader("Idempotency-Key")
+	if key == "" {
+		key = req.IdempotencyKey
+	}
+
 	result, err := h.initiate.Execute(c.Request.Context(), application.InitiatePayoutCmd{
-		TenantID: tenantID,
-		Amount:   req.Amount,
-		Currency: req.Currency,
+		TenantID:       tenantID,
+		Amount:         req.Amount,
+		Currency:       req.Currency,
+		IdempotencyKey: key,
 	})
 	if err != nil {
 		respondDomainError(c, err)
+		return
+	}
+	// Replay idempotente: el recurso ya existía → 200 (no 201).
+	if result.Replayed {
+		c.JSON(http.StatusOK, result)
 		return
 	}
 	c.JSON(http.StatusCreated, result)
@@ -98,8 +118,12 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidTransition):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidAmount),
-		errors.Is(err, domain.ErrInvalidCurrency):
+		errors.Is(err, domain.ErrInvalidCurrency),
+		errors.Is(err, domain.ErrIdempotencyKeyRequired):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrIdempotencyKeyConflict),
+		errors.Is(err, domain.ErrPayoutAlreadyExists):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
