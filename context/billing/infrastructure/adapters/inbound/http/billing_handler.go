@@ -13,11 +13,11 @@ import (
 
 // BillingHandler expone la gestión de planes y el plan activo del tenant.
 type BillingHandler struct {
-	createPlan     *application.CreatePlanUseCase
-	assignPlan     *application.AssignPlanUseCase
-	getPlan        *application.GetPlanUseCase
-	listPlans      *application.ListPlansUseCase
-	getTenantPlan  *application.GetTenantPlanUseCase
+	createPlan    *application.CreatePlanUseCase
+	assignPlan    *application.AssignPlanUseCase
+	getPlan       *application.GetPlanUseCase
+	listPlans     *application.ListPlansUseCase
+	getTenantPlan *application.GetTenantPlanUseCase
 }
 
 func NewBillingHandler(
@@ -39,19 +39,19 @@ func NewBillingHandler(
 // ── Planes (operador) ─────────────────────────────────────────────────────────
 
 type createPlanReq struct {
-	Name            string                  `json:"name"              binding:"required"`
-	Description     string                  `json:"description"`
-	BaseRateBps     int64                   `json:"base_rate_bps"     binding:"required"`
-	BaseFixedAmount int64                   `json:"base_fixed_amount"`
-	MonthlyFee      int64                   `json:"monthly_fee"`
-	Currency        string                  `json:"currency"          binding:"required"`
-	MethodRates     []methodRateReq         `json:"method_rates"`
+	Name            string          `json:"name"      binding:"required"`
+	Description     string          `json:"description"`
+	BaseRateBps     int64           `json:"base_rate_bps"`     // 0 es válido (plan sin comisión proporcional)
+	BaseFixedAmount int64           `json:"base_fixed_amount"` // ≥ 0; la validación es del dominio
+	MonthlyFee      int64           `json:"monthly_fee"`       // ≥ 0; la validación es del dominio
+	Currency        string          `json:"currency"  binding:"required"`
+	MethodRates     []methodRateReq `json:"method_rates"`
 }
 
 type methodRateReq struct {
 	Method      string `json:"method"       binding:"required"`
-	RateBps     int64  `json:"rate_bps"     binding:"required"`
-	FixedAmount int64  `json:"fixed_amount"`
+	RateBps     int64  `json:"rate_bps"`     // 0 es válido
+	FixedAmount int64  `json:"fixed_amount"` // ≥ 0; la validación es del dominio
 }
 
 // CreatePlan crea un nuevo plan de tarifas.
@@ -185,24 +185,44 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidFixedAmount),
 		errors.Is(err, domain.ErrInvalidMonthlyFee),
 		errors.Is(err, domain.ErrPlanNameEmpty),
-		errors.Is(err, domain.ErrInvalidPaymentMethod):
+		errors.Is(err, domain.ErrInvalidPaymentMethod),
+		errors.Is(err, domain.ErrInvalidCurrency),
+		errors.Is(err, domain.ErrCurrencyMismatch):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
 }
 
+// ── Autorización por ruta ─────────────────────────────────────────────────────
+
+// RouteGuards autoriza cada operación de Billing. Se inyectan desde el
+// composition root (cmd/api) para no acoplar este contexto con Auth; en
+// producción son RequireRole(...). Es obligatorio: RegisterRoutes entra en
+// pánico si falta alguno, igual que Payment.
+type RouteGuards struct {
+	ManagePlans gin.HandlerFunc // POST /plans            (platform_support)
+	ReadPlans   gin.HandlerFunc // GET  /plans, /plans/:id (cualquiera autenticado)
+	AssignPlan  gin.HandlerFunc // POST /tenants/:id/plan  (platform_support)
+	ReadMyPlan  gin.HandlerFunc // GET  /my-plan           (admin del tenant)
+}
+
 // RegisterRoutes registra las rutas de Billing en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *BillingHandler) {
+// El grupo debe autenticar (JWT); los guards autorizan por rol/scope.
+func RegisterRoutes(rg *gin.RouterGroup, h *BillingHandler, guards RouteGuards) {
+	if guards.ManagePlans == nil || guards.AssignPlan == nil || guards.ReadMyPlan == nil {
+		panic("billing: RegisterRoutes requires ManagePlans, AssignPlan and ReadMyPlan guards")
+	}
+
 	billing := rg.Group("/billing")
 	{
 		// Gestión de planes (platform_support)
-		billing.POST("/plans", h.CreatePlan)
-		billing.GET("/plans", h.ListPlans)
-		billing.GET("/plans/:planID", h.GetPlan)
-		billing.POST("/tenants/:tenantID/plan", h.AssignPlan)
+		billing.POST("/plans", guards.ManagePlans, h.CreatePlan)
+		billing.GET("/plans", guards.ReadPlans, h.ListPlans)
+		billing.GET("/plans/:planID", guards.ReadPlans, h.GetPlan)
+		billing.POST("/tenants/:tenantID/plan", guards.AssignPlan, h.AssignPlan)
 
 		// Plan del tenant autenticado (admin)
-		billing.GET("/my-plan", h.GetMyPlan)
+		billing.GET("/my-plan", guards.ReadMyPlan, h.GetMyPlan)
 	}
 }

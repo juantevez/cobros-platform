@@ -227,7 +227,11 @@ func main() {
 
 	billinghttp.RegisterRoutes(protected, billinghttp.NewBillingHandler(
 		createPlan, assignPlan, getPlanUC, listPlansUC, getTenantPlan,
-	))
+	), billinghttp.RouteGuards{
+		ManagePlans: authttp.RequireRole(authdomain.RolePlatformSupport),
+		AssignPlan:  authttp.RequireRole(authdomain.RolePlatformSupport),
+		ReadMyPlan:  authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+	})
 
 	// ── Payment Processing ────────────────────────────────────────────────────
 

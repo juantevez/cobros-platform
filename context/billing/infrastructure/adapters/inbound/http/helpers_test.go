@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -11,7 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/juantevez/cobros-platform/context/billing/application"
+	"github.com/juantevez/cobros-platform/context/auth/application"
+	authdomain "github.com/juantevez/cobros-platform/context/auth/domain"
+	billapp "github.com/juantevez/cobros-platform/context/billing/application"
 	"github.com/juantevez/cobros-platform/context/billing/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
@@ -119,18 +122,54 @@ type testEnv struct {
 	tenantID    domain.TenantID
 }
 
+// passThrough es un guard que no restringe (para tests de negocio).
+func passThrough(c *gin.Context) { c.Next() }
+
+// allowRole simula RequireRole: exige que el claim inyectado tenga uno de los
+// roles permitidos. Permite probar la autorización sin acoplar Auth al test.
+func allowRole(roles ...authdomain.Role) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		v, exists := c.Get("auth_claims")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+			return
+		}
+		claims, ok := v.(application.AccessTokenClaims)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+			return
+		}
+		for _, required := range roles {
+			if claims.Role == required {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+	}
+}
+
 func newTestEnv(t *testing.T) *testEnv {
+	return newTestEnvWithGuards(t, RouteGuards{
+		ManagePlans: passThrough,
+		AssignPlan:  passThrough,
+		ReadMyPlan:  passThrough,
+	}, authdomain.RolePlatformSupport)
+}
+
+// newTestEnvWithGuards permite variar guards y rol del usuario autenticado.
+func newTestEnvWithGuards(t *testing.T, guards RouteGuards, role authdomain.Role) *testEnv {
 	t.Helper()
 	plans := newFakePlanRepo()
 	tenantPlans := newFakeTenantPlanRepo()
 	pub := &fakePublisher{}
 	tx := fakeTx{}
 
-	createPlan := application.NewCreatePlanUseCase(plans, tx, pub)
-	assignPlan := application.NewAssignPlanUseCase(plans, tenantPlans, tx, pub)
-	getPlan := application.NewGetPlanUseCase(plans)
-	listPlans := application.NewListPlansUseCase(plans)
-	getTenantPlan := application.NewGetTenantPlanUseCase(tenantPlans)
+	createPlan := billapp.NewCreatePlanUseCase(plans, tx, pub)
+	assignPlan := billapp.NewAssignPlanUseCase(plans, tenantPlans, tx, pub)
+	getPlan := billapp.NewGetPlanUseCase(plans)
+	listPlans := billapp.NewListPlansUseCase(plans)
+	getTenantPlan := billapp.NewGetTenantPlanUseCase(tenantPlans)
 
 	tenantID, err := domain.ParseTenantID(uuid.NewString())
 	if err != nil {
@@ -142,9 +181,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	grp.Use(func(c *gin.Context) {
 		ctx := postgres.WithTenantID(c.Request.Context(), tenantID.String())
 		c.Request = c.Request.WithContext(ctx)
+		c.Set("auth_claims", application.AccessTokenClaims{Role: role})
 		c.Next()
 	})
-	RegisterRoutes(grp, NewBillingHandler(createPlan, assignPlan, getPlan, listPlans, getTenantPlan))
+	RegisterRoutes(grp, NewBillingHandler(createPlan, assignPlan, getPlan, listPlans, getTenantPlan), guards)
 
 	return &testEnv{
 		plans: plans, tenantPlans: tenantPlans, pub: pub,

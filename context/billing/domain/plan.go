@@ -25,8 +25,8 @@ type PricingPlan struct {
 	name        string
 	description string
 	// Tarifa base para cualquier método de pago.
-	baseRateBps     int64  // 0–10000; 250 = 2.50%
-	baseFixedAmount int64  // centavos; ≥ 0
+	baseRateBps     int64 // 0–10000; 250 = 2.50%
+	baseFixedAmount int64 // centavos; ≥ 0
 	// Overrides por método de pago. Si existe, reemplaza la tarifa base.
 	methodRates map[PaymentMethod]MethodRate
 	// Cargo mensual fijo (0 = sin suscripción).
@@ -143,7 +143,7 @@ func (p *PricingPlan) CalculateFee(amount int64, currency string, method Payment
 		return FeeBreakdown{}, fmt.Errorf("amount must be positive")
 	}
 	if currency != p.currency {
-		return FeeBreakdown{}, fmt.Errorf("currency mismatch: plan is %q, payment is %q", p.currency, currency)
+		return FeeBreakdown{}, fmt.Errorf("%w: plan is %q, payment is %q", ErrCurrencyMismatch, p.currency, currency)
 	}
 
 	// Seleccionar tarifa: override por método si existe, base si no.
@@ -181,17 +181,17 @@ func (p *PricingPlan) CalculateFee(amount int64, currency string, method Payment
 
 // ── Getters ───────────────────────────────────────────────────────────────────
 
-func (p *PricingPlan) ID() PlanID                          { return p.id }
-func (p *PricingPlan) Name() string                        { return p.name }
-func (p *PricingPlan) Description() string                 { return p.description }
-func (p *PricingPlan) BaseRateBps() int64                  { return p.baseRateBps }
-func (p *PricingPlan) BaseFixedAmount() int64              { return p.baseFixedAmount }
-func (p *PricingPlan) MonthlyFee() int64                   { return p.monthlyFee }
-func (p *PricingPlan) Currency() string                    { return p.currency }
-func (p *PricingPlan) Active() bool                        { return p.active }
+func (p *PricingPlan) ID() PlanID                                { return p.id }
+func (p *PricingPlan) Name() string                              { return p.name }
+func (p *PricingPlan) Description() string                       { return p.description }
+func (p *PricingPlan) BaseRateBps() int64                        { return p.baseRateBps }
+func (p *PricingPlan) BaseFixedAmount() int64                    { return p.baseFixedAmount }
+func (p *PricingPlan) MonthlyFee() int64                         { return p.monthlyFee }
+func (p *PricingPlan) Currency() string                          { return p.currency }
+func (p *PricingPlan) Active() bool                              { return p.active }
 func (p *PricingPlan) MethodRates() map[PaymentMethod]MethodRate { return p.methodRates }
-func (p *PricingPlan) CreatedAt() time.Time                { return p.createdAt }
-func (p *PricingPlan) UpdatedAt() time.Time                { return p.updatedAt }
+func (p *PricingPlan) CreatedAt() time.Time                      { return p.createdAt }
+func (p *PricingPlan) UpdatedAt() time.Time                      { return p.updatedAt }
 
 func (p *PricingPlan) PullEvents() []Event {
 	evs := p.events

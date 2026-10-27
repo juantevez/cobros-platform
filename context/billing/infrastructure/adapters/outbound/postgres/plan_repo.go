@@ -96,10 +96,10 @@ func (r *pgPlanRepository) ListActive(ctx context.Context) ([]*domain.PricingPla
 
 func (r *pgPlanRepository) scanWithRates(ctx context.Context, conn postgres.Conn, row interface{ Scan(...any) error }) (*domain.PricingPlan, error) {
 	var (
-		idStr, name, desc, currency string
+		idStr, name, desc, currency     string
 		baseRateBps, baseFixed, monthly int64
-		active                      bool
-		createdAt, updatedAt        time.Time
+		active                          bool
+		createdAt, updatedAt            time.Time
 	)
 	if err := row.Scan(&idStr, &name, &desc, &baseRateBps, &baseFixed,
 		&monthly, &currency, &active, &createdAt, &updatedAt); err != nil {
@@ -138,6 +138,15 @@ func (r *pgPlanRepository) scanWithRates(ctx context.Context, conn postgres.Conn
 }
 
 func (r *pgPlanRepository) upsertMethodRates(ctx context.Context, conn postgres.Conn, p *domain.PricingPlan) error {
+	// Reemplazo completo: primero se eliminan las tarifas que el plan ya no
+	// tiene (de lo contrario quedarían rates obsoletos fantasma en la DB).
+	if _, err := conn.Exec(ctx, `
+		DELETE FROM billing_plan_method_rates WHERE plan_id = $1`,
+		p.ID().String(),
+	); err != nil {
+		return fmt.Errorf("plan repo: delete method rates: %w", err)
+	}
+
 	for method, mr := range p.MethodRates() {
 		if _, err := conn.Exec(ctx, `
 			INSERT INTO billing_plan_method_rates (plan_id, method, rate_bps, fixed_amount)
