@@ -2,9 +2,22 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
+
 	"github.com/juantevez/cobros-platform/context/notification/domain"
+)
+
+// ── Errores de aplicación (semántica HTTP en el handler) ─────────────────────
+var (
+	// ErrInvalidPreferenceRequest: entrada inválida del cliente → 400.
+	ErrInvalidPreferenceRequest = errors.New("invalid preference request")
+	// ErrEventTypeUnknown: el event type no tiene template registrado → 404.
+	ErrEventTypeUnknown = errors.New("event type not found")
+	// ErrPreferenceStore: fallo de infraestructura/BD → 500 (sin detalles).
+	ErrPreferenceStore = errors.New("preference storage failure")
 )
 
 // UpdatePreferenceUseCase actualiza o crea una preferencia de notificación.
@@ -16,22 +29,47 @@ func NewUpdatePreferenceUseCase(repo PreferenceRepository) *UpdatePreferenceUseC
 	return &UpdatePreferenceUseCase{prefRepo: repo}
 }
 
+// Execute valida, canonicaliza y hace merge de la preferencia antes del upsert.
+//
+// Reglas:
+//   - El event type se normaliza al tipo canónico del catálogo ("payment.
+//     captured.v1" → "payment.captured"): la clave que guarda el PUT es la
+//     misma que muestra el GET y busca el consumer.
+//   - recipient_email se valida (formato RFC 5322 + longitud) y se
+//     canonicaliza (trim + lowercase) SIEMPRE que venga presente.
+//   - PUT parcial (recipient_email omitido) → merge: se conserva el override
+//     existente; "" explícito → limpiar el override (volver al admin).
 func (uc *UpdatePreferenceUseCase) Execute(ctx context.Context, cmd UpdatePreferenceCmd) error {
 	tenantID, err := domain.ParseTenantID(cmd.TenantID)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrInvalidPreferenceRequest, err)
 	}
 
-	// Normalizar al event type canónico del catálogo: la preferencia SIEMPRE
-	// se guarda bajo la clave sin versión ("payment.captured.v1" →
-	// "payment.captured"). Así la clave que acepta el PUT es exactamente la
-	// que muestra el GET y la que busca el consumer al resolver el
-	// destinatario.
 	eventType := domain.NormalizeEventType(cmd.EventType)
-
-	// Validar que el event type tiene template registrado.
 	if _, ok := domain.FindTemplate(eventType); !ok {
-		return fmt.Errorf("no template registered for event type %q", cmd.EventType)
+		return fmt.Errorf("%w: %q", ErrEventTypeUnknown, cmd.EventType)
+	}
+
+	// Validación + canonicalización del email (bug 5).
+	var newEmail string
+	if cmd.RecipientEmail != nil {
+		newEmail, err = domain.ValidateRecipientEmail(*cmd.RecipientEmail)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidPreferenceRequest, err)
+		}
+	}
+
+	existing, err := uc.prefRepo.FindByTenantAndEvent(ctx, tenantID, eventType)
+	switch {
+	case err == nil:
+		// Merge (bug 6): campo omitido ⇒ mantener el override previo.
+		if cmd.RecipientEmail == nil {
+			newEmail = existing.RecipientEmail()
+		}
+	case errors.Is(err, domain.ErrPreferenceNotFound):
+		// Sin fila previa: arranca vacío (o con el valor del body).
+	default:
+		return fmt.Errorf("%w: %v", ErrPreferenceStore, err)
 	}
 
 	pref := domain.NewNotificationPreference(
@@ -39,10 +77,21 @@ func (uc *UpdatePreferenceUseCase) Execute(ctx context.Context, cmd UpdatePrefer
 		eventType,
 		domain.ChannelEmail,
 		cmd.Enabled,
-		cmd.RecipientEmail,
+		newEmail,
 	)
 
-	return uc.prefRepo.Upsert(ctx, pref)
+	// RLS (bug 9): fijar app.current_tenant en la sesión ANTES del upsert.
+	err = pkgpostgres.RunWithAppTenant(
+		pkgpostgres.WithAppTenant(ctx, "app.current_tenant", cmd.TenantID),
+		uc.prefRepo, // solo necesita BeginTx si el pool lo soporta
+		func(ctx context.Context) error {
+			return uc.prefRepo.Upsert(ctx, pref)
+		},
+	)
+	if err != nil && !errors.Is(err, ErrPreferenceStore) {
+		return fmt.Errorf("%w: %v", ErrPreferenceStore, err)
+	}
+	return err
 }
 
 // GetPreferencesUseCase retorna las preferencias del tenant con defaults.

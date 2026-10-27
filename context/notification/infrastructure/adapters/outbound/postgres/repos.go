@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juantevez/cobros-platform/context/notification/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
+
+// rlsTenantKey es la variable de sesión que las políticas RLS leen para
+// aislar filas por tenant (ver pkg/postgres/rls_session.go).
+const rlsTenantKey = "app.current_tenant"
 
 // ── NotificationRepository ────────────────────────────────────────────────────
 
@@ -25,18 +29,47 @@ func (r *pgNotificationRepository) Save(ctx context.Context, n *domain.Notificat
 	_, err := conn.Exec(ctx, `
 		INSERT INTO notifications
 			(id, tenant_id, event_type, channel, recipient_email,
-			 subject, status, error_msg, sent_at, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+			 subject, status, error_msg, sent_at, created_at, nats_msg_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		n.ID().String(), n.TenantID().String(),
 		n.EventType(), n.Channel().String(),
 		n.RecipientEmail(), n.Subject(),
 		n.Status().String(), nullStr(n.ErrorMsg()),
-		n.SentAt(), n.CreatedAt(),
+		n.SentAt(), n.CreatedAt(), n.NatsMsgID(),
 	)
 	if err != nil {
+		// La UNIQUE natural (tenant_id, event_type, nats_msg_id) materializa la
+		// idempotencia del consumo: una violación NO es un fallo de BD, es la
+		// reentrega de un evento ya procesado. El caso de uso la trata como skip.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return domain.ErrNotificationDuplicate
+		}
 		return fmt.Errorf("notification repo: save: %w", err)
 	}
 	return nil
+}
+
+// ExistsByEventMsg checqueo rápido de dedupe ANTES de enviar el email.
+func (r *pgNotificationRepository) ExistsByEventMsg(
+	ctx context.Context, tenantID domain.TenantID, eventType, msgID string,
+) (bool, error) {
+	if msgID == "" {
+		return false, nil
+	}
+	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
+	var exists bool
+	err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM notifications
+			WHERE tenant_id=$1 AND event_type=$2 AND nats_msg_id=$3
+		)`,
+		tenantID.String(), eventType, msgID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("notification repo: exists by msg: %w", err)
+	}
+	return exists, nil
 }
 
 func (r *pgNotificationRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Notification, error) {

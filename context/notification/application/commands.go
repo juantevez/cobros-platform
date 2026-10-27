@@ -9,11 +9,16 @@ type SendNotificationCmd struct {
 }
 
 // UpdatePreferenceCmd actualiza una preferencia de notificación.
+//
+// RecipientEmail es *string para distinguir "campo omitido" (nil → mantener
+// el override existente, merge) de "campo presente vacío" ("" → limpiar el
+// override y volver al email del admin). Sin el puntero, un PUT parcial
+// écrasaba el email guardado aunque el cliente no lo enviara.
 type UpdatePreferenceCmd struct {
 	TenantID       string
 	EventType      string
 	Enabled        bool
-	RecipientEmail string // vacío = usar email del admin
+	RecipientEmail *string
 }
 
 // GetPreferencesQuery consulta las preferencias de un tenant.
