@@ -66,12 +66,12 @@ func (s DisputeStatus) IsFinal() bool {
 type DisputeReason string
 
 const (
-	ReasonFraudulent           DisputeReason = "fraudulent"            // el pagador dice que no autorizó el pago
-	ReasonProductNotReceived   DisputeReason = "product_not_received"  // no recibió lo comprado
-	ReasonProductUnacceptable  DisputeReason = "product_unacceptable"  // no era lo prometido
-	ReasonDuplicate            DisputeReason = "duplicate"             // cobrado dos veces
-	ReasonCreditNotProcessed   DisputeReason = "credit_not_processed"  // pidió reembolso y no llegó
-	ReasonGeneral              DisputeReason = "general"               // otro motivo
+	ReasonFraudulent          DisputeReason = "fraudulent"           // el pagador dice que no autorizó el pago
+	ReasonProductNotReceived  DisputeReason = "product_not_received" // no recibió lo comprado
+	ReasonProductUnacceptable DisputeReason = "product_unacceptable" // no era lo prometido
+	ReasonDuplicate           DisputeReason = "duplicate"            // cobrado dos veces
+	ReasonCreditNotProcessed  DisputeReason = "credit_not_processed" // pidió reembolso y no llegó
+	ReasonGeneral             DisputeReason = "general"              // otro motivo
 )
 
 func ParseDisputeReason(s string) (DisputeReason, error) {
@@ -108,26 +108,55 @@ func ParseResolutionOutcome(s string) (ResolutionOutcome, error) {
 
 func (o ResolutionOutcome) String() string { return string(o) }
 
+// ── PaymentRef (DTO cross-context) ────────────────────────────────────────────
+
+// PaymentRef es un DTO read-only con los datos del pago que el caso de uso
+// OpenDispute necesita validar antes de aceptar una disputa. Se define aquí
+// (y no se importa desde el BC Payment) para respetar la frontera entre
+// contextos: el adaptador outbound traduce la fila de `payments` a este DTO.
+type PaymentRef struct {
+	ID       string
+	TenantID string
+	Status   string // "initiated" | "processing" | "captured" | "refunded" | ...
+	Amount   int64  // centavos capturados (gross)
+	Currency string
+}
+
 // ── Evidence ──────────────────────────────────────────────────────────────────
 
 // Evidence es un documento o información enviada al banco para contestar la disputa.
 // La referencia es un identificador externo (URL de S3, ID de documento).
 type Evidence struct {
-	id          EvidenceID
-	evidenceType string  // "receipt", "tracking", "communication", "other"
-	reference   string  // URL o ID externo del documento
-	description string
-	submittedAt time.Time
+	id           EvidenceID
+	evidenceType string // "receipt", "tracking", "communication", "other"
+	reference    string // URL o ID externo del documento
+	description  string
+	submittedAt  time.Time
 }
 
-func NewEvidence(id EvidenceID, evidenceType, reference, description string) Evidence {
+// ValidEvidenceTypes son los tipos de evidencia aceptados por el banco.
+var ValidEvidenceTypes = map[string]bool{
+	"receipt":       true,
+	"tracking":      true,
+	"communication": true,
+	"other":         true,
+}
+
+// NewEvidence crea una evidencia validando tipo y referencia.
+func NewEvidence(id EvidenceID, evidenceType, reference, description string, submittedAt time.Time) (Evidence, error) {
+	if !ValidEvidenceTypes[evidenceType] {
+		return Evidence{}, fmt.Errorf("%w: %q", ErrInvalidEvidenceType, evidenceType)
+	}
+	if reference == "" {
+		return Evidence{}, fmt.Errorf("evidence reference is required")
+	}
 	return Evidence{
 		id:           id,
 		evidenceType: evidenceType,
 		reference:    reference,
 		description:  description,
-		submittedAt:  time.Now().UTC(),
-	}
+		submittedAt:  submittedAt.UTC(),
+	}, nil
 }
 
 func ReconstituteEvidence(id EvidenceID, evidenceType, reference, description string, submittedAt time.Time) Evidence {

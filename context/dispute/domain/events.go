@@ -31,12 +31,12 @@ func (e baseEvent) OccurredAt() time.Time { return e.occurredAt }
 // El Ledger lo consume para crear el hold (merchant_balance → dispute_hold).
 type DisputeOpenedEvent struct {
 	baseEvent
-	DisputeID  string `json:"dispute_id"`
-	PaymentID  string `json:"payment_id"`
-	TenantID   string `json:"tenant_id"`
-	Amount     int64  `json:"amount"`
-	Currency   string `json:"currency"`
-	Reason     string `json:"reason"`
+	DisputeID string `json:"dispute_id"`
+	PaymentID string `json:"payment_id"`
+	TenantID  string `json:"tenant_id"`
+	Amount    int64  `json:"amount"`
+	Currency  string `json:"currency"`
+	Reason    string `json:"reason"`
 }
 
 func (e DisputeOpenedEvent) EventType() string { return "dispute.opened.v1" }
