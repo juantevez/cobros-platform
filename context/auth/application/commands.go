@@ -11,10 +11,13 @@ package application
 
 type RegisterTenantCmd struct {
 	LegalName string
+	Email     string // email del usuario administrador inicial
+	Password  string // contraseña del usuario administrador inicial
 }
 
 type RegisterTenantResult struct {
 	TenantID string
+	UserID   string
 }
 
 type ActivateTenantCmd struct {

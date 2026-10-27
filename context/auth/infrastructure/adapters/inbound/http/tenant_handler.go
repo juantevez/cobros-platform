@@ -31,10 +31,13 @@ func NewTenantHandler(
 
 type registerTenantRequest struct {
 	LegalName string `json:"legal_name" binding:"required"`
+	Email     string `json:"email"    binding:"required"`
+	Password  string `json:"password" binding:"required"`
 }
 
 type registerTenantResponse struct {
 	TenantID string `json:"tenant_id"`
+	UserID   string `json:"user_id"` // admin inicial creado junto al tenant
 }
 
 // Register crea un nuevo comercio en estado Pending.
