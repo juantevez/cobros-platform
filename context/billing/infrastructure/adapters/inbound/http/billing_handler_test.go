@@ -106,12 +106,73 @@ func TestListPlans_Success(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Plans []map[string]any `json:"plans"`
-		Count int              `json:"count"`
+		Plans  []map[string]any `json:"plans"`
+		Limit  int              `json:"limit"`
+		Offset int              `json:"offset"`
+		Total  int64            `json:"total"`
 	}
 	decodeBody(t, rec, &body)
-	if body.Count != 2 || len(body.Plans) != 2 {
-		t.Errorf("expected 2 plans, got count=%d len=%d", body.Count, len(body.Plans))
+	if body.Total != 2 || len(body.Plans) != 2 {
+		t.Errorf("expected 2 plans, got total=%d len=%d", body.Total, len(body.Plans))
+	}
+	if body.Limit != 20 || body.Offset != 0 {
+		t.Errorf("expected default page limit=20 offset=0, got limit=%d offset=%d", body.Limit, body.Offset)
+	}
+}
+
+func TestListPlans_Pagination(t *testing.T) {
+	env := newTestEnv(t)
+	env.seedPlan(t, "Plan A", 250)
+	env.seedPlan(t, "Plan B", 300)
+	env.seedPlan(t, "Plan C", 350)
+
+	rec := env.do(http.MethodGet, "/api/v1/billing/plans?limit=2&offset=2", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Plans  []map[string]any `json:"plans"`
+		Limit  int              `json:"limit"`
+		Offset int              `json:"offset"`
+		Total  int64            `json:"total"`
+	}
+	decodeBody(t, rec, &body)
+	if len(body.Plans) != 1 || body.Total != 3 || body.Limit != 2 || body.Offset != 2 {
+		t.Fatalf("expected 1 plan (tercera), got %+v", body)
+	}
+	if name, _ := body.Plans[0]["name"].(string); name != "Plan C" {
+		t.Fatalf("expected Plan C en la última página, got %q", name)
+	}
+}
+
+func TestListPlans_IncludeInactive(t *testing.T) {
+	env := newTestEnv(t)
+	env.seedPlan(t, "Plan Activo", 250)
+	inactive := env.seedPlan(t, "Plan Viejo", 200)
+	inactive.Deactivate()
+
+	rec := env.do(http.MethodGet, "/api/v1/billing/plans", nil)
+	var body struct {
+		Plans []map[string]any `json:"plans"`
+		Total int64            `json:"total"`
+	}
+	decodeBody(t, rec, &body)
+	if body.Total != 1 {
+		t.Fatalf("por defecto no debe incluir inactivos, got total=%d", body.Total)
+	}
+
+	rec = env.do(http.MethodGet, "/api/v1/billing/plans?include_inactive=true", nil)
+	decodeBody(t, rec, &body)
+	if body.Total != 2 {
+		t.Fatalf("include_inactive=true debe exponer el desactivado, got total=%d", body.Total)
+	}
+}
+
+func TestListPlans_InvalidLimit(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(http.MethodGet, "/api/v1/billing/plans?limit=abc", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
 	}
 }
 

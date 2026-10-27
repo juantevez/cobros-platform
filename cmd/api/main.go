@@ -21,22 +21,45 @@ import (
 	authcrypto "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/crypto"
 	authpg "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/postgres"
 	authtoken "github.com/juantevez/cobros-platform/context/auth/infrastructure/adapters/outbound/token"
-	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
-	ledgerdomain "github.com/juantevez/cobros-platform/context/ledger/domain"
-	ledgerhttp "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/http"
-	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
-	onboardingapp "github.com/juantevez/cobros-platform/context/onboarding/application"
-	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
-	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
-	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	billingapp "github.com/juantevez/cobros-platform/context/billing/application"
+	billingdomain "github.com/juantevez/cobros-platform/context/billing/domain"
+	billinghttp "github.com/juantevez/cobros-platform/context/billing/infrastructure/adapters/inbound/http"
+	billingpg "github.com/juantevez/cobros-platform/context/billing/infrastructure/adapters/outbound/postgres"
+	complianceapp "github.com/juantevez/cobros-platform/context/compliance/application"
+	compliancedomain "github.com/juantevez/cobros-platform/context/compliance/domain"
+	compliancehttp "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/inbound/http"
+	compliancepg "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/outbound/postgres"
 	disputeapp "github.com/juantevez/cobros-platform/context/dispute/application"
 	disputedomain "github.com/juantevez/cobros-platform/context/dispute/domain"
 	disputehttp "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/inbound/http"
 	disputepg "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/outbound/postgres"
+	ledgerapp "github.com/juantevez/cobros-platform/context/ledger/application"
+	ledgerdomain "github.com/juantevez/cobros-platform/context/ledger/domain"
+	ledgerhttp "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/inbound/http"
+	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
 	notificationapp "github.com/juantevez/cobros-platform/context/notification/application"
 	notificationhttp "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/inbound/http"
 	notificationemail "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/email"
 	notificationpg "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/postgres"
+	onboardingapp "github.com/juantevez/cobros-platform/context/onboarding/application"
+	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
+	onboardinghttp "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/inbound/http"
+	onboardingpg "github.com/juantevez/cobros-platform/context/onboarding/infrastructure/adapters/outbound/postgres"
+	paymentapp "github.com/juantevez/cobros-platform/context/payment/application"
+	paymentdomain "github.com/juantevez/cobros-platform/context/payment/domain"
+	paymenthttp "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/inbound/http"
+	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/fees"
+	paymentpg "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/postgres"
+	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/psp"
+	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/risk"
+	paymenttenant "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/tenant"
+	payoutapp "github.com/juantevez/cobros-platform/context/payout/application"
+	payoutdomain "github.com/juantevez/cobros-platform/context/payout/domain"
+	payouthttp "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/inbound/http"
+	payoutledger "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/ledger"
+	payoutonboarding "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/onboarding"
+	payoutpg "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/postgres"
+	payouttransfer "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/transfer/mock"
 	reconciliationapp "github.com/juantevez/cobros-platform/context/reconciliation/application"
 	reconciliationdomain "github.com/juantevez/cobros-platform/context/reconciliation/domain"
 	reconciliationhttp "github.com/juantevez/cobros-platform/context/reconciliation/infrastructure/adapters/inbound/http"
@@ -45,35 +68,12 @@ import (
 	reportingapp "github.com/juantevez/cobros-platform/context/reporting/application"
 	reportinghttp "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/inbound/http"
 	reportingpg "github.com/juantevez/cobros-platform/context/reporting/infrastructure/adapters/outbound/postgres"
-	complianceapp "github.com/juantevez/cobros-platform/context/compliance/application"
-	compliancedomain "github.com/juantevez/cobros-platform/context/compliance/domain"
-	compliancehttp "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/inbound/http"
-	compliancepg "github.com/juantevez/cobros-platform/context/compliance/infrastructure/adapters/outbound/postgres"
 	webhookapp "github.com/juantevez/cobros-platform/context/webhook/application"
 	webhookdomain "github.com/juantevez/cobros-platform/context/webhook/domain"
 	webhookhttp "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/inbound/http"
 	webhookcrypto "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/crypto"
 	webhookdispatcher "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/http"
 	webhookpg "github.com/juantevez/cobros-platform/context/webhook/infrastructure/adapters/outbound/postgres"
-	billingapp "github.com/juantevez/cobros-platform/context/billing/application"
-	billingdomain "github.com/juantevez/cobros-platform/context/billing/domain"
-	billinghttp "github.com/juantevez/cobros-platform/context/billing/infrastructure/adapters/inbound/http"
-	billingpg "github.com/juantevez/cobros-platform/context/billing/infrastructure/adapters/outbound/postgres"
-	paymentapp "github.com/juantevez/cobros-platform/context/payment/application"
-	paymentdomain "github.com/juantevez/cobros-platform/context/payment/domain"
-	payoutdomain "github.com/juantevez/cobros-platform/context/payout/domain"
-	payoutapp "github.com/juantevez/cobros-platform/context/payout/application"
-	payouthttp "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/inbound/http"
-	payoutpg "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/postgres"
-	payoutledger "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/ledger"
-	payoutonboarding "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/onboarding"
-	payouttransfer "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/transfer/mock"
-	paymenthttp "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/inbound/http"
-	paymentpg "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/postgres"
-	paymenttenant "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/tenant"
-	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/fees"
-	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/psp"
-	"github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/risk"
 	"github.com/juantevez/cobros-platform/pkg/config"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 	"github.com/juantevez/cobros-platform/pkg/outbox"
@@ -123,16 +123,16 @@ func main() {
 
 	// ── Publishers tipados por contexto ───────────────────────────────────────
 	// Go no tiene covarianza en variadics: NewEventPublisher[T] resuelve esto.
-	authPub        := outbox.NewEventPublisher[authdomain.Event](outboxStore)
-	ledgerPub      := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
-	onboardingPub  := outbox.NewEventPublisher[onboardingdomain.Event](outboxStore)
-	paymentPub     := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
-	payoutPub      := outbox.NewEventPublisher[payoutdomain.Event](outboxStore)
-	billingPub     := outbox.NewEventPublisher[billingdomain.Event](outboxStore)
-	webhookPub     := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
-	reconcPub      := outbox.NewEventPublisher[reconciliationdomain.Event](outboxStore)
-	disputePub     := outbox.NewEventPublisher[disputedomain.Event](outboxStore)
-	compliancePub  := outbox.NewEventPublisher[compliancedomain.Event](outboxStore)
+	authPub := outbox.NewEventPublisher[authdomain.Event](outboxStore)
+	ledgerPub := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
+	onboardingPub := outbox.NewEventPublisher[onboardingdomain.Event](outboxStore)
+	paymentPub := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
+	payoutPub := outbox.NewEventPublisher[payoutdomain.Event](outboxStore)
+	billingPub := outbox.NewEventPublisher[billingdomain.Event](outboxStore)
+	webhookPub := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
+	reconcPub := outbox.NewEventPublisher[reconciliationdomain.Event](outboxStore)
+	disputePub := outbox.NewEventPublisher[disputedomain.Event](outboxStore)
+	compliancePub := outbox.NewEventPublisher[compliancedomain.Event](outboxStore)
 
 	// ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -143,27 +143,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	tenantRepo     := authpg.NewTenantRepository(pool)
-	userRepo       := authpg.NewUserRepository(pool)
+	tenantRepo := authpg.NewTenantRepository(pool)
+	userRepo := authpg.NewUserRepository(pool)
 	membershipRepo := authpg.NewMembershipRepository(pool)
-	apiKeyRepo     := authpg.NewApiKeyRepository(pool)
-	refreshRepo    := authpg.NewRefreshTokenRepository(pool)
-	clock          := realClock{}
+	apiKeyRepo := authpg.NewApiKeyRepository(pool)
+	refreshRepo := authpg.NewRefreshTokenRepository(pool)
+	clock := realClock{}
 
-	registerTenant  := application.NewRegisterTenantUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
-	activateTenant  := application.NewActivateTenantUseCase(tenantRepo, txManager, authPub)
-	suspendTenant   := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
-	registerUser    := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
-	authenticate    := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock)
-	refreshTokenUC  := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock)
-	logoutUC        := application.NewLogoutUseCase(refreshRepo)
-	issueApiKey     := application.NewIssueApiKeyUseCase(tenantRepo, apiKeyRepo, hasher, txManager, authPub)
-	revokeApiKey    := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)
-	assignRole      := application.NewAssignRoleUseCase(tenantRepo, userRepo, membershipRepo, txManager, authPub)
+	registerTenant := application.NewRegisterTenantUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
+	activateTenant := application.NewActivateTenantUseCase(tenantRepo, txManager, authPub)
+	suspendTenant := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
+	registerUser := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
+	authenticate := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock)
+	refreshTokenUC := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock)
+	logoutUC := application.NewLogoutUseCase(refreshRepo)
+	issueApiKey := application.NewIssueApiKeyUseCase(tenantRepo, apiKeyRepo, hasher, txManager, authPub)
+	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)
+	assignRole := application.NewAssignRoleUseCase(tenantRepo, userRepo, membershipRepo, txManager, authPub)
 
 	tenantHandler := authttp.NewTenantHandler(registerTenant, activateTenant, suspendTenant)
-	authHandler   := authttp.NewAuthHandler(authenticate, refreshTokenUC, logoutUC)
-	userHandler   := authttp.NewUserHandler(registerUser, assignRole)
+	authHandler := authttp.NewAuthHandler(authenticate, refreshTokenUC, logoutUC)
+	userHandler := authttp.NewUserHandler(registerUser, assignRole)
 	apiKeyHandler := authttp.NewApiKeyHandler(issueApiKey, revokeApiKey)
 
 	router := authttp.NewRouter(jwtIssuer, apiKeyRepo, hasher, tenantHandler, authHandler, userHandler, apiKeyHandler)
@@ -174,13 +174,13 @@ func main() {
 	// ── Ledger ────────────────────────────────────────────────────────────────
 
 	accountRepo := ledgerpg.NewAccountRepository(pool)
-	entryRepo   := ledgerpg.NewEntryRepository(pool)
+	entryRepo := ledgerpg.NewEntryRepository(pool)
 	balanceRepo := ledgerpg.NewBalanceRepository(pool)
 
 	createAccount := ledgerapp.NewCreateAccountUseCase(accountRepo, txManager, ledgerPub)
-	postEntry     := ledgerapp.NewPostEntryUseCase(entryRepo, accountRepo, balanceRepo, txManager, ledgerPub, ledgerapp.RealClock())
-	reverseEntry  := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerPub)
-	getBalance    := ledgerapp.NewGetBalanceUseCase(accountRepo, balanceRepo)
+	postEntry := ledgerapp.NewPostEntryUseCase(entryRepo, accountRepo, balanceRepo, txManager, ledgerPub, ledgerapp.RealClock())
+	reverseEntry := ledgerapp.NewReverseEntryUseCase(entryRepo, balanceRepo, txManager, ledgerPub)
+	getBalance := ledgerapp.NewGetBalanceUseCase(accountRepo, balanceRepo)
 
 	ledgerhttp.RegisterRoutes(protected,
 		ledgerhttp.NewAccountHandler(createAccount, getBalance),
@@ -190,22 +190,22 @@ func main() {
 
 	// ── Audit ─────────────────────────────────────────────────────────────────
 
-	auditRepo    := auditpg.NewAuditLogRepository(pool)
-	auditHasher  := auditcrypto.NewSHA256Hasher()
-	listLogs     := auditapp.NewListLogsUseCase(auditRepo)
-	verifyChain  := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
+	auditRepo := auditpg.NewAuditLogRepository(pool)
+	auditHasher := auditcrypto.NewSHA256Hasher()
+	listLogs := auditapp.NewListLogsUseCase(auditRepo)
+	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
 	audithttp.RegisterRoutes(protected, audithttp.NewAuditHandler(listLogs, verifyChain))
 
 	// ── Onboarding ────────────────────────────────────────────────────────────
 
-	appRepo         := onboardingpg.NewApplicationRepository(pool)
-	submitApp       := onboardingapp.NewSubmitApplicationUseCase(appRepo, txManager, onboardingPub)
-	uploadDoc       := onboardingapp.NewUploadDocumentUseCase(appRepo, txManager)
-	addPerson       := onboardingapp.NewAddPersonUseCase(appRepo, txManager)
-	setBankAcct     := onboardingapp.NewSetBankAccountUseCase(appRepo, txManager)
+	appRepo := onboardingpg.NewApplicationRepository(pool)
+	submitApp := onboardingapp.NewSubmitApplicationUseCase(appRepo, txManager, onboardingPub)
+	uploadDoc := onboardingapp.NewUploadDocumentUseCase(appRepo, txManager)
+	addPerson := onboardingapp.NewAddPersonUseCase(appRepo, txManager)
+	setBankAcct := onboardingapp.NewSetBankAccountUseCase(appRepo, txManager)
 	submitForReview := onboardingapp.NewSubmitForReviewUseCase(appRepo, txManager, onboardingPub)
-	reviewApp       := onboardingapp.NewReviewApplicationUseCase(appRepo, txManager, onboardingPub)
-	getApp          := onboardingapp.NewGetApplicationUseCase(appRepo)
+	reviewApp := onboardingapp.NewReviewApplicationUseCase(appRepo, txManager, onboardingPub)
+	getApp := onboardingapp.NewGetApplicationUseCase(appRepo)
 
 	onboardinghttp.RegisterRoutes(protected,
 		onboardinghttp.NewOnboardingHandler(submitApp, uploadDoc, addPerson, setBankAcct, submitForReview, getApp),
@@ -215,39 +215,45 @@ func main() {
 
 	// ── Billing & Fees ────────────────────────────────────────────────────────
 
-	planRepo       := billingpg.NewPlanRepository(pool)
+	planRepo := billingpg.NewPlanRepository(pool)
 	tenantPlanRepo := billingpg.NewTenantPlanRepository(pool)
 
-	createPlan    := billingapp.NewCreatePlanUseCase(planRepo, txManager, billingPub)
-	assignPlan    := billingapp.NewAssignPlanUseCase(planRepo, tenantPlanRepo, txManager, billingPub)
+	createPlan := billingapp.NewCreatePlanUseCase(planRepo, txManager, billingPub)
+	updatePlanUC := billingapp.NewUpdatePlanUseCase(planRepo, txManager, billingPub)
+	deactivateUC := billingapp.NewDeactivatePlanUseCase(planRepo, txManager, billingPub)
+	assignPlan := billingapp.NewAssignPlanUseCase(planRepo, tenantPlanRepo, txManager, billingPub)
 	calculateFeeUC := billingapp.NewCalculateFeeUseCase(planRepo, tenantPlanRepo, 300)
-	getPlanUC     := billingapp.NewGetPlanUseCase(planRepo)
-	listPlansUC   := billingapp.NewListPlansUseCase(planRepo)
+	getPlanUC := billingapp.NewGetPlanUseCase(planRepo)
+	listPlansUC := billingapp.NewListPlansPageUseCase(planRepo)
 	getTenantPlan := billingapp.NewGetTenantPlanUseCase(tenantPlanRepo)
+	listTenantPlansUC := billingapp.NewListTenantPlansUseCase(tenantPlanRepo)
 
 	billinghttp.RegisterRoutes(protected, billinghttp.NewBillingHandler(
-		createPlan, assignPlan, getPlanUC, listPlansUC, getTenantPlan,
+		createPlan, updatePlanUC, deactivateUC, assignPlan, getPlanUC,
+		listPlansUC, getTenantPlan, listTenantPlansUC,
 	), billinghttp.RouteGuards{
-		ManagePlans: authttp.RequireRole(authdomain.RolePlatformSupport),
-		AssignPlan:  authttp.RequireRole(authdomain.RolePlatformSupport),
-		ReadMyPlan:  authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+		ManagePlans:    authttp.RequireRole(authdomain.RolePlatformSupport),
+		ReadPlans:      authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+		AssignPlan:     authttp.RequireRole(authdomain.RolePlatformSupport),
+		ReadTenantPlan: authttp.RequireRole(authdomain.RolePlatformSupport),
+		ReadMyPlan:     authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
 	})
 
 	// ── Payment Processing ────────────────────────────────────────────────────
 
-	paymentRepo   := paymentpg.NewPaymentRepository(pool)
-	pspRouter     := psp.NewRouter()
+	paymentRepo := paymentpg.NewPaymentRepository(pool)
+	pspRouter := psp.NewRouter()
 	riskEvaluator := risk.NewPermissiveEvaluator()
 	// BillingFeeCalculator usa el plan real del tenant.
 	// Fallback: 300 bps (3%) si el tenant no tiene plan asignado.
 	feeCalculator := fees.NewBillingFeeCalculator(calculateFeeUC)
 
 	// Solo tenants activos (KYC aprobado, no suspendidos) pueden cobrar.
-	tenantGate    := paymenttenant.NewStatusGate(pool)
+	tenantGate := paymenttenant.NewStatusGate(pool)
 
 	processPayment := paymentapp.NewProcessPaymentUseCase(paymentRepo, tenantGate, pspRouter, riskEvaluator, feeCalculator, txManager, paymentPub)
-	refundPayment  := paymentapp.NewRefundPaymentUseCase(paymentRepo, pspRouter, txManager, paymentPub)
-	getPayment     := paymentapp.NewGetPaymentUseCase(paymentRepo)
+	refundPayment := paymentapp.NewRefundPaymentUseCase(paymentRepo, pspRouter, txManager, paymentPub)
+	getPayment := paymentapp.NewGetPaymentUseCase(paymentRepo)
 
 	// Payments acepta JWT (panel del comercio) o API key (integraciones
 	// server-to-server), por eso usa su propio grupo y no `protected`.
@@ -264,33 +270,33 @@ func main() {
 
 	// ── Payouts ───────────────────────────────────────────────────────────────
 
-	payoutRepo      := payoutpg.NewPayoutRepository(pool)
-	balanceChecker  := payoutledger.NewBalanceChecker(pool)
-	bankProvider    := payoutonboarding.NewBankAccountProvider(pool)
+	payoutRepo := payoutpg.NewPayoutRepository(pool)
+	balanceChecker := payoutledger.NewBalanceChecker(pool)
+	bankProvider := payoutonboarding.NewBankAccountProvider(pool)
 	transferAdapter := payouttransfer.New()
 
 	initiatePayout := payoutapp.NewInitiatePayoutUseCase(
 		payoutRepo, balanceChecker, bankProvider, transferAdapter, txManager, payoutPub,
 	)
-	getPayout   := payoutapp.NewGetPayoutUseCase(payoutRepo)
+	getPayout := payoutapp.NewGetPayoutUseCase(payoutRepo)
 	listPayouts := payoutapp.NewListPayoutsUseCase(payoutRepo)
 
 	payouthttp.RegisterRoutes(protected, payouthttp.NewPayoutHandler(initiatePayout, getPayout, listPayouts))
 
 	// ── Webhooks ──────────────────────────────────────────────────────────────
 
-	endpointRepo  := webhookpg.NewEndpointRepository(pool)
-	deliveryRepo  := webhookpg.NewDeliveryRepository(pool)
-	secretGen     := webhookcrypto.NewHexSecretGenerator()
+	endpointRepo := webhookpg.NewEndpointRepository(pool)
+	deliveryRepo := webhookpg.NewDeliveryRepository(pool)
+	secretGen := webhookcrypto.NewHexSecretGenerator()
 	httpDispatcher := webhookdispatcher.NewDispatcher()
 
-	registerEndpoint   := webhookapp.NewRegisterEndpointUseCase(endpointRepo, secretGen, txManager, webhookPub)
+	registerEndpoint := webhookapp.NewRegisterEndpointUseCase(endpointRepo, secretGen, txManager, webhookPub)
 	deactivateEndpoint := webhookapp.NewDeactivateEndpointUseCase(endpointRepo, txManager, webhookPub)
-	dispatchEvent      := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
-	retryDelivery      := webhookapp.NewRetryDeliveryUseCase(endpointRepo, deliveryRepo, httpDispatcher, webhookPub, clock)
-	listEndpoints      := webhookapp.NewListEndpointsUseCase(endpointRepo)
-	listDeliveries     := webhookapp.NewListDeliveriesUseCase(deliveryRepo)
-	getDelivery        := webhookapp.NewGetDeliveryUseCase(deliveryRepo)
+	dispatchEvent := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
+	retryDelivery := webhookapp.NewRetryDeliveryUseCase(endpointRepo, deliveryRepo, httpDispatcher, webhookPub, clock)
+	listEndpoints := webhookapp.NewListEndpointsUseCase(endpointRepo)
+	listDeliveries := webhookapp.NewListDeliveriesUseCase(deliveryRepo)
+	getDelivery := webhookapp.NewGetDeliveryUseCase(deliveryRepo)
 
 	_ = dispatchEvent // usado en cmd/worker; declarado aquí para visibilidad
 
@@ -301,18 +307,18 @@ func main() {
 
 	// ── Reconciliation ────────────────────────────────────────────────────────
 
-	runRepo         := reconciliationpg.NewRunRepository(pool)
+	runRepo := reconciliationpg.NewRunRepository(pool)
 	discrepancyRepo := reconciliationpg.NewDiscrepancyRepository(pool)
-	paymentReader   := reconciliationreaders.NewPaymentReader(pool)
-	ledgerChecker   := reconciliationreaders.NewLedgerChecker(pool)
-	csvParser       := reconciliationreaders.NewCSVReportParser()
+	paymentReader := reconciliationreaders.NewPaymentReader(pool)
+	ledgerChecker := reconciliationreaders.NewLedgerChecker(pool)
+	csvParser := reconciliationreaders.NewCSVReportParser()
 
-	startRun        := reconciliationapp.NewStartReconciliationUseCase(runRepo)
-	processReport   := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, reconcPub)
+	startRun := reconciliationapp.NewStartReconciliationUseCase(runRepo)
+	processReport := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, reconcPub)
 	processInternal := reconciliationapp.NewProcessInternalUseCase(runRepo, discrepancyRepo, ledgerChecker, reconcPub)
-	resolveDisc     := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo)
-	getReport       := reconciliationapp.NewGetReportUseCase(runRepo, discrepancyRepo)
-	listRuns        := reconciliationapp.NewListRunsUseCase(runRepo)
+	resolveDisc := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo)
+	getReport := reconciliationapp.NewGetReportUseCase(runRepo, discrepancyRepo)
+	listRuns := reconciliationapp.NewListRunsUseCase(runRepo)
 
 	reconciliationhttp.RegisterRoutes(protected, reconciliationhttp.NewReconciliationHandler(
 		startRun, processReport, processInternal, resolveDisc, getReport, listRuns,
@@ -320,8 +326,8 @@ func main() {
 
 	// ── Notifications ─────────────────────────────────────────────────────────
 
-	notifRepo   := notificationpg.NewNotificationRepository(pool)
-	prefRepo    := notificationpg.NewPreferenceRepository(pool)
+	notifRepo := notificationpg.NewNotificationRepository(pool)
+	prefRepo := notificationpg.NewPreferenceRepository(pool)
 	contactReader := notificationpg.NewContactReader(pool)
 	// En producción: usar SMTPSender con config desde env vars.
 	// En desarrollo: LogSender loguea en stdout sin enviar.
@@ -339,10 +345,10 @@ func main() {
 		emailSender = notificationemail.NewLogSender(logger.With("component", "email"))
 	}
 
-	sendNotif   := notificationapp.NewSendNotificationUseCase(notifRepo, prefRepo, emailSender, contactReader, logger.With("component", "notification"))
-	listNotifs  := notificationapp.NewListNotificationsUseCase(notifRepo)
-	getPrefs    := notificationapp.NewGetPreferencesUseCase(prefRepo)
-	updatePref  := notificationapp.NewUpdatePreferenceUseCase(prefRepo)
+	sendNotif := notificationapp.NewSendNotificationUseCase(notifRepo, prefRepo, emailSender, contactReader, logger.With("component", "notification"))
+	listNotifs := notificationapp.NewListNotificationsUseCase(notifRepo)
+	getPrefs := notificationapp.NewGetPreferencesUseCase(prefRepo)
+	updatePref := notificationapp.NewUpdatePreferenceUseCase(prefRepo)
 
 	notificationhttp.RegisterRoutes(protected, notificationhttp.NewNotificationHandler(
 		listNotifs, getPrefs, updatePref,
@@ -352,13 +358,13 @@ func main() {
 
 	// ── Disputes & Chargebacks ────────────────────────────────────────────────
 
-	disputeRepo   := disputepg.NewDisputeRepository(pool)
-	openDispute   := disputeapp.NewOpenDisputeUseCase(disputeRepo, txManager, disputePub)
-	contestDisp   := disputeapp.NewContestDisputeUseCase(disputeRepo, txManager, clock)
-	acceptDisp    := disputeapp.NewAcceptDisputeUseCase(disputeRepo, txManager, disputePub)
-	resolveDisp   := disputeapp.NewResolveDisputeUseCase(disputeRepo, txManager, disputePub)
-	getDisp       := disputeapp.NewGetDisputeUseCase(disputeRepo, clock)
-	listDisp      := disputeapp.NewListDisputesUseCase(disputeRepo, clock)
+	disputeRepo := disputepg.NewDisputeRepository(pool)
+	openDispute := disputeapp.NewOpenDisputeUseCase(disputeRepo, txManager, disputePub)
+	contestDisp := disputeapp.NewContestDisputeUseCase(disputeRepo, txManager, clock)
+	acceptDisp := disputeapp.NewAcceptDisputeUseCase(disputeRepo, txManager, disputePub)
+	resolveDisp := disputeapp.NewResolveDisputeUseCase(disputeRepo, txManager, disputePub)
+	getDisp := disputeapp.NewGetDisputeUseCase(disputeRepo, clock)
+	listDisp := disputeapp.NewListDisputesUseCase(disputeRepo, clock)
 
 	disputehttp.RegisterRoutes(protected, disputehttp.NewDisputeHandler(
 		openDispute, contestDisp, acceptDisp, resolveDisp, getDisp, listDisp,
@@ -377,12 +383,12 @@ func main() {
 	// Lado de consulta/gestión (alertas + watchlist). La generación de alertas
 	// (screening + monitoreo) ocurre en cmd/worker.
 
-	alertRepo     := compliancepg.NewAlertRepository(pool)
+	alertRepo := compliancepg.NewAlertRepository(pool)
 	watchlistRepo := compliancepg.NewWatchlistRepository(pool)
 
-	listAlerts    := complianceapp.NewListAlertsUseCase(alertRepo)
-	getAlert      := complianceapp.NewGetAlertUseCase(alertRepo)
-	resolveAlert  := complianceapp.NewResolveAlertUseCase(alertRepo, txManager, compliancePub, clock)
+	listAlerts := complianceapp.NewListAlertsUseCase(alertRepo)
+	getAlert := complianceapp.NewGetAlertUseCase(alertRepo)
+	resolveAlert := complianceapp.NewResolveAlertUseCase(alertRepo, txManager, compliancePub, clock)
 	addWatchEntry := complianceapp.NewAddWatchlistEntryUseCase(watchlistRepo, clock)
 	listWatchlist := complianceapp.NewListWatchlistUseCase(watchlistRepo)
 
@@ -422,4 +428,5 @@ func main() {
 }
 
 type realClock struct{}
+
 func (realClock) Now() time.Time { return time.Now().UTC() }

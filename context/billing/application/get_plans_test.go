@@ -49,41 +49,93 @@ func TestGetPlan_NotFound(t *testing.T) {
 	}
 }
 
-func TestListPlans_Success(t *testing.T) {
+func TestListPlansPage_OnlyActiveByDefault(t *testing.T) {
 	active := buildPlan(t, "Activo", 250, 0)
 	inactive := buildPlan(t, "Inactivo", 250, 0)
 	inactive.Deactivate()
-	uc := NewListPlansUseCase(newFakePlanRepo(active, inactive))
+	uc := NewListPlansPageUseCase(newFakePlanRepo(active, inactive))
 
-	views, err := uc.Execute(context.Background())
+	views, page, err := uc.Execute(context.Background(), ListPlansPageQuery{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(views) != 1 {
-		t.Fatalf("expected 1 active plan, got %d", len(views))
+	if len(views) != 1 || views[0].Name != "Activo" {
+		t.Fatalf("expected only the active plan, got %+v", views)
 	}
-	if views[0].Name != "Activo" {
-		t.Fatalf("expected Activo, got %q", views[0].Name)
+	if page.Limit != 20 || page.Offset != 0 || page.Total != 1 {
+		t.Fatalf("unexpected page: %+v", page)
 	}
 }
 
-func TestListPlans_Empty(t *testing.T) {
-	uc := NewListPlansUseCase(newFakePlanRepo())
-	views, err := uc.Execute(context.Background())
+func TestListPlansPage_IncludeInactive(t *testing.T) {
+	active := buildPlan(t, "Activo", 250, 0)
+	inactive := buildPlan(t, "Inactivo", 250, 0)
+	inactive.Deactivate()
+	uc := NewListPlansPageUseCase(newFakePlanRepo(active, inactive))
+
+	views, page, err := uc.Execute(context.Background(), ListPlansPageQuery{IncludeInactive: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(views) != 0 {
-		t.Fatalf("expected 0 plans, got %d", len(views))
+	if len(views) != 2 {
+		t.Fatalf("expected 2 plans (orden por nombre), got %+v", views)
+	}
+	if views[0].Name != "Activo" || views[1].Name != "Inactivo" {
+		t.Fatalf("expected orden alfabético, got %q, %q", views[0].Name, views[1].Name)
+	}
+	if page.Total != 2 {
+		t.Fatalf("expected total 2, got %d", page.Total)
 	}
 }
 
-func TestListPlans_ErrorPropagates(t *testing.T) {
+func TestListPlansPage_LimitOffset(t *testing.T) {
+	repo := newFakePlanRepo(
+		buildPlan(t, "A", 100, 0),
+		buildPlan(t, "B", 200, 0),
+		buildPlan(t, "C", 300, 0),
+	)
+	uc := NewListPlansPageUseCase(repo)
+
+	views, page, err := uc.Execute(context.Background(), ListPlansPageQuery{Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(views) != 2 || views[0].Name != "B" || views[1].Name != "C" {
+		t.Fatalf("expected B,C en la página, got %+v", views)
+	}
+	if page.Limit != 2 || page.Offset != 1 || page.Total != 3 {
+		t.Fatalf("unexpected page: %+v", page)
+	}
+}
+
+func TestListPlansPage_CapsLimit(t *testing.T) {
+	uc := NewListPlansPageUseCase(newFakePlanRepo(buildPlan(t, "A", 100, 0)))
+	_, page, err := uc.Execute(context.Background(), ListPlansPageQuery{Limit: 5000})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if page.Limit != MaxPageSize {
+		t.Fatalf("expected limit acotado a %d, got %d", MaxPageSize, page.Limit)
+	}
+}
+
+func TestListPlansPage_Empty(t *testing.T) {
+	uc := NewListPlansPageUseCase(newFakePlanRepo())
+	views, page, err := uc.Execute(context.Background(), ListPlansPageQuery{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(views) != 0 || page.Total != 0 {
+		t.Fatalf("expected 0 plans, got %d (total %d)", len(views), page.Total)
+	}
+}
+
+func TestListPlansPage_ErrorPropagates(t *testing.T) {
 	repo := newFakePlanRepo()
 	repo.listErr = errBoom
-	uc := NewListPlansUseCase(repo)
+	uc := NewListPlansPageUseCase(repo)
 
-	_, err := uc.Execute(context.Background())
+	_, _, err := uc.Execute(context.Background(), ListPlansPageQuery{})
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("expected errBoom, got %v", err)
 	}

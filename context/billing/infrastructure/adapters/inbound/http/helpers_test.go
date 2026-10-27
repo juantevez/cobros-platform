@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -70,9 +71,30 @@ func (r *fakePlanRepo) ListActive(ctx context.Context) ([]*domain.PricingPlan, e
 	}
 	return out, nil
 }
+func (r *fakePlanRepo) ListPage(ctx context.Context, filter billapp.PlanListFilter) ([]*domain.PricingPlan, billapp.Page, error) {
+	var all []*domain.PricingPlan
+	for _, p := range r.byID {
+		if filter.IncludeInactive || p.Active() {
+			all = append(all, p)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Name() < all[j].Name() })
+	page := filter.Page
+	page.Normalize()
+	start, end := page.Offset, page.Offset+page.Limit
+	if start > len(all) {
+		start = len(all)
+	}
+	if end > len(all) {
+		end = len(all)
+	}
+	page.Total = int64(len(all))
+	return all[start:end], page, nil
+}
 
 type fakeTenantPlanRepo struct {
 	active map[domain.TenantID]*domain.TenantPlan
+	all    []*domain.TenantPlan
 }
 
 func newFakeTenantPlanRepo() *fakeTenantPlanRepo {
@@ -80,6 +102,7 @@ func newFakeTenantPlanRepo() *fakeTenantPlanRepo {
 }
 
 func (r *fakeTenantPlanRepo) Save(ctx context.Context, tp *domain.TenantPlan) error {
+	r.all = append(r.all, tp)
 	if tp.Active() {
 		r.active[tp.TenantID()] = tp
 	}
@@ -103,6 +126,25 @@ func (r *fakeTenantPlanRepo) ListByTenant(ctx context.Context, tenantID domain.T
 		return []*domain.TenantPlan{tp}, nil
 	}
 	return nil, nil
+}
+func (r *fakeTenantPlanRepo) ListByTenantPage(ctx context.Context, tenantID domain.TenantID, page billapp.Page) ([]*domain.TenantPlan, billapp.Page, error) {
+	var all []*domain.TenantPlan
+	for _, tp := range r.all {
+		if tp.TenantID() == tenantID {
+			all = append(all, tp)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ValidFrom().After(all[j].ValidFrom()) })
+	page.Normalize()
+	start, end := page.Offset, page.Offset+page.Limit
+	if start > len(all) {
+		start = len(all)
+	}
+	if end > len(all) {
+		end = len(all)
+	}
+	page.Total = int64(len(all))
+	return all[start:end], page, nil
 }
 
 type fakePublisher struct{ published []domain.Event }
@@ -151,9 +193,10 @@ func allowRole(roles ...authdomain.Role) gin.HandlerFunc {
 
 func newTestEnv(t *testing.T) *testEnv {
 	return newTestEnvWithGuards(t, RouteGuards{
-		ManagePlans: passThrough,
-		AssignPlan:  passThrough,
-		ReadMyPlan:  passThrough,
+		ManagePlans:    passThrough,
+		AssignPlan:     passThrough,
+		ReadTenantPlan: passThrough,
+		ReadMyPlan:     passThrough,
 	}, authdomain.RolePlatformSupport)
 }
 
@@ -166,10 +209,13 @@ func newTestEnvWithGuards(t *testing.T, guards RouteGuards, role authdomain.Role
 	tx := fakeTx{}
 
 	createPlan := billapp.NewCreatePlanUseCase(plans, tx, pub)
+	updatePlan := billapp.NewUpdatePlanUseCase(plans, tx, pub)
+	deactivatePlan := billapp.NewDeactivatePlanUseCase(plans, tx, pub)
 	assignPlan := billapp.NewAssignPlanUseCase(plans, tenantPlans, tx, pub)
 	getPlan := billapp.NewGetPlanUseCase(plans)
-	listPlans := billapp.NewListPlansUseCase(plans)
+	listPlans := billapp.NewListPlansPageUseCase(plans)
 	getTenantPlan := billapp.NewGetTenantPlanUseCase(tenantPlans)
+	listTenantPlans := billapp.NewListTenantPlansUseCase(tenantPlans)
 
 	tenantID, err := domain.ParseTenantID(uuid.NewString())
 	if err != nil {
@@ -184,7 +230,10 @@ func newTestEnvWithGuards(t *testing.T, guards RouteGuards, role authdomain.Role
 		c.Set("auth_claims", application.AccessTokenClaims{Role: role})
 		c.Next()
 	})
-	RegisterRoutes(grp, NewBillingHandler(createPlan, assignPlan, getPlan, listPlans, getTenantPlan), guards)
+	RegisterRoutes(grp, NewBillingHandler(
+		createPlan, updatePlan, deactivatePlan, assignPlan, getPlan,
+		listPlans, getTenantPlan, listTenantPlans,
+	), guards)
 
 	return &testEnv{
 		plans: plans, tenantPlans: tenantPlans, pub: pub,

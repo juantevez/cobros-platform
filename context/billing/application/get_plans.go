@@ -27,25 +27,6 @@ func (uc *GetPlanUseCase) Execute(ctx context.Context, q GetPlanQuery) (PlanView
 	return toPlanView(plan), nil
 }
 
-// ListPlansUseCase lista todos los planes activos del catálogo.
-type ListPlansUseCase struct{ planRepo PlanRepository }
-
-func NewListPlansUseCase(planRepo PlanRepository) *ListPlansUseCase {
-	return &ListPlansUseCase{planRepo: planRepo}
-}
-
-func (uc *ListPlansUseCase) Execute(ctx context.Context) ([]PlanView, error) {
-	plans, err := uc.planRepo.ListActive(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list plans: %w", err)
-	}
-	views := make([]PlanView, len(plans))
-	for i, p := range plans {
-		views[i] = toPlanView(p)
-	}
-	return views, nil
-}
-
 // ListPlansPageUseCase lista el catálogo con paginación (limit/offset).
 // includeInactive=true expone también los planes desactivados (gestión).
 type ListPlansPageUseCase struct{ planRepo PlanRepository }

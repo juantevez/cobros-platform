@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"sort"
 	"testing"
 	"time"
 
@@ -85,10 +86,40 @@ func (r *fakePlanRepo) ListActive(ctx context.Context) ([]*domain.PricingPlan, e
 	return out, nil
 }
 
+// ListPage pagina el catálogo ordenado por nombre, emulando el repositorio
+// de producción (incluye inactivos solo si filter.IncludeInactive).
+func (r *fakePlanRepo) ListPage(ctx context.Context, filter PlanListFilter) ([]*domain.PricingPlan, Page, error) {
+	if r.listErr != nil {
+		return nil, Page{}, r.listErr
+	}
+	var all []*domain.PricingPlan
+	for _, p := range r.byID {
+		if filter.IncludeInactive || p.Active() {
+			all = append(all, p)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Name() < all[j].Name() })
+
+	page := filter.Page
+	page.Normalize()
+	total := int64(len(all))
+	start := page.Offset
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + page.Limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page.Total = total
+	return all[start:end], page, nil
+}
+
 // ── TenantPlanRepository ──────────────────────────────────────────────────────
 
 type fakeTenantPlanRepo struct {
 	active        map[domain.TenantID]*domain.TenantPlan
+	all           []*domain.TenantPlan // historial completo (activos e inactivos)
 	saved         *domain.TenantPlan
 	updated       *domain.TenantPlan
 	saveErr       error
@@ -105,6 +136,7 @@ func (r *fakeTenantPlanRepo) Save(ctx context.Context, tp *domain.TenantPlan) er
 		return r.saveErr
 	}
 	r.saved = tp
+	r.all = append(r.all, tp)
 	if tp.Active() {
 		r.active[tp.TenantID()] = tp
 	}
@@ -138,6 +170,30 @@ func (r *fakeTenantPlanRepo) ListByTenant(ctx context.Context, tenantID domain.T
 		return []*domain.TenantPlan{tp}, nil
 	}
 	return nil, nil
+}
+
+// ListByTenantPage pagina el historial del tenant ordenado por valid_from DESC.
+func (r *fakeTenantPlanRepo) ListByTenantPage(ctx context.Context, tenantID domain.TenantID, page Page) ([]*domain.TenantPlan, Page, error) {
+	var all []*domain.TenantPlan
+	for _, tp := range r.all {
+		if tp.TenantID() == tenantID {
+			all = append(all, tp)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ValidFrom().After(all[j].ValidFrom()) })
+
+	page.Normalize()
+	total := int64(len(all))
+	start := page.Offset
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + page.Limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page.Total = total
+	return all[start:end], page, nil
 }
 
 // ── EventPublisher ────────────────────────────────────────────────────────────
