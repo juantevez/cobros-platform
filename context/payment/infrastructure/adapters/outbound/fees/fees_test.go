@@ -64,6 +64,9 @@ func (f fakeTenantPlans) FindActive(context.Context, billingdomain.TenantID) (*b
 func (f fakeTenantPlans) ListByTenant(context.Context, billingdomain.TenantID) ([]*billingdomain.TenantPlan, error) {
 	return nil, nil
 }
+func (f fakeTenantPlans) ListByTenantPage(context.Context, billingdomain.TenantID, billingapp.Page) ([]*billingdomain.TenantPlan, billingapp.Page, error) {
+	return nil, billingapp.Page{}, nil
+}
 
 // fakePlans implementa billing PlanRepository; no se usa en los caminos testeados.
 type fakePlans struct{}
@@ -74,6 +77,9 @@ func (fakePlans) FindByID(context.Context, billingdomain.PlanID) (*billingdomain
 	return nil, errors.New("not used")
 }
 func (fakePlans) ListActive(context.Context) ([]*billingdomain.PricingPlan, error) { return nil, nil }
+func (fakePlans) ListPage(context.Context, billingapp.PlanListFilter) ([]*billingdomain.PricingPlan, billingapp.Page, error) {
+	return nil, billingapp.Page{}, nil
+}
 
 func newBillingCalc(findErr error, fallbackBps int64) *BillingFeeCalculator {
 	return NewBillingFeeCalculator(billingapp.NewCalculateFeeUseCase(fakePlans{}, fakeTenantPlans{err: findErr}, fallbackBps))
