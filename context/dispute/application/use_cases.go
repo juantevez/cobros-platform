@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -9,18 +10,36 @@ import (
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
 )
 
+// ErrDuplicatePaymentKey es el centinela que el repositorio retorna cuando el
+// INSERT falla contra la constraint UNIQUE(payment_id). El caso de uso lo
+// traduce a domain.ErrDuplicateDispute (HTTP 409) en lugar de un 500.
+var ErrDuplicatePaymentKey = errors.New("duplicate payment key")
+
 // ── OpenDispute ───────────────────────────────────────────────────────────────
 
 // OpenDisputeUseCase registra una nueva disputa notificada por el banco/PSP.
 // Emite DisputeOpenedEvent → Ledger congela fondos en dispute_hold.
 type OpenDisputeUseCase struct {
 	repo      DisputeRepository
+	payments  PaymentReader
 	txManager TxManager
 	publisher EventPublisher
+	clock     Clock
 }
 
-func NewOpenDisputeUseCase(repo DisputeRepository, txManager TxManager, publisher EventPublisher) *OpenDisputeUseCase {
-	return &OpenDisputeUseCase{repo: repo, txManager: txManager, publisher: publisher}
+// defaultResponseWindow es el plazo que se aplica cuando el operador no indica
+// un deadline explícito (7 días corridos desde la apertura).
+const defaultResponseWindow = 7 * 24 * time.Hour
+
+func NewOpenDisputeUseCase(
+	repo DisputeRepository,
+	payments PaymentReader,
+	txManager TxManager,
+	publisher EventPublisher,
+	clock Clock,
+) *OpenDisputeUseCase {
+	return &OpenDisputeUseCase{repo: repo, payments: payments, txManager: txManager,
+		publisher: publisher, clock: clock}
 }
 
 func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (OpenDisputeResult, error) {
@@ -34,21 +53,36 @@ func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (
 		return OpenDisputeResult{}, err
 	}
 
-	// Idempotencia: solo una disputa por pago.
-	if existing, err := uc.repo.FindByPaymentID(ctx, cmd.PaymentID); err == nil && existing != nil {
+	now := uc.clock.Now()
+
+	// Idempotencia: solo una disputa por pago. Un error de infraestructura NO
+	// puede tratarse como "sin duplicado": se propaga para no abrir dos disputas
+	// sobre el mismo payment_id.
+	existing, err := uc.repo.FindByPaymentID(ctx, cmd.PaymentID)
+	switch {
+	case err == nil && existing != nil:
 		return OpenDisputeResult{}, domain.ErrDuplicateDispute
+	case err != nil && !errors.Is(err, domain.ErrDisputeNotFound):
+		return OpenDisputeResult{}, fmt.Errorf("check duplicate dispute: %w", err)
+	}
+
+	// Validaciones cross-context del pago (invariantes en el dominio):
+	// existencia, estado captured, titularidad, monto y moneda.
+	payment, err := uc.payments.FindPayment(ctx, cmd.PaymentID)
+	if err != nil {
+		return OpenDisputeResult{}, err
 	}
 
 	if cmd.Deadline.IsZero() {
-		cmd.Deadline = time.Now().UTC().Add(7 * 24 * time.Hour) // default 7 días
+		cmd.Deadline = now.Add(defaultResponseWindow)
 	}
 
 	id := domain.NewDisputeID()
 	dispute, err := domain.NewDispute(
 		id, tenantID,
-		cmd.PaymentID, cmd.PSPReference,
+		payment, cmd.PSPReference,
 		cmd.Amount, cmd.Currency,
-		reason, cmd.Deadline,
+		reason, cmd.Deadline, now,
 	)
 	if err != nil {
 		return OpenDisputeResult{}, err
@@ -60,10 +94,15 @@ func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (
 		}
 		return uc.publisher.Publish(ctx, dispute.PullEvents()...)
 	}); err != nil {
+		// Si la carrera la ganó la constraint UNIQUE(payment_id), respondemos
+		// 409 (ErrDuplicateDispute) y no un 500 genérico.
+		if errors.Is(err, ErrDuplicatePaymentKey) {
+			return OpenDisputeResult{}, domain.ErrDuplicateDispute
+		}
 		return OpenDisputeResult{}, err
 	}
 
-	return OpenDisputeResult{DisputeID: id.String()}, nil
+	return OpenDisputeResult{DisputeID: dispute.ID().String()}, nil
 }
 
 // ── ContestDispute ────────────────────────────────────────────────────────────
@@ -97,9 +136,13 @@ func (uc *ContestDisputeUseCase) Execute(ctx context.Context, cmd ContestDispute
 		return domain.ErrDisputeNotFound
 	}
 
-	evidence := make([]domain.Evidence, len(cmd.Evidence))
-	for i, e := range cmd.Evidence {
-		evidence[i] = domain.NewEvidence(domain.NewEvidenceID(), e.EvidenceType, e.Reference, e.Description)
+	evidence := make([]domain.Evidence, 0, len(cmd.Evidence))
+	for _, e := range cmd.Evidence {
+		ev, err := domain.NewEvidence(domain.NewEvidenceID(), e.EvidenceType, e.Reference, e.Description, uc.clock.Now())
+		if err != nil {
+			return err
+		}
+		evidence = append(evidence, ev)
 	}
 
 	if err := dispute.Contest(evidence, cmd.Note, uc.clock.Now()); err != nil {
@@ -119,10 +162,11 @@ type AcceptDisputeUseCase struct {
 	repo      DisputeRepository
 	txManager TxManager
 	publisher EventPublisher
+	clock     Clock
 }
 
-func NewAcceptDisputeUseCase(repo DisputeRepository, txManager TxManager, publisher EventPublisher) *AcceptDisputeUseCase {
-	return &AcceptDisputeUseCase{repo: repo, txManager: txManager, publisher: publisher}
+func NewAcceptDisputeUseCase(repo DisputeRepository, txManager TxManager, publisher EventPublisher, clock Clock) *AcceptDisputeUseCase {
+	return &AcceptDisputeUseCase{repo: repo, txManager: txManager, publisher: publisher, clock: clock}
 }
 
 func (uc *AcceptDisputeUseCase) Execute(ctx context.Context, cmd AcceptDisputeCmd) error {
@@ -143,7 +187,7 @@ func (uc *AcceptDisputeUseCase) Execute(ctx context.Context, cmd AcceptDisputeCm
 		return domain.ErrDisputeNotFound
 	}
 
-	if err := dispute.Accept(cmd.Note); err != nil {
+	if err := dispute.Accept(cmd.Note, uc.clock.Now()); err != nil {
 		return err
 	}
 
@@ -163,10 +207,11 @@ type ResolveDisputeUseCase struct {
 	repo      DisputeRepository
 	txManager TxManager
 	publisher EventPublisher
+	clock     Clock
 }
 
-func NewResolveDisputeUseCase(repo DisputeRepository, txManager TxManager, publisher EventPublisher) *ResolveDisputeUseCase {
-	return &ResolveDisputeUseCase{repo: repo, txManager: txManager, publisher: publisher}
+func NewResolveDisputeUseCase(repo DisputeRepository, txManager TxManager, publisher EventPublisher, clock Clock) *ResolveDisputeUseCase {
+	return &ResolveDisputeUseCase{repo: repo, txManager: txManager, publisher: publisher, clock: clock}
 }
 
 func (uc *ResolveDisputeUseCase) Execute(ctx context.Context, cmd ResolveDisputeCmd) error {
@@ -185,7 +230,7 @@ func (uc *ResolveDisputeUseCase) Execute(ctx context.Context, cmd ResolveDispute
 		return err
 	}
 
-	if err := dispute.Resolve(outcome, cmd.Note); err != nil {
+	if err := dispute.Resolve(outcome, cmd.Note, uc.clock.Now()); err != nil {
 		return err
 	}
 
@@ -306,7 +351,7 @@ func (p *ExpiryPoller) runCycle(ctx context.Context) {
 		return
 	}
 	for _, d := range overdue {
-		if err := d.Expire(); err != nil {
+		if err := d.Expire(now); err != nil {
 			continue
 		}
 		if err := p.txManager.RunInTx(ctx, func(ctx context.Context) error {

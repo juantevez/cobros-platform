@@ -26,54 +26,92 @@ import (
 //	lost:     dispute_hold CREDIT → (fondos devueltos al banco, salen del sistema)
 //	accepted: igual que lost
 type Dispute struct {
-	id           DisputeID
-	tenantID     TenantID
-	paymentID    string   // referencia al pago disputado
-	pspReference string   // referencia del PSP para la disputa
-	amount       int64    // monto disputado en centavos
-	currency     string
-	reason       DisputeReason
-	status       DisputeStatus
-	evidence     []Evidence
-	responseNote string   // nota del comercio al contestar
-	resolvedNote string   // nota del operador al cerrar
-	deadline     time.Time  // fecha límite para contestar
-	openedAt     time.Time
-	respondedAt  *time.Time
-	resolvedAt   *time.Time
+	id             DisputeID
+	tenantID       TenantID
+	paymentID      string // referencia al pago disputado
+	pspReference   string // referencia del PSP para la disputa
+	amount         int64  // monto disputado en centavos
+	capturedAmount int64  // monto capturado del pago al momento de disputar
+	currency       string
+	reason         DisputeReason
+	status         DisputeStatus
+	evidence       []Evidence
+	responseNote   string    // nota del comercio al contestar
+	resolvedNote   string    // nota del operador al cerrar
+	deadline       time.Time // fecha límite para contestar
+	openedAt       time.Time
+	version        int64 // concurrencia optimista (columna `version` en DB)
+	respondedAt    *time.Time
+	resolvedAt     *time.Time
 
 	events []Event
 }
 
 // NewDispute crea una disputa en estado Open.
 // Se llama cuando el banco/PSP notifica al sistema sobre una nueva disputa.
+// payment es el DTO del pago disputado (leído por el caso de uso vía
+// PaymentReader); concentra tres invariantes cross-context antes de mutar:
+// el pago debe existir, pertenecer al tenant de la disputa y estar capturado.
+//
+// now se inyecta desde la capa de aplicación (Clock): una disputa cuyo deadline
+// ya venció no puede crearse (ErrInvalidDeadline), y el openedAt queda anclado
+// al mismo reloj que el resto del ciclo de vida.
 func NewDispute(
 	id DisputeID,
 	tenantID TenantID,
-	paymentID, pspReference string,
+	payment PaymentRef,
+	pspReference string,
 	amount int64, currency string,
 	reason DisputeReason,
 	deadline time.Time,
+	now time.Time,
 ) (*Dispute, error) {
-	if paymentID == "" {
+	if payment.ID == "" {
 		return nil, fmt.Errorf("payment_id is required")
+	}
+	if payment.Status != "captured" {
+		// refunded/failed/etc.: no hay fondos del comercio que congelar.
+		return nil, fmt.Errorf("%w: payment status is %q", ErrPaymentNotCaptured, payment.Status)
+	}
+	if payment.TenantID != "" && string(tenantID) != payment.TenantID {
+		// El pago pertenece a otra aplicación: la disputa debe atribuirse al dueño
+		// del pago (el caller no puede "regalar" disputas a terceros ni roer el
+		// saldo de otro tenant).
+		tenantID = TenantID(payment.TenantID)
+	}
+	if amount > payment.Amount {
+		return nil, fmt.Errorf("%w: disputed amount %d exceeds captured amount %d",
+			ErrAmountExceedsPayment, amount, payment.Amount)
+	}
+	if currency != "" && payment.Currency != "" && currency != payment.Currency {
+		return nil, fmt.Errorf("%w: dispute currency %q != payment currency %q",
+			ErrCurrencyMismatch, currency, payment.Currency)
 	}
 	if amount <= 0 {
 		return nil, fmt.Errorf("amount must be positive")
 	}
+	if deadline.IsZero() {
+		return nil, fmt.Errorf("%w: deadline is required", ErrInvalidDeadline)
+	}
+	if !deadline.After(now) {
+		return nil, fmt.Errorf("%w: deadline %s already passed",
+			ErrInvalidDeadline, deadline.UTC().Format(time.RFC3339))
+	}
 
-	now := time.Now().UTC()
+	now = now.UTC()
 	d := &Dispute{
-		id:           id,
-		tenantID:     tenantID,
-		paymentID:    paymentID,
-		pspReference: pspReference,
-		amount:       amount,
-		currency:     currency,
-		reason:       reason,
-		status:       StatusOpen,
-		deadline:     deadline,
-		openedAt:     now,
+		id:             id,
+		tenantID:       tenantID,
+		paymentID:      paymentID,
+		pspReference:   pspReference,
+		amount:         amount,
+		capturedAmount: payment.Amount,
+		currency:       currency,
+		reason:         reason,
+		status:         StatusOpen,
+		deadline:       deadline,
+		openedAt:       now,
+		version:        1,
 	}
 
 	d.record(DisputeOpenedEvent{
@@ -90,6 +128,9 @@ func NewDispute(
 }
 
 // ReconstituteDispute reconstruye desde el repositorio.
+// loadedVersion es la versión persistida leída por el repositorio; cada
+// transición exitosa la incrementa y Update la usa como guard de concurrencia
+// optimista (UPDATE ... WHERE id = $1 AND version = <esperada>).
 func ReconstituteDispute(
 	id DisputeID, tenantID TenantID,
 	paymentID, pspReference string,
@@ -99,6 +140,7 @@ func ReconstituteDispute(
 	responseNote, resolvedNote string,
 	deadline, openedAt time.Time,
 	respondedAt, resolvedAt *time.Time,
+	loadedVersion int64,
 ) *Dispute {
 	return &Dispute{
 		id: id, tenantID: tenantID,
@@ -109,6 +151,7 @@ func ReconstituteDispute(
 		responseNote: responseNote, resolvedNote: resolvedNote,
 		deadline: deadline, openedAt: openedAt,
 		respondedAt: respondedAt, resolvedAt: resolvedAt,
+		version: loadedVersion,
 	}
 }
 
@@ -128,6 +171,7 @@ func (d *Dispute) Contest(evidence []Evidence, note string, now time.Time) error
 	}
 
 	d.status = StatusUnderReview
+	d.version++
 	d.evidence = append(d.evidence, evidence...)
 	d.responseNote = note
 	d.respondedAt = &now
@@ -135,13 +179,19 @@ func (d *Dispute) Contest(evidence []Evidence, note string, now time.Time) error
 }
 
 // Accept acepta la disputa sin contestar (el comercio reconoce la devolución).
-func (d *Dispute) Accept(note string) error {
+// now se valida contra el deadline: aceptar después de vencido el plazo ya no
+// tiene sentido (el poller cerrará la disputa como expired).
+func (d *Dispute) Accept(note string, now time.Time) error {
 	if d.status != StatusOpen {
 		return fmt.Errorf("%w: cannot accept from %q", ErrInvalidTransition, d.status)
 	}
+	if now.After(d.deadline) {
+		return ErrDisputeExpired
+	}
 
-	now := time.Now().UTC()
+	now = now.UTC()
 	d.status = StatusAccepted
+	d.version++
 	d.resolvedNote = note
 	d.resolvedAt = &now
 
@@ -162,12 +212,12 @@ func (d *Dispute) Accept(note string) error {
 
 // Resolve cierra la disputa con el resultado del banco.
 // Solo aplica desde under_review.
-func (d *Dispute) Resolve(outcome ResolutionOutcome, note string) error {
+func (d *Dispute) Resolve(outcome ResolutionOutcome, note string, now time.Time) error {
 	if d.status != StatusUnderReview {
 		return fmt.Errorf("%w: cannot resolve from %q", ErrInvalidTransition, d.status)
 	}
 
-	now := time.Now().UTC()
+	now = now.UTC()
 	switch outcome {
 	case OutcomeWon:
 		d.status = StatusWon
@@ -176,6 +226,7 @@ func (d *Dispute) Resolve(outcome ResolutionOutcome, note string) error {
 	default:
 		return fmt.Errorf("%w: %q not valid for resolve", ErrInvalidResolutionOutcome, outcome)
 	}
+	d.version++
 
 	d.resolvedNote = note
 	d.resolvedAt = &now
@@ -195,13 +246,15 @@ func (d *Dispute) Resolve(outcome ResolutionOutcome, note string) error {
 
 // Expire cierra la disputa por vencimiento del plazo.
 // Solo aplica desde open.
-func (d *Dispute) Expire() error {
+func (d *Dispute) Expire(now time.Time) error {
 	if d.status != StatusOpen {
 		return fmt.Errorf("%w: cannot expire from %q", ErrInvalidTransition, d.status)
 	}
 
-	now := time.Now().UTC()
+	now = now.UTC()
 	d.status = StatusExpired
+	d.version++
+	d.resolvedNote = "response deadline elapsed without merchant action"
 	d.resolvedAt = &now
 
 	d.record(DisputeResolvedEvent{
@@ -217,23 +270,56 @@ func (d *Dispute) Expire() error {
 	return nil
 }
 
+// CanAddEvidence permite acumular evidencia adicional mientras la disputa está
+// bajo revisión y dentro del plazo. No cambia el estado ni emite eventos: es
+// documentación complementaria para el banco.
+func (d *Dispute) CanAddEvidence(evidence []Evidence, now time.Time) error {
+	if d.status != StatusUnderReview {
+		return fmt.Errorf("%w: cannot add evidence from %q", ErrInvalidTransition, d.status)
+	}
+	if len(evidence) == 0 {
+		return ErrEvidenceRequired
+	}
+	if now.After(d.deadline) {
+		return ErrDisputeExpired
+	}
+	return nil
+}
+
+// AddEvidence valida y agrega evidencia extra (ver CanAddEvidence).
+func (d *Dispute) AddEvidence(evidence []Evidence, now time.Time) error {
+	if err := d.CanAddEvidence(evidence, now); err != nil {
+		return err
+	}
+	d.evidence = append(d.evidence, evidence...)
+	d.version++
+	return nil
+}
+
 // ── Getters ───────────────────────────────────────────────────────────────────
 
-func (d *Dispute) ID() DisputeID              { return d.id }
-func (d *Dispute) TenantID() TenantID         { return d.tenantID }
-func (d *Dispute) PaymentID() string          { return d.paymentID }
-func (d *Dispute) PSPReference() string       { return d.pspReference }
-func (d *Dispute) Amount() int64              { return d.amount }
-func (d *Dispute) Currency() string           { return d.currency }
-func (d *Dispute) Reason() DisputeReason      { return d.reason }
-func (d *Dispute) Status() DisputeStatus      { return d.status }
-func (d *Dispute) Evidence() []Evidence       { return d.evidence }
-func (d *Dispute) ResponseNote() string       { return d.responseNote }
-func (d *Dispute) ResolvedNote() string       { return d.resolvedNote }
-func (d *Dispute) Deadline() time.Time        { return d.deadline }
-func (d *Dispute) OpenedAt() time.Time        { return d.openedAt }
-func (d *Dispute) RespondedAt() *time.Time    { return d.respondedAt }
-func (d *Dispute) ResolvedAt() *time.Time     { return d.resolvedAt }
+func (d *Dispute) ID() DisputeID        { return d.id }
+func (d *Dispute) TenantID() TenantID   { return d.tenantID }
+func (d *Dispute) PaymentID() string    { return d.paymentID }
+func (d *Dispute) PSPReference() string { return d.pspReference }
+func (d *Dispute) Amount() int64        { return d.amount }
+
+// CapturedAmount retorna el monto capturado del pago en el momento de abrir la disputa.
+func (d *Dispute) CapturedAmount() int64   { return d.capturedAmount }
+func (d *Dispute) Currency() string        { return d.currency }
+func (d *Dispute) Reason() DisputeReason   { return d.reason }
+func (d *Dispute) Status() DisputeStatus   { return d.status }
+func (d *Dispute) Evidence() []Evidence    { return d.evidence }
+func (d *Dispute) ResponseNote() string    { return d.responseNote }
+func (d *Dispute) ResolvedNote() string    { return d.resolvedNote }
+func (d *Dispute) Deadline() time.Time     { return d.deadline }
+func (d *Dispute) OpenedAt() time.Time     { return d.openedAt }
+func (d *Dispute) RespondedAt() *time.Time { return d.respondedAt }
+func (d *Dispute) ResolvedAt() *time.Time  { return d.resolvedAt }
+
+// Version retorna la versión actual del agregado. Los casos de uso la pasan al
+// repositorio como expectedVersion (concurrencia optimista).
+func (d *Dispute) Version() int64 { return d.version }
 
 // IsOverdue retorna true si el plazo de respuesta venció y sigue abierta.
 func (d *Dispute) IsOverdue(now time.Time) bool {

@@ -6,8 +6,8 @@ import "time"
 type OpenDisputeCmd struct {
 	TenantID     string
 	PaymentID    string
-	PSPReference string    // ID de la disputa en el PSP
-	Amount       int64     // monto disputado en centavos
+	PSPReference string // ID de la disputa en el PSP
+	Amount       int64  // monto disputado en centavos
 	Currency     string
 	Reason       string    // "fraudulent" | "product_not_received" | etc.
 	Deadline     time.Time // fecha límite para contestar
@@ -19,10 +19,10 @@ type OpenDisputeResult struct {
 
 // ContestDisputeCmd envía evidencia del comercio para contestar la disputa.
 type ContestDisputeCmd struct {
-	TenantID   string
-	DisputeID  string
-	Evidence   []EvidenceInput
-	Note       string
+	TenantID  string
+	DisputeID string
+	Evidence  []EvidenceInput
+	Note      string
 }
 
 type EvidenceInput struct {
@@ -59,25 +59,34 @@ type ListDisputesQuery struct {
 	Limit        int
 }
 
+// ListAllDisputesQuery es la consulta operatoria global (back-office):
+// disputas de todos los tenants. La guarda de rol vive en la capa HTTP.
+type ListAllDisputesQuery struct {
+	StatusFilter string // "" = todas
+	Limit        int    // default 100, máximo 500
+}
+
 // ── Views ─────────────────────────────────────────────────────────────────────
 
 type DisputeView struct {
-	ID           string         `json:"id"`
-	TenantID     string         `json:"tenant_id"`
-	PaymentID    string         `json:"payment_id"`
-	PSPReference string         `json:"psp_reference,omitempty"`
-	Amount       int64          `json:"amount"`
-	Currency     string         `json:"currency"`
-	Reason       string         `json:"reason"`
-	Status       string         `json:"status"`
-	Evidence     []EvidenceView `json:"evidence,omitempty"`
-	ResponseNote string         `json:"response_note,omitempty"`
-	ResolvedNote string         `json:"resolved_note,omitempty"`
-	Deadline     string         `json:"deadline"`
-	OpenedAt     string         `json:"opened_at"`
-	RespondedAt  *string        `json:"responded_at,omitempty"`
-	ResolvedAt   *string        `json:"resolved_at,omitempty"`
-	IsOverdue    bool           `json:"is_overdue"`
+	ID             string         `json:"id"`
+	TenantID       string         `json:"tenant_id"`
+	CapturedAmount int64          `json:"captured_amount"`
+	Version        int64          `json:"version"`
+	PaymentID      string         `json:"payment_id"`
+	PSPReference   string         `json:"psp_reference,omitempty"`
+	Amount         int64          `json:"amount"`
+	Currency       string         `json:"currency"`
+	Reason         string         `json:"reason"`
+	Status         string         `json:"status"`
+	Evidence       []EvidenceView `json:"evidence,omitempty"`
+	ResponseNote   string         `json:"response_note,omitempty"`
+	ResolvedNote   string         `json:"resolved_note,omitempty"`
+	Deadline       string         `json:"deadline"`
+	OpenedAt       string         `json:"opened_at"`
+	RespondedAt    *string        `json:"responded_at,omitempty"`
+	ResolvedAt     *string        `json:"resolved_at,omitempty"`
+	IsOverdue      bool           `json:"is_overdue"`
 }
 
 type EvidenceView struct {
