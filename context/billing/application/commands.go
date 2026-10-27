@@ -96,6 +96,38 @@ type GetTenantPlanQuery struct {
 	TenantID string
 }
 
+// ListPlansPageQuery pagina el catálogo de planes.
+type ListPlansPageQuery struct {
+	Limit           int // 0 → default 20; máx 100
+	Offset          int
+	IncludeInactive bool // ?include_inactive=true (gestión)
+}
+
+// ── UpdatePlan / DeactivatePlan ───────────────────────────────────────────────
+
+// UpdatePlanCmd aplica un PATCH sobre el plan: los campos puntero nil no se tocan.
+// MethodRates: nil = no tocar los overrides; slice (aunque vacío) = reemplazo
+// completo del conjunto de overrides por método.
+type UpdatePlanCmd struct {
+	PlanID          string
+	BaseRateBps     *int64
+	BaseFixedAmount *int64
+	MonthlyFee      *int64
+	MethodRates     []MethodRateInput
+}
+
+type DeactivatePlanCmd struct {
+	PlanID string
+}
+
+// ── ListTenantPlans (historial de asignaciones) ───────────────────────────────
+
+type ListTenantPlansQuery struct {
+	TenantID string
+	Limit    int // 0 → default 20; máx 100
+	Offset   int
+}
+
 type TenantPlanView struct {
 	ID                string  `json:"id"`
 	TenantID          string  `json:"tenant_id"`

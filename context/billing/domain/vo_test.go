@@ -23,13 +23,10 @@ func TestParseIDs(t *testing.T) {
 }
 
 func TestIDConstructorsAndStrings(t *testing.T) {
-	if NewFeeID().String() == "" {
-		t.Error("NewFeeID should produce a non-empty id")
-	}
 	if NewTenantPlanID().String() == "" {
 		t.Error("NewTenantPlanID should produce a non-empty id")
 	}
-	if TenantPlanID("tp-1").String() != "tp-1" || FeeID("f-1").String() != "f-1" {
+	if TenantPlanID("tp-1").String() != "tp-1" {
 		t.Error("id String() methods mismatch")
 	}
 }

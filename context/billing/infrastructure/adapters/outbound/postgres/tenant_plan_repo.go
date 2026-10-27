@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/juantevez/cobros-platform/context/billing/application"
 	"github.com/juantevez/cobros-platform/context/billing/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
@@ -83,6 +84,42 @@ func (r *pgTenantPlanRepository) ListByTenant(ctx context.Context, tenantID doma
 		tps = append(tps, tp)
 	}
 	return tps, rows.Err()
+}
+
+// ListByTenantPage pagina el historial de asignaciones del tenant
+// (activas e inactivas), ordenado por valid_from DESC.
+func (r *pgTenantPlanRepository) ListByTenantPage(ctx context.Context, tenantID domain.TenantID, page application.Page) ([]*domain.TenantPlan, application.Page, error) {
+	conn := postgres.ConnFromContext(ctx, r.pool)
+
+	var total int64
+	if err := conn.QueryRow(ctx,
+		`SELECT COUNT(*) FROM billing_tenant_plans WHERE tenant_id=$1`,
+		tenantID.String()).Scan(&total); err != nil {
+		return nil, page, fmt.Errorf("tenant plan repo: count: %w", err)
+	}
+
+	rows, err := conn.Query(ctx, baseTPSelect+
+		` WHERE tenant_id=$1 ORDER BY valid_from DESC LIMIT $2 OFFSET $3`,
+		tenantID.String(), page.Limit, page.Offset)
+	if err != nil {
+		return nil, page, fmt.Errorf("tenant plan repo: list page: %w", err)
+	}
+	defer rows.Close()
+
+	var tps []*domain.TenantPlan
+	for rows.Next() {
+		tp, err := scanTenantPlan(rows)
+		if err != nil {
+			return nil, page, err
+		}
+		tps = append(tps, tp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, page, err
+	}
+
+	page.Total = total
+	return tps, page, nil
 }
 
 const baseTPSelect = `
