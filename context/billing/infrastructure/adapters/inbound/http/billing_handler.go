@@ -13,26 +13,35 @@ import (
 
 // BillingHandler expone la gestión de planes y el plan activo del tenant.
 type BillingHandler struct {
-	createPlan    *application.CreatePlanUseCase
-	assignPlan    *application.AssignPlanUseCase
-	getPlan       *application.GetPlanUseCase
-	listPlans     *application.ListPlansUseCase
-	getTenantPlan *application.GetTenantPlanUseCase
+	createPlan       *application.CreatePlanUseCase
+	updatePlan       *application.UpdatePlanUseCase
+	deactivatePlan   *application.DeactivatePlanUseCase
+	assignPlan       *application.AssignPlanUseCase
+	getPlan          *application.GetPlanUseCase
+	listPlans        *application.ListPlansPageUseCase
+	getTenantPlan    *application.GetTenantPlanUseCase
+	listTenantPlans  *application.ListTenantPlansUseCase
 }
 
 func NewBillingHandler(
 	createPlan *application.CreatePlanUseCase,
+	updatePlan *application.UpdatePlanUseCase,
+	deactivatePlan *application.DeactivatePlanUseCase,
 	assignPlan *application.AssignPlanUseCase,
 	getPlan *application.GetPlanUseCase,
-	listPlans *application.ListPlansUseCase,
+	listPlans *application.ListPlansPageUseCase,
 	getTenantPlan *application.GetTenantPlanUseCase,
+	listTenantPlans *application.ListTenantPlansUseCase,
 ) *BillingHandler {
 	return &BillingHandler{
-		createPlan:    createPlan,
-		assignPlan:    assignPlan,
-		getPlan:       getPlan,
-		listPlans:     listPlans,
-		getTenantPlan: getTenantPlan,
+		createPlan:      createPlan,
+		updatePlan:      updatePlan,
+		deactivatePlan:  deactivatePlan,
+		assignPlan:      assignPlan,
+		getPlan:         getPlan,
+		listPlans:       listPlans,
+		getTenantPlan:   getTenantPlan,
+		listTenantPlans: listTenantPlans,
 	}
 }
 
@@ -178,8 +187,7 @@ func respondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrPlanNotFound),
 		errors.Is(err, domain.ErrTenantPlanNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrPlanInactive),
-		errors.Is(err, domain.ErrTenantPlanAlreadySet):
+	case errors.Is(err, domain.ErrPlanInactive):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidRateBps),
 		errors.Is(err, domain.ErrInvalidFixedAmount),

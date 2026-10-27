@@ -46,6 +46,32 @@ func (uc *ListPlansUseCase) Execute(ctx context.Context) ([]PlanView, error) {
 	return views, nil
 }
 
+// ListPlansPageUseCase lista el catálogo con paginación (limit/offset).
+// includeInactive=true expone también los planes desactivados (gestión).
+type ListPlansPageUseCase struct{ planRepo PlanRepository }
+
+func NewListPlansPageUseCase(planRepo PlanRepository) *ListPlansPageUseCase {
+	return &ListPlansPageUseCase{planRepo: planRepo}
+}
+
+func (uc *ListPlansPageUseCase) Execute(ctx context.Context, q ListPlansPageQuery) ([]PlanView, Page, error) {
+	page := Page{Limit: q.Limit, Offset: q.Offset}
+	page.Normalize()
+
+	plans, page, err := uc.planRepo.ListPage(ctx, PlanListFilter{
+		Page:            page,
+		IncludeInactive: q.IncludeInactive,
+	})
+	if err != nil {
+		return nil, Page{}, fmt.Errorf("list plans page: %w", err)
+	}
+	views := make([]PlanView, len(plans))
+	for i, p := range plans {
+		views[i] = toPlanView(p)
+	}
+	return views, page, nil
+}
+
 // GetTenantPlanUseCase consulta el plan activo de un tenant.
 type GetTenantPlanUseCase struct{ tenantPlanRepo TenantPlanRepository }
 

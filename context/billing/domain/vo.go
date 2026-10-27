@@ -11,12 +11,10 @@ import (
 
 type PlanID string
 type TenantPlanID string
-type FeeID string
 type TenantID string
 
-func NewPlanID() PlanID           { return PlanID(uuid.NewString()) }
+func NewPlanID() PlanID             { return PlanID(uuid.NewString()) }
 func NewTenantPlanID() TenantPlanID { return TenantPlanID(uuid.NewString()) }
-func NewFeeID() FeeID             { return FeeID(uuid.NewString()) }
 
 func ParsePlanID(s string) (PlanID, error) {
 	if _, err := uuid.Parse(s); err != nil {
@@ -32,10 +30,9 @@ func ParseTenantID(s string) (TenantID, error) {
 	return TenantID(s), nil
 }
 
-func (id PlanID) String() string       { return string(id) }
-func (id TenantPlanID) String() string { return string(id) }
-func (id FeeID) String() string        { return string(id) }
-func (id TenantID) String() string     { return string(id) }
+func (id PlanID) String() string        { return string(id) }
+func (id TenantPlanID) String() string  { return string(id) }
+func (id TenantID) String() string      { return string(id) }
 
 // ── PaymentMethod ─────────────────────────────────────────────────────────────
 

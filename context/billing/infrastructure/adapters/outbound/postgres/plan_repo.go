@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/juantevez/cobros-platform/context/billing/application"
 	"github.com/juantevez/cobros-platform/context/billing/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
@@ -90,6 +91,48 @@ func (r *pgPlanRepository) ListActive(ctx context.Context) ([]*domain.PricingPla
 		plans = append(plans, p)
 	}
 	return plans, rows.Err()
+}
+
+// ListPage pagina el catálogo ordenado por nombre. Con IncludeInactive=false
+// solo devuelve planes activos; con true, también los desactivados (gestión).
+func (r *pgPlanRepository) ListPage(ctx context.Context, filter application.PlanListFilter) ([]*domain.PricingPlan, application.Page, error) {
+	conn := postgres.ConnFromContext(ctx, r.pool)
+
+	where := "WHERE active=true"
+	if filter.IncludeInactive {
+		where = ""
+	}
+
+	var total int64
+	if err := conn.QueryRow(ctx, "SELECT COUNT(*) FROM billing_plans "+where).Scan(&total); err != nil {
+		return nil, filter.Page, fmt.Errorf("plan repo: count: %w", err)
+	}
+
+	rows, err := conn.Query(ctx,
+		`SELECT id, name, description, base_rate_bps, base_fixed_amount,
+		        monthly_fee, currency, active, created_at, updated_at
+		 FROM billing_plans `+where+`
+		 ORDER BY name LIMIT $1 OFFSET $2`,
+		filter.Limit, filter.Offset)
+	if err != nil {
+		return nil, filter.Page, fmt.Errorf("plan repo: list page: %w", err)
+	}
+	defer rows.Close()
+
+	var plans []*domain.PricingPlan
+	for rows.Next() {
+		p, err := r.scanWithRates(ctx, conn, rows)
+		if err != nil {
+			return nil, filter.Page, err
+		}
+		plans = append(plans, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, filter.Page, err
+	}
+
+	filter.Page.Total = total
+	return plans, filter.Page, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

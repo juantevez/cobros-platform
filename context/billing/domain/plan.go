@@ -121,10 +121,66 @@ func (p *PricingPlan) AddMethodRate(method PaymentMethod, rateBps, fixedAmount i
 	return nil
 }
 
+// UpdateBaseRates modifica la tarifa base del plan. El nombre, la descripción,
+// la suscripción mensual y la moneda NO pueden mutar: un cambio de moneda
+// invalidaría las comisiones ya cobradas con este plan.
+func (p *PricingPlan) UpdateBaseRates(baseRateBps, baseFixedAmount int64) error {
+	if baseRateBps < 0 || baseRateBps > 10000 {
+		return ErrInvalidRateBps
+	}
+	if baseFixedAmount < 0 {
+		return ErrInvalidFixedAmount
+	}
+	p.baseRateBps = baseRateBps
+	p.baseFixedAmount = baseFixedAmount
+	p.updatedAt = time.Now().UTC()
+	return nil
+}
+
+// SetMonthlyFee actualiza la suscripción mensual (centavos; 0 = sin suscripción).
+func (p *PricingPlan) SetMonthlyFee(monthlyFee int64) error {
+	if monthlyFee < 0 {
+		return ErrInvalidMonthlyFee
+	}
+	p.monthlyFee = monthlyFee
+	p.updatedAt = time.Now().UTC()
+	return nil
+}
+
+// RemoveMethodRate elimina el override de un método de pago. No-op si no existe.
+func (p *PricingPlan) RemoveMethodRate(method PaymentMethod) {
+	if _, ok := p.methodRates[method]; ok {
+		delete(p.methodRates, method)
+		p.updatedAt = time.Now().UTC()
+	}
+}
+
 // Deactivate desactiva el plan. No puede usarse para nuevas asignaciones.
+// Es idempotente.
 func (p *PricingPlan) Deactivate() {
 	p.active = false
 	p.updatedAt = time.Now().UTC()
+}
+
+// RecordUpdated registra el evento de actualización del plan. Lo emite la capa
+// de aplicación una vez confirmada la mutación, no el constructor ni los
+// setters (evita publicar eventos de cambios que luego fallan).
+func (p *PricingPlan) RecordUpdated() {
+	p.record(PlanUpdatedEvent{
+		baseEvent: newBase(""), // evento de plataforma, sin tenant
+		PlanID:    p.id.String(),
+		PlanName:  p.name,
+		RateBps:   p.baseRateBps,
+	})
+}
+
+// RecordDeactivated registra el evento de desactivación del plan.
+func (p *PricingPlan) RecordDeactivated() {
+	p.record(PlanDeactivatedEvent{
+		baseEvent: newBase(""),
+		PlanID:    p.id.String(),
+		PlanName:  p.name,
+	})
 }
 
 // ── Cálculo de comisión ───────────────────────────────────────────────────────

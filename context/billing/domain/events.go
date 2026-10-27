@@ -47,3 +47,22 @@ type PlanAssignedEvent struct {
 }
 
 func (e PlanAssignedEvent) EventType() string { return "billing.plan.assigned.v1" }
+
+// PlanUpdatedEvent se emite cuando el operador corrige las tarifas de un plan.
+type PlanUpdatedEvent struct {
+	baseEvent
+	PlanID   string `json:"plan_id"`
+	PlanName string `json:"plan_name"`
+	RateBps  int64  `json:"rate_bps"`
+}
+
+func (e PlanUpdatedEvent) EventType() string { return "billing.plan.updated.v1" }
+
+// PlanDeactivatedEvent se emite cuando un plan se desactiva desde la API.
+type PlanDeactivatedEvent struct {
+	baseEvent
+	PlanID   string `json:"plan_id"`
+	PlanName string `json:"plan_name"`
+}
+
+func (e PlanDeactivatedEvent) EventType() string { return "billing.plan.deactivated.v1" }

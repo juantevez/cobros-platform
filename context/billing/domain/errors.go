@@ -14,7 +14,6 @@ var (
 	// con la del plan. Es un error de entrada (400), no interno (500).
 	ErrCurrencyMismatch      = errors.New("currency mismatch")
 	ErrTenantPlanNotFound    = errors.New("tenant has no active pricing plan assigned")
-	ErrTenantPlanAlreadySet  = errors.New("tenant already has an active plan; deactivate it first")
 	ErrInvalidPaymentMethod  = errors.New("invalid payment method for rate override")
 	ErrFeeCalculationInvalid = errors.New("fee calculation resulted in invalid amount")
 )
