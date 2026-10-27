@@ -304,7 +304,7 @@ func TestReconstituteDispute(t *testing.T) {
 
 	d := ReconstituteDispute(id, tid, "pay-1", "psp-1", 5000, "ARS",
 		ReasonFraudulent, StatusWon, ev, "respondió", "cerró",
-		deadline, openedAt, &responded, &resolved)
+		deadline, openedAt, &responded, &resolved, 3)
 
 	if d.ID() != id || d.Status() != StatusWon || d.Reason() != ReasonFraudulent {
 		t.Errorf("fields not restored: %+v", d)

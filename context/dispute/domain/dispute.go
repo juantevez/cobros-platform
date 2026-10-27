@@ -102,7 +102,7 @@ func NewDispute(
 	d := &Dispute{
 		id:             id,
 		tenantID:       tenantID,
-		paymentID:      paymentID,
+		paymentID:      payment.ID,
 		pspReference:   pspReference,
 		amount:         amount,
 		capturedAmount: payment.Amount,
@@ -117,7 +117,7 @@ func NewDispute(
 	d.record(DisputeOpenedEvent{
 		baseEvent: newBase(tenantID.String()),
 		DisputeID: id.String(),
-		PaymentID: paymentID,
+		PaymentID: payment.ID,
 		TenantID:  tenantID.String(),
 		Amount:    amount,
 		Currency:  currency,
