@@ -325,18 +325,16 @@ func (d *Dispute) ResolvedAt() *time.Time  { return d.resolvedAt }
 func (d *Dispute) Version() int64 { return d.version }
 
 // IsOverdue retorna true si el plazo de respuesta venció y la disputa sigue
-// sin resolución. Las disputas cerradas por el banco (won/lost) nunca están
-// vencidas: el deadline dejó de importar en el momento del cierre. En cambio,
-// una disputa aceptada o expirada después de vencido el plazo sí lo estuvo:
-// "overdue" alimenta el SLA de respuesta del comercio, y cerrar tarde no borra
-// que se respondió fuera de término.
+// abierta (sin resolver). Cualquier disputa ya cerrada —ganada, perdida,
+// aceptada o expirada— nunca está vencida: el deadline dejó de importar en el
+// momento del cierre. El indicador alimenta el backlog de disputas pendientes
+// ("overdue") del comercio; las respuestas fuera de término quedan registradas
+// en responded_at/resolved_at, no en este flag.
 func (d *Dispute) IsOverdue(now time.Time) bool {
-	switch d.status {
-	case StatusWon, StatusLost:
+	if d.status.IsFinal() {
 		return false
-	default:
-		return now.After(d.deadline)
 	}
+	return now.After(d.deadline)
 }
 
 func (d *Dispute) PullEvents() []Event {

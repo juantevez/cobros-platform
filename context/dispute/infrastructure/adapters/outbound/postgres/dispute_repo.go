@@ -160,7 +160,7 @@ const baseSelect = `
 	SELECT id, tenant_id, payment_id, COALESCE(psp_reference,''),
 	       amount, currency, reason, status,
 	       COALESCE(response_note,''), COALESCE(resolved_note,''),
-	       deadline, opened_at, responded_at, resolved_at, version
+	       deadline, opened_at, responded_at, resolved_at
 	FROM disputes`
 
 func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interface {
@@ -173,14 +173,12 @@ func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interfa
 		responseNote, resolvedNote            string
 		deadline, openedAt                    time.Time
 		respondedAt, resolvedAt               *time.Time
-		loadedVersion                         int64
 	)
 	if err := row.Scan(
 		&idStr, &tenantIDStr, &paymentID, &pspRef,
 		&amount, &currency, &reasonStr, &statusStr,
 		&responseNote, &resolvedNote,
 		&deadline, &openedAt, &respondedAt, &resolvedAt,
-		&loadedVersion,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrDisputeNotFound
@@ -219,7 +217,9 @@ func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interfa
 		responseNote, resolvedNote,
 		deadline.UTC(), openedAt.UTC(),
 		respondedAt, resolvedAt,
-		loadedVersion,
+		// El SELECT de baseSelect tiene 14 columnas (sin `version`, que no
+		// existe en la tabla disputes): se reconstruye con la versión inicial.
+		int64(1),
 	), nil
 }
 
