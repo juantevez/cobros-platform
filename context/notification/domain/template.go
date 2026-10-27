@@ -109,6 +109,17 @@ var Templates = map[string]Template{
 	},
 }
 
+// NormalizeEventType normaliza un event type crudo (subject NATS) al event
+// type canónico del catálogo: "payment.captured.v1" → "payment.captured".
+//
+// Es la ÚNICA forma en que se indexan las preferencias de notificación:
+// API (PUT/GET) y consumer NATS normalizan siempre antes de leer/escribir,
+// de modo que la clave vista en GET coincide exactamente con la aceptada en
+// PUT y con la buscada al resolver el destinatario.
+func NormalizeEventType(eventType string) string {
+	return stripVersion(eventType)
+}
+
 // FindTemplate busca el template para un event type.
 // Soporta subjects con y sin versión: "payment.captured.v1" → "payment.captured".
 func FindTemplate(eventType string) (Template, bool) {
@@ -117,8 +128,7 @@ func FindTemplate(eventType string) (Template, bool) {
 		return t, true
 	}
 	// Intentar sin el sufijo de versión.
-	normalized := stripVersion(eventType)
-	t, ok := Templates[normalized]
+	t, ok := Templates[NormalizeEventType(eventType)]
 	return t, ok
 }
 

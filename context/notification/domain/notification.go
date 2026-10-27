@@ -4,6 +4,11 @@ import "time"
 
 // Notification registra una notificación enviada o intentada.
 // Es un log de lo que se envió a cada destinatario.
+//
+// natsMsgID es la clave natural de idempotencia del consumo: el ID del
+// mensaje NATS (Nats-Msg-Id = EventID del evento de dominio). Junto con
+// tenant_id y event_type forma una restricción UNIQUE que permite deduplicar
+// reentregas del mismo evento (doble email / doble fila).
 type Notification struct {
 	id             NotificationID
 	tenantID       TenantID
@@ -15,6 +20,7 @@ type Notification struct {
 	errorMsg       string
 	sentAt         *time.Time
 	createdAt      time.Time
+	natsMsgID      string
 }
 
 // NewNotification crea una notificación en estado pending.
@@ -35,6 +41,13 @@ func NewNotification(
 		status:         StatusPending,
 		createdAt:      time.Now().UTC(),
 	}
+}
+
+// WithNatsMsgID asocia el ID del mensaje NATS que originó la notificación.
+// Se usa como clave de deduplicación en el repositorio.
+func (n *Notification) WithNatsMsgID(msgID string) *Notification {
+	n.natsMsgID = msgID
+	return n
 }
 
 // ReconstituteNotification reconstruye desde el repositorio.
@@ -77,3 +90,6 @@ func (n *Notification) Status() NotificationStatus  { return n.status }
 func (n *Notification) ErrorMsg() string            { return n.errorMsg }
 func (n *Notification) SentAt() *time.Time          { return n.sentAt }
 func (n *Notification) CreatedAt() time.Time        { return n.createdAt }
+
+// NatsMsgID retorna el ID del mensaje NATS asociado (vacio si no aplica).
+func (n *Notification) NatsMsgID() string { return n.natsMsgID }
