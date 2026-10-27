@@ -13,7 +13,7 @@ func NewNotificationID() NotificationID { return NotificationID(uuid.NewString()
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: %v", ErrInvalidTenantID, err)
 	}
 	return TenantID(s), nil
 }

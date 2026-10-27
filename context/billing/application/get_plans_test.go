@@ -150,7 +150,7 @@ func TestGetTenantPlan_Success(t *testing.T) {
 	}
 	tpRepo.active[tid] = buildTenantPlan(t, tid, plan)
 
-	uc := NewGetTenantPlanUseCase(tpRepo)
+	uc := NewGetTenantPlanUseCase(tpRepo, 0)
 	view, err := uc.Execute(context.Background(), GetTenantPlanQuery{TenantID: tid.String()})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -164,17 +164,20 @@ func TestGetTenantPlan_Success(t *testing.T) {
 }
 
 func TestGetTenantPlan_InvalidID(t *testing.T) {
-	uc := NewGetTenantPlanUseCase(newFakeTenantPlanRepo())
+	uc := NewGetTenantPlanUseCase(newFakeTenantPlanRepo(), 0)
 	_, err := uc.Execute(context.Background(), GetTenantPlanQuery{TenantID: "nope"})
 	if err == nil {
 		t.Fatal("expected error for invalid tenant id")
 	}
 }
 
-func TestGetTenantPlan_NotFound(t *testing.T) {
-	uc := NewGetTenantPlanUseCase(newFakeTenantPlanRepo())
-	_, err := uc.Execute(context.Background(), GetTenantPlanQuery{TenantID: validUUID()})
-	if !errors.Is(err, domain.ErrTenantPlanNotFound) {
-		t.Fatalf("expected ErrTenantPlanNotFound, got %v", err)
+func TestGetTenantPlan_NotFoundReturnsFallback(t *testing.T) {
+	uc := NewGetTenantPlanUseCase(newFakeTenantPlanRepo(), 0)
+	v, err := uc.Execute(context.Background(), GetTenantPlanQuery{TenantID: validUUID()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !v.Fallback || v.FallbackRateBps == nil || *v.FallbackRateBps != DefaultFallbackRateBps {
+		t.Fatalf("expected fallback view at %d bps, got %+v", DefaultFallbackRateBps, v)
 	}
 }

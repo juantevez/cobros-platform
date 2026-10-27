@@ -63,6 +63,10 @@ type CalculateFeeResult struct {
 	PlanName       string
 	MethodOverride bool // true si se usó override por método de pago
 	TenantOverride bool // true si el tenant tiene tarifas negociadas
+	// CurrencyMismatch: moneda del pago ≠ moneda del plan → solo bps, sin fijos.
+	CurrencyMismatch bool
+	// Fallback: el tenant no tiene plan asignado → se aplicó FallbackRateBps.
+	Fallback bool
 }
 
 // ── GetPlan / ListPlans ───────────────────────────────────────────────────────
@@ -129,13 +133,17 @@ type ListTenantPlansQuery struct {
 }
 
 type TenantPlanView struct {
-	ID                string  `json:"id"`
+	ID                string  `json:"id,omitempty"`
 	TenantID          string  `json:"tenant_id"`
-	PlanID            string  `json:"plan_id"`
+	PlanID            string  `json:"plan_id,omitempty"`
 	PlanName          string  `json:"plan_name"`
 	CustomRateBps     *int64  `json:"custom_rate_bps,omitempty"`
 	CustomFixedAmount *int64  `json:"custom_fixed_amount,omitempty"`
 	Active            bool    `json:"active"`
-	ValidFrom         string  `json:"valid_from"`
+	ValidFrom         string  `json:"valid_from,omitempty"`
 	ValidUntil        *string `json:"valid_until,omitempty"`
+	// Fallback es true cuando el tenant no tiene plan asignado: se le cobra
+	// FallbackRateBps (GET /my-plan lo muestra en vez de responder 404).
+	Fallback        bool   `json:"fallback,omitempty"`
+	FallbackRateBps *int64 `json:"fallback_rate_bps,omitempty"`
 }

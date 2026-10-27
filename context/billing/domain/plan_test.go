@@ -136,9 +136,14 @@ func TestCalculateFee_Errors(t *testing.T) {
 			t.Fatal("expected error for zero amount")
 		}
 	})
-	t.Run("currency mismatch", func(t *testing.T) {
-		if _, err := p.CalculateFee(10000, "USD", MethodCard); err == nil {
-			t.Fatal("expected error for currency mismatch")
+	t.Run("currency mismatch applies only bps", func(t *testing.T) {
+		fb, err := p.CalculateFee(10000, "USD", MethodCard)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// 250 bps de 10000 = 250; el fijo (ARS) se omite.
+		if !fb.CurrencyMismatch || fb.FixedAmount != 0 || fb.TotalFee.Amount() != 250 || fb.TotalFee.Currency() != "USD" {
+			t.Errorf("unexpected breakdown: %+v", fb)
 		}
 	})
 }

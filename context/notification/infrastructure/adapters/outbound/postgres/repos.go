@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -117,7 +118,15 @@ func NewPreferenceRepository(pool pkgpostgres.Conn) *pgPreferenceRepository {
 	return &pgPreferenceRepository{pool: pool}
 }
 
+// Upsert fija app.current_tenant en la sesión (RLS) antes de escribir.
 func (r *pgPreferenceRepository) Upsert(ctx context.Context, p *domain.NotificationPreference) error {
+	ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, p.TenantID().String())
+	return pkgpostgres.RunWithAppTenant(ctx, r.pool, func(ctx context.Context) error {
+		return r.upsert(ctx, p)
+	})
+}
+
+func (r *pgPreferenceRepository) upsert(ctx context.Context, p *domain.NotificationPreference) error {
 	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
 	_, err := conn.Exec(ctx, `
 		INSERT INTO notification_preferences

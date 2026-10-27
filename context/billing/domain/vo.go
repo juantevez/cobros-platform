@@ -30,9 +30,9 @@ func ParseTenantID(s string) (TenantID, error) {
 	return TenantID(s), nil
 }
 
-func (id PlanID) String() string        { return string(id) }
-func (id TenantPlanID) String() string  { return string(id) }
-func (id TenantID) String() string      { return string(id) }
+func (id PlanID) String() string       { return string(id) }
+func (id TenantPlanID) String() string { return string(id) }
+func (id TenantID) String() string     { return string(id) }
 
 // ── PaymentMethod ─────────────────────────────────────────────────────────────
 
@@ -104,10 +104,13 @@ type MethodRate struct {
 // FeeBreakdown desglosa cómo se calculó una comisión.
 // Útil para mostrar al comercio el detalle de cada cobro.
 type FeeBreakdown struct {
-	RateBpsApplied  int64  // tasa usada en basis points
-	RateAmount      int64  // parte proporcional de la comisión (centavos)
-	FixedAmount     int64  // parte fija de la comisión (centavos)
-	TotalFee        Money  // suma total
-	PlanID          string
-	MethodOverride  bool   // true si se usó un override por método de pago
+	RateBpsApplied int64 // tasa usada en basis points
+	RateAmount     int64 // parte proporcional de la comisión (centavos)
+	FixedAmount    int64 // parte fija de la comisión (centavos)
+	TotalFee       Money // suma total
+	PlanID         string
+	MethodOverride bool // true si se usó un override por método de pago
+	// CurrencyMismatch es true si la moneda del pago difiere de la del plan:
+	// se aplicó solo la tasa (bps) y se omitieron los montos fijos.
+	CurrencyMismatch bool
 }

@@ -29,6 +29,9 @@ type fakeNotifRepo struct {
 }
 
 func (r *fakeNotifRepo) Save(ctx context.Context, n *domain.Notification) error { return nil }
+func (r *fakeNotifRepo) ExistsByEventMsg(ctx context.Context, tenantID domain.TenantID, eventType, msgID string) (bool, error) {
+	return false, nil
+}
 func (r *fakeNotifRepo) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Notification, error) {
 	return r.listed, r.listErr
 }
@@ -172,19 +175,19 @@ func TestUpdatePreference(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown event type yields 400", func(t *testing.T) {
+	t.Run("unknown event type yields 404", func(t *testing.T) {
 		rec := doRequest(newHandler(&fakeNotifRepo{}, &fakePrefRepo{}).UpdatePreference,
 			http.MethodPut, "/x", `{"enabled":true}`, tid, eventParam("unknown.event"))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", rec.Code)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
 		}
 	})
 
-	t.Run("upsert error yields 400", func(t *testing.T) {
+	t.Run("upsert error yields 500", func(t *testing.T) {
 		rec := doRequest(newHandler(&fakeNotifRepo{}, &fakePrefRepo{upsertErr: errBoom}).UpdatePreference,
 			http.MethodPut, "/x", `{"enabled":true}`, tid, eventParam("payment.captured"))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", rec.Code)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
 		}
 	})
 }

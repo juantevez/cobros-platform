@@ -316,8 +316,7 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidMonthlyFee),
 		errors.Is(err, domain.ErrPlanNameEmpty),
 		errors.Is(err, domain.ErrInvalidPaymentMethod),
-		errors.Is(err, domain.ErrInvalidCurrency),
-		errors.Is(err, domain.ErrCurrencyMismatch):
+		errors.Is(err, domain.ErrInvalidCurrency):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
@@ -340,9 +339,12 @@ type RouteGuards struct {
 
 // RegisterRoutes registra las rutas de Billing en el grupo protegido.
 // El grupo debe autenticar (JWT); los guards autorizan por rol/scope.
+// Todos son obligatorios: gin saltea los handlers nil, así que un guard
+// olvidado dejaría la ruta abierta a cualquier usuario autenticado.
 func RegisterRoutes(rg *gin.RouterGroup, h *BillingHandler, guards RouteGuards) {
-	if guards.ManagePlans == nil || guards.AssignPlan == nil || guards.ReadMyPlan == nil {
-		panic("billing: RegisterRoutes requires ManagePlans, AssignPlan and ReadMyPlan guards")
+	if guards.ManagePlans == nil || guards.ReadPlans == nil || guards.AssignPlan == nil ||
+		guards.ReadTenantPlan == nil || guards.ReadMyPlan == nil {
+		panic("billing: RegisterRoutes requires all RouteGuards (ManagePlans, ReadPlans, AssignPlan, ReadTenantPlan, ReadMyPlan)")
 	}
 
 	billing := rg.Group("/billing")

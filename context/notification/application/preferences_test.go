@@ -13,7 +13,7 @@ func TestUpdatePreferenceUseCase_Execute(t *testing.T) {
 			TenantID:       validTenant(),
 			EventType:      "payment.captured",
 			Enabled:        false,
-			RecipientEmail: "ops@x.com",
+			RecipientEmail: strPtr("ops@x.com"),
 		}
 	}
 
@@ -136,3 +136,5 @@ func TestGetPreferencesUseCase_Execute(t *testing.T) {
 		}
 	})
 }
+
+func strPtr(s string) *string { return &s }

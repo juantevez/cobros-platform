@@ -47,7 +47,7 @@ func TestNotificationRepository_Save(t *testing.T) {
 	t.Run("inserts notification", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewNotificationRepository(mock)
-		mock.ExpectExec("INSERT INTO notifications").WithArgs(anyArgs(10)...).
+		mock.ExpectExec("INSERT INTO notifications").WithArgs(anyArgs(11)...).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		if err := repo.Save(context.Background(), n); err != nil {
@@ -126,8 +126,13 @@ func TestPreferenceRepository_Upsert(t *testing.T) {
 	t.Run("upserts preference", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPreferenceRepository(mock)
+		// RLS: tx efímera con app.current_tenant fijado antes del upsert.
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(rlsTenantKey, p.TenantID().String()).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
 		mock.ExpectExec("INSERT INTO notification_preferences").WithArgs(anyArgs(6)...).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit()
 
 		if err := repo.Upsert(context.Background(), p); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -140,9 +145,15 @@ func TestPreferenceRepository_Upsert(t *testing.T) {
 	t.Run("upsert error propagated", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPreferenceRepository(mock)
-		mock.ExpectExec("INSERT INTO notification_preferences").WillReturnError(errors.New("boom"))
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(anyArgs(2)...).WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectExec("INSERT INTO notification_preferences").WithArgs(anyArgs(6)...).WillReturnError(errors.New("boom"))
+		mock.ExpectRollback()
 		if err := repo.Upsert(context.Background(), p); err == nil {
 			t.Fatal("expected error")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
 		}
 	})
 }

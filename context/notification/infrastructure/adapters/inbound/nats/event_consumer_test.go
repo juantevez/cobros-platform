@@ -22,6 +22,9 @@ func (r *fakeNotifRepo) Save(ctx context.Context, n *domain.Notification) error 
 	r.saved = append(r.saved, n)
 	return nil
 }
+func (r *fakeNotifRepo) ExistsByEventMsg(ctx context.Context, tenantID domain.TenantID, eventType, msgID string) (bool, error) {
+	return false, nil
+}
 func (r *fakeNotifRepo) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Notification, error) {
 	return nil, nil
 }

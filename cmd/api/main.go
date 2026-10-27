@@ -222,10 +222,10 @@ func main() {
 	updatePlanUC := billingapp.NewUpdatePlanUseCase(planRepo, txManager, billingPub)
 	deactivateUC := billingapp.NewDeactivatePlanUseCase(planRepo, txManager, billingPub)
 	assignPlan := billingapp.NewAssignPlanUseCase(planRepo, tenantPlanRepo, txManager, billingPub)
-	calculateFeeUC := billingapp.NewCalculateFeeUseCase(planRepo, tenantPlanRepo, 300)
+	calculateFeeUC := billingapp.NewCalculateFeeUseCase(planRepo, tenantPlanRepo, billingapp.DefaultFallbackRateBps)
 	getPlanUC := billingapp.NewGetPlanUseCase(planRepo)
 	listPlansUC := billingapp.NewListPlansPageUseCase(planRepo)
-	getTenantPlan := billingapp.NewGetTenantPlanUseCase(tenantPlanRepo)
+	getTenantPlan := billingapp.NewGetTenantPlanUseCase(tenantPlanRepo, billingapp.DefaultFallbackRateBps)
 	listTenantPlansUC := billingapp.NewListTenantPlansUseCase(tenantPlanRepo)
 
 	billinghttp.RegisterRoutes(protected, billinghttp.NewBillingHandler(

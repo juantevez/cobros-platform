@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -54,10 +55,21 @@ func (uc *ListPlansPageUseCase) Execute(ctx context.Context, q ListPlansPageQuer
 }
 
 // GetTenantPlanUseCase consulta el plan activo de un tenant.
-type GetTenantPlanUseCase struct{ tenantPlanRepo TenantPlanRepository }
+//
+// Si el tenant no tiene plan, retorna la tarifa de fallback (Fallback=true)
+// en vez de ErrTenantPlanNotFound: es lo que CalculateFee le cobra realmente.
+type GetTenantPlanUseCase struct {
+	tenantPlanRepo  TenantPlanRepository
+	fallbackRateBps int64
+}
 
-func NewGetTenantPlanUseCase(tenantPlanRepo TenantPlanRepository) *GetTenantPlanUseCase {
-	return &GetTenantPlanUseCase{tenantPlanRepo: tenantPlanRepo}
+// fallbackRateBps debe ser el mismo que recibe NewCalculateFeeUseCase
+// (<= 0 → DefaultFallbackRateBps).
+func NewGetTenantPlanUseCase(tenantPlanRepo TenantPlanRepository, fallbackRateBps int64) *GetTenantPlanUseCase {
+	if fallbackRateBps <= 0 {
+		fallbackRateBps = DefaultFallbackRateBps
+	}
+	return &GetTenantPlanUseCase{tenantPlanRepo: tenantPlanRepo, fallbackRateBps: fallbackRateBps}
 }
 
 func (uc *GetTenantPlanUseCase) Execute(ctx context.Context, q GetTenantPlanQuery) (TenantPlanView, error) {
@@ -66,6 +78,16 @@ func (uc *GetTenantPlanUseCase) Execute(ctx context.Context, q GetTenantPlanQuer
 		return TenantPlanView{}, err
 	}
 	tp, err := uc.tenantPlanRepo.FindActive(ctx, tenantID)
+	if errors.Is(err, domain.ErrTenantPlanNotFound) {
+		rate := uc.fallbackRateBps
+		return TenantPlanView{
+			TenantID:        tenantID.String(),
+			PlanName:        fallbackPlanName,
+			Active:          true,
+			Fallback:        true,
+			FallbackRateBps: &rate,
+		}, nil
+	}
 	if err != nil {
 		return TenantPlanView{}, err
 	}

@@ -3,10 +3,12 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/juantevez/cobros-platform/context/notification/application"
+	"github.com/juantevez/cobros-platform/context/notification/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 )
 
@@ -85,6 +87,14 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 		// clave natural de dedupe/idempotencia del consumo.
 		NatsMsgID: msg.ID,
 	}); err != nil {
+		if errors.Is(err, domain.ErrInvalidTenantID) {
+			// Error permanente: reentregar no lo arregla (poison message) → ack.
+			c.logger.Warn("notification consumer: invalid tenant id, skipping",
+				"subject", msg.Subject,
+				"tenant_id", p.TenantID,
+			)
+			return nil
+		}
 		c.logger.Error("notification consumer: send failed",
 			"subject", msg.Subject,
 			"tenant_id", p.TenantID,

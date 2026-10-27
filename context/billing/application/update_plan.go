@@ -121,9 +121,9 @@ func (uc *UpdatePlanUseCase) Execute(ctx context.Context, cmd UpdatePlanCmd) (Pl
 
 // DeactivatePlanUseCase desactiva un plan del catálogo.
 //
-// No desactiva las asignaciones existentes: CalculateFee trata el plan
-// inactivo con el fallback (ver §CalculateFee), y el operador debe
-// reasignar a los tenants si corresponde. Idempotente.
+// Cierra el plan a nuevas asignaciones, pero no toca las existentes: los
+// tenants que ya lo tenían siguen cobrando con él (grandfathering, ver
+// CalculateFeeUseCase) hasta que el operador los reasigne. Idempotente.
 type DeactivatePlanUseCase struct {
 	planRepo  PlanRepository
 	txManager TxManager

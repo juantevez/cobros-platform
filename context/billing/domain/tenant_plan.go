@@ -23,10 +23,10 @@ type TenantPlan struct {
 	customRateBps     *int64
 	customFixedAmount *int64
 
-	active    bool
-	validFrom time.Time
+	active     bool
+	validFrom  time.Time
 	validUntil *time.Time // nil = vigente indefinidamente
-	createdAt time.Time
+	createdAt  time.Time
 
 	events []Event
 }
@@ -118,7 +118,8 @@ func (tp *TenantPlan) CalculateFee(plan *PricingPlan, amount int64, currency str
 		if tp.customRateBps != nil {
 			rateBps = *tp.customRateBps
 		}
-		if tp.customFixedAmount != nil {
+		// El fijo negociado está en la moneda del plan: sin FX no se aplica.
+		if tp.customFixedAmount != nil && !breakdown.CurrencyMismatch {
 			fixedAmount = *tp.customFixedAmount
 		}
 
@@ -129,12 +130,13 @@ func (tp *TenantPlan) CalculateFee(plan *PricingPlan, amount int64, currency str
 		totalFee := rateAmount + fixedAmount
 
 		breakdown = FeeBreakdown{
-			RateBpsApplied: rateBps,
-			RateAmount:     rateAmount,
-			FixedAmount:    fixedAmount,
-			TotalFee:       ReconstituteMoney(totalFee, currency),
-			PlanID:         tp.planID.String(),
-			MethodOverride: false, // el override de tenant prevalece sobre el de método
+			RateBpsApplied:   rateBps,
+			RateAmount:       rateAmount,
+			FixedAmount:      fixedAmount,
+			TotalFee:         ReconstituteMoney(totalFee, currency),
+			PlanID:           tp.planID.String(),
+			MethodOverride:   false, // el override de tenant prevalece sobre el de método
+			CurrencyMismatch: breakdown.CurrencyMismatch,
 		}
 	}
 
@@ -143,7 +145,7 @@ func (tp *TenantPlan) CalculateFee(plan *PricingPlan, amount int64, currency str
 
 // ── Getters ───────────────────────────────────────────────────────────────────
 
-func (tp *TenantPlan) ID() TenantPlanID         { return tp.id }
+func (tp *TenantPlan) ID() TenantPlanID          { return tp.id }
 func (tp *TenantPlan) TenantID() TenantID        { return tp.tenantID }
 func (tp *TenantPlan) PlanID() PlanID            { return tp.planID }
 func (tp *TenantPlan) PlanName() string          { return tp.planName }

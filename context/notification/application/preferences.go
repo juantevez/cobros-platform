@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
-
 	"github.com/juantevez/cobros-platform/context/notification/domain"
 )
 
@@ -80,18 +78,11 @@ func (uc *UpdatePreferenceUseCase) Execute(ctx context.Context, cmd UpdatePrefer
 		newEmail,
 	)
 
-	// RLS (bug 9): fijar app.current_tenant en la sesión ANTES del upsert.
-	err = pkgpostgres.RunWithAppTenant(
-		pkgpostgres.WithAppTenant(ctx, "app.current_tenant", cmd.TenantID),
-		uc.prefRepo, // solo necesita BeginTx si el pool lo soporta
-		func(ctx context.Context) error {
-			return uc.prefRepo.Upsert(ctx, pref)
-		},
-	)
-	if err != nil && !errors.Is(err, ErrPreferenceStore) {
+	// RLS (bug 9): el adapter fija app.current_tenant en la sesión antes del upsert.
+	if err := uc.prefRepo.Upsert(ctx, pref); err != nil {
 		return fmt.Errorf("%w: %v", ErrPreferenceStore, err)
 	}
-	return err
+	return nil
 }
 
 // GetPreferencesUseCase retorna las preferencias del tenant con defaults.

@@ -131,6 +131,20 @@ func TestTenantPlan_CalculateFee_CustomFixed(t *testing.T) {
 	}
 }
 
+func TestTenantPlan_CalculateFee_CurrencyMismatchIgnoresCustomFixed(t *testing.T) {
+	plan := newPlan(t) // 250 bps + 50 ARS
+	tp := assignPlan(t, plan, 100, 30)
+
+	fb, err := tp.CalculateFee(plan, 10000, "USD", MethodCard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Tasa negociada 1% = 100; el fijo negociado (ARS) se omite.
+	if !fb.CurrencyMismatch || fb.RateBpsApplied != 100 || fb.FixedAmount != 0 || fb.TotalFee.Amount() != 100 {
+		t.Errorf("unexpected breakdown: %+v", fb)
+	}
+}
+
 func TestTenantPlan_CalculateFee_PlanMismatch(t *testing.T) {
 	plan := newPlan(t)
 	tp := assignPlan(t, plan, -1, -1)

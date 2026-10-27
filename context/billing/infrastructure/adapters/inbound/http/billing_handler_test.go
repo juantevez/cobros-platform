@@ -412,10 +412,18 @@ func TestGetMyPlan_Success(t *testing.T) {
 	}
 }
 
-func TestGetMyPlan_NotFound(t *testing.T) {
+func TestGetMyPlan_NoPlanShowsFallback(t *testing.T) {
 	env := newTestEnv(t)
 	rec := env.do(http.MethodGet, "/api/v1/billing/my-plan", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var view struct {
+		Fallback        bool  `json:"fallback"`
+		FallbackRateBps int64 `json:"fallback_rate_bps"`
+	}
+	decodeBody(t, rec, &view)
+	if !view.Fallback || view.FallbackRateBps != 300 {
+		t.Errorf("unexpected view: %+v", view)
 	}
 }

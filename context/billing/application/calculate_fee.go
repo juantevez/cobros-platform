@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/juantevez/cobros-platform/context/billing/domain"
 )
@@ -17,17 +18,28 @@ import (
 //  1. TenantPlan con customRateBps o customFixedAmount (tarifa negociada)
 //  2. PricingPlan con override por método de pago (ej: card tiene tasa distinta)
 //  3. PricingPlan con tarifa base (aplica a todos los métodos)
-//  4. Fallback: si el tenant no tiene plan asignado, usa DefaultFallbackRateBps
+//  4. Fallback: si el tenant no tiene plan asignado, usa FallbackRateBps
 //
 // El fallback garantiza que Payment Processing nunca falle por falta de plan.
-// En producción, todos los tenants activos deben tener un plan asignado.
+// En producción, todos los tenants activos deben tener un plan asignado: por
+// eso cada uso del fallback se loguea como warning y se marca en el resultado.
+//
+// Un plan desactivado del catálogo sigue aplicándose a los tenants que ya lo
+// tenían asignado (grandfathering): desactivar solo cierra el plan a nuevas
+// asignaciones; para cambiar la tarifa de un tenant hay que reasignarlo.
 type CalculateFeeUseCase struct {
 	planRepo       PlanRepository
 	tenantPlanRepo TenantPlanRepository
 	// FallbackRateBps se usa cuando el tenant no tiene plan asignado.
-	// Valor recomendado: 300 (3.00%). Configurable al instanciar.
+	// Valor recomendado: DefaultFallbackRateBps. Configurable al instanciar.
 	FallbackRateBps int64
+	logger          *slog.Logger
 }
+
+// DefaultFallbackRateBps es la tasa (3.00%) que se cobra a un tenant sin plan.
+const DefaultFallbackRateBps int64 = 300
+
+const fallbackPlanName = "Fallback (sin plan asignado)"
 
 func NewCalculateFeeUseCase(
 	planRepo PlanRepository,
@@ -35,12 +47,13 @@ func NewCalculateFeeUseCase(
 	fallbackRateBps int64,
 ) *CalculateFeeUseCase {
 	if fallbackRateBps <= 0 {
-		fallbackRateBps = 300 // 3.00% por defecto
+		fallbackRateBps = DefaultFallbackRateBps
 	}
 	return &CalculateFeeUseCase{
 		planRepo:        planRepo,
 		tenantPlanRepo:  tenantPlanRepo,
 		FallbackRateBps: fallbackRateBps,
+		logger:          slog.Default(),
 	}
 }
 
@@ -67,16 +80,17 @@ func (uc *CalculateFeeUseCase) Execute(ctx context.Context, q CalculateFeeQuery)
 			return CalculateFeeResult{}, fmt.Errorf("find tenant plan: %w", err)
 		}
 		// Sin plan asignado → usar fallback.
+		uc.logger.WarnContext(ctx, "billing: tenant without pricing plan, applying fallback rate",
+			"tenant_id", tenantID.String(),
+			"fallback_rate_bps", uc.FallbackRateBps,
+		)
 		return uc.calculateFallback(q.Amount, q.Currency), nil
 	}
 
+	// Un plan inactivo se sigue aplicando (grandfathering, ver doc del tipo).
 	plan, err := uc.planRepo.FindByID(ctx, tenantPlan.PlanID())
 	if err != nil {
 		return CalculateFeeResult{}, fmt.Errorf("find plan %s: %w", tenantPlan.PlanID(), err)
-	}
-	if !plan.Active() {
-		// Plan desactivado después de la asignación → fallback.
-		return uc.calculateFallback(q.Amount, q.Currency), nil
 	}
 
 	// ── Calcular con el plan real ─────────────────────────────────────────────
@@ -87,17 +101,26 @@ func (uc *CalculateFeeUseCase) Execute(ctx context.Context, q CalculateFeeQuery)
 	if err != nil {
 		return CalculateFeeResult{}, fmt.Errorf("calculate fee: %w", err)
 	}
+	if breakdown.CurrencyMismatch {
+		uc.logger.WarnContext(ctx, "billing: payment currency differs from plan currency, fixed amounts omitted",
+			"tenant_id", tenantID.String(),
+			"plan_id", plan.ID().String(),
+			"plan_currency", plan.Currency(),
+			"payment_currency", q.Currency,
+		)
+	}
 
 	return CalculateFeeResult{
-		FeeAmount:      breakdown.TotalFee.Amount(),
-		Currency:       breakdown.TotalFee.Currency(),
-		RateBpsApplied: breakdown.RateBpsApplied,
-		RateAmount:     breakdown.RateAmount,
-		FixedAmount:    breakdown.FixedAmount,
-		PlanID:         plan.ID().String(),
-		PlanName:       plan.Name(),
-		MethodOverride: breakdown.MethodOverride,
-		TenantOverride: tenantOverride,
+		FeeAmount:        breakdown.TotalFee.Amount(),
+		Currency:         breakdown.TotalFee.Currency(),
+		RateBpsApplied:   breakdown.RateBpsApplied,
+		RateAmount:       breakdown.RateAmount,
+		FixedAmount:      breakdown.FixedAmount,
+		PlanID:           plan.ID().String(),
+		PlanName:         plan.Name(),
+		MethodOverride:   breakdown.MethodOverride,
+		TenantOverride:   tenantOverride,
+		CurrencyMismatch: breakdown.CurrencyMismatch,
 	}, nil
 }
 
@@ -111,8 +134,9 @@ func (uc *CalculateFeeUseCase) calculateFallback(amount int64, currency string) 
 		RateAmount:     feeAmount,
 		FixedAmount:    0,
 		PlanID:         "fallback",
-		PlanName:       "Fallback (sin plan asignado)",
+		PlanName:       fallbackPlanName,
 		MethodOverride: false,
 		TenantOverride: false,
+		Fallback:       true,
 	}
 }

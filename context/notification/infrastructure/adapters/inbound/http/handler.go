@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -66,8 +67,8 @@ func (h *NotificationHandler) UpdatePreference(c *gin.Context) {
 	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
 
 	var req struct {
-		Enabled        bool   `json:"enabled"`
-		RecipientEmail string `json:"recipient_email"`
+		Enabled        bool    `json:"enabled"`
+		RecipientEmail *string `json:"recipient_email"` // nil ⇒ mantener el valor previo
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -80,7 +81,14 @@ func (h *NotificationHandler) UpdatePreference(c *gin.Context) {
 		Enabled:        req.Enabled,
 		RecipientEmail: req.RecipientEmail,
 	}); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		switch {
+		case errors.Is(err, application.ErrInvalidPreferenceRequest):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, application.ErrEventTypeUnknown):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		}
 		return
 	}
 	c.Status(http.StatusNoContent)

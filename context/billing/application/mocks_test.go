@@ -27,13 +27,13 @@ func (t fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) err
 // ── PlanRepository ────────────────────────────────────────────────────────────
 
 type fakePlanRepo struct {
-	byID       map[domain.PlanID]*domain.PricingPlan
-	saved      *domain.PricingPlan
-	updated    *domain.PricingPlan
-	saveErr    error
-	updateErr  error
-	findErr    error
-	listErr    error
+	byID      map[domain.PlanID]*domain.PricingPlan
+	saved     *domain.PricingPlan
+	updated   *domain.PricingPlan
+	saveErr   error
+	updateErr error
+	findErr   error
+	listErr   error
 }
 
 func newFakePlanRepo(plans ...*domain.PricingPlan) *fakePlanRepo {

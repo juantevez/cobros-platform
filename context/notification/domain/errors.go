@@ -9,6 +9,7 @@ var (
 	ErrInvalidChannel          = errors.New("invalid notification channel")
 	ErrPreferenceNotFound      = errors.New("notification preference not found")
 	ErrSendFailed              = errors.New("failed to send notification")
+	ErrInvalidTenantID         = errors.New("invalid tenant id")
 	// ErrNotificationDuplicate indica que ya existe un registro para la
 	// clave natural de idempotencia (tenant_id, event_type, nats_msg_id):
 	// es la reentrega de un evento ya procesado, no un error real.

@@ -194,6 +194,7 @@ func allowRole(roles ...authdomain.Role) gin.HandlerFunc {
 func newTestEnv(t *testing.T) *testEnv {
 	return newTestEnvWithGuards(t, RouteGuards{
 		ManagePlans:    passThrough,
+		ReadPlans:      passThrough,
 		AssignPlan:     passThrough,
 		ReadTenantPlan: passThrough,
 		ReadMyPlan:     passThrough,
@@ -201,8 +202,15 @@ func newTestEnv(t *testing.T) *testEnv {
 }
 
 // newTestEnvWithGuards permite variar guards y rol del usuario autenticado.
+// Los guards de lectura no especificados se completan con passThrough.
 func newTestEnvWithGuards(t *testing.T, guards RouteGuards, role authdomain.Role) *testEnv {
 	t.Helper()
+	if guards.ReadPlans == nil {
+		guards.ReadPlans = passThrough
+	}
+	if guards.ReadTenantPlan == nil {
+		guards.ReadTenantPlan = passThrough
+	}
 	plans := newFakePlanRepo()
 	tenantPlans := newFakeTenantPlanRepo()
 	pub := &fakePublisher{}
@@ -214,7 +222,7 @@ func newTestEnvWithGuards(t *testing.T, guards RouteGuards, role authdomain.Role
 	assignPlan := billapp.NewAssignPlanUseCase(plans, tenantPlans, tx, pub)
 	getPlan := billapp.NewGetPlanUseCase(plans)
 	listPlans := billapp.NewListPlansPageUseCase(plans)
-	getTenantPlan := billapp.NewGetTenantPlanUseCase(tenantPlans)
+	getTenantPlan := billapp.NewGetTenantPlanUseCase(tenantPlans, 0)
 	listTenantPlans := billapp.NewListTenantPlansUseCase(tenantPlans)
 
 	tenantID, err := domain.ParseTenantID(uuid.NewString())

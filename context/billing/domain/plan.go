@@ -190,6 +190,11 @@ func (p *PricingPlan) RecordDeactivated() {
 // Usa el override de método de pago si existe; si no, la tarifa base.
 // El redondeo es hacia arriba (ceil) para que nunca se cobre menos del mínimo.
 //
+// Si la moneda del pago difiere de la del plan, la tasa proporcional (bps) es
+// agnóstica de moneda y se aplica igual, pero los montos fijos están
+// denominados en la moneda del plan y, sin conversión FX, se omiten
+// (CurrencyMismatch=true). Así el pago no falla por la moneda.
+//
 // Fórmula:
 //
 //	rate_amount = ceil(amount × rate_bps / 10_000)
@@ -198,9 +203,7 @@ func (p *PricingPlan) CalculateFee(amount int64, currency string, method Payment
 	if amount <= 0 {
 		return FeeBreakdown{}, fmt.Errorf("amount must be positive")
 	}
-	if currency != p.currency {
-		return FeeBreakdown{}, fmt.Errorf("%w: plan is %q, payment is %q", ErrCurrencyMismatch, p.currency, currency)
-	}
+	currencyMismatch := currency != p.currency
 
 	// Seleccionar tarifa: override por método si existe, base si no.
 	rateBps := p.baseRateBps
@@ -211,6 +214,9 @@ func (p *PricingPlan) CalculateFee(amount int64, currency string, method Payment
 		rateBps = override.RateBps
 		fixedAmount = override.FixedAmount
 		methodOverride = true
+	}
+	if currencyMismatch {
+		fixedAmount = 0
 	}
 
 	// Cálculo con ceil para evitar redondeo en favor del comercio.
@@ -226,12 +232,13 @@ func (p *PricingPlan) CalculateFee(amount int64, currency string, method Payment
 	}
 
 	return FeeBreakdown{
-		RateBpsApplied: rateBps,
-		RateAmount:     rateAmount,
-		FixedAmount:    fixedAmount,
-		TotalFee:       ReconstituteMoney(totalFeeAmount, currency),
-		PlanID:         p.id.String(),
-		MethodOverride: methodOverride,
+		RateBpsApplied:   rateBps,
+		RateAmount:       rateAmount,
+		FixedAmount:      fixedAmount,
+		TotalFee:         ReconstituteMoney(totalFeeAmount, currency),
+		PlanID:           p.id.String(),
+		MethodOverride:   methodOverride,
+		CurrencyMismatch: currencyMismatch,
 	}, nil
 }
 

@@ -84,15 +84,16 @@ func TestCalculateFee_FallbackWhenNoPlan(t *testing.T) {
 	if res.FeeAmount != 30_000 {
 		t.Fatalf("expected fallback fee 30000, got %d", res.FeeAmount)
 	}
-	if res.PlanID != "fallback" {
-		t.Fatalf("expected fallback plan id, got %q", res.PlanID)
+	if res.PlanID != "fallback" || !res.Fallback {
+		t.Fatalf("expected fallback result, got %+v", res)
 	}
 	if res.RateBpsApplied != 300 {
 		t.Fatalf("expected fallback rate 300, got %d", res.RateBpsApplied)
 	}
 }
 
-func TestCalculateFee_FallbackWhenPlanInactive(t *testing.T) {
+// Grandfathering: un plan desactivado sigue aplicándose al tenant ya asignado.
+func TestCalculateFee_InactivePlanStillApplies(t *testing.T) {
 	plan := buildPlan(t, "Plan Base", 250, 0)
 	tpRepo := newFakeTenantPlanRepo()
 
@@ -110,8 +111,37 @@ func TestCalculateFee_FallbackWhenPlanInactive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if res.PlanID != "fallback" {
-		t.Fatalf("expected fallback due to inactive plan, got %q", res.PlanID)
+	if res.Fallback || res.PlanID != plan.ID().String() {
+		t.Fatalf("expected inactive plan to keep applying, got %+v", res)
+	}
+	// ceil(1_000_000 * 250 / 10_000) = 25_000
+	if res.FeeAmount != 25_000 || res.RateBpsApplied != 250 {
+		t.Fatalf("expected fee 25000 at 250 bps, got %+v", res)
+	}
+}
+
+func TestCalculateFee_CurrencyMismatchAppliesOnlyBps(t *testing.T) {
+	plan := buildPlan(t, "Plan Base", 250, 0) // ARS
+	if err := plan.UpdateBaseRates(250, 500); err != nil {
+		t.Fatalf("update base rates: %v", err)
+	}
+	tpRepo := newFakeTenantPlanRepo()
+	tid, err := domain.ParseTenantID(validUUID())
+	if err != nil {
+		t.Fatalf("parse tenant id: %v", err)
+	}
+	tpRepo.active[tid] = buildTenantPlan(t, tid, plan)
+
+	uc := NewCalculateFeeUseCase(newFakePlanRepo(plan), tpRepo, 300)
+	res, err := uc.Execute(context.Background(), CalculateFeeQuery{
+		TenantID: tid.String(), Amount: 1_000_000, Currency: "USD", PaymentMethod: "card",
+	})
+	if err != nil {
+		t.Fatalf("currency mismatch must not fail the payment: %v", err)
+	}
+	// Solo bps (25_000); el fijo de 500 ARS se omite.
+	if !res.CurrencyMismatch || res.FeeAmount != 25_000 || res.FixedAmount != 0 || res.Currency != "USD" {
+		t.Fatalf("unexpected result: %+v", res)
 	}
 }
 
