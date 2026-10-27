@@ -501,7 +501,7 @@ func TestToView(t *testing.T) {
 	t.Run("open dispute overdue flag and nil timestamps", func(t *testing.T) {
 		d := domain.ReconstituteDispute(domain.NewDisputeID(), tid, "pay-1", "psp", 5000, "ARS",
 			domain.ReasonGeneral, domain.StatusOpen, nil, "", "",
-			testNow.Add(-time.Hour), openedAt, nil, nil) // deadline en el pasado
+			testNow.Add(-time.Hour), openedAt, nil, nil, 1) // deadline en el pasado
 		v := toView(d, testNow)
 		if !v.IsOverdue {
 			t.Error("expected overdue")
@@ -517,7 +517,7 @@ func TestToView(t *testing.T) {
 	t.Run("resolved dispute formats timestamps and evidence", func(t *testing.T) {
 		d := domain.ReconstituteDispute(domain.NewDisputeID(), tid, "pay-1", "psp", 5000, "ARS",
 			domain.ReasonGeneral, domain.StatusWon, ev, "resp", "res",
-			deadline, openedAt, &responded, &resolved)
+			deadline, openedAt, &responded, &resolved, 3)
 		v := toView(d, testNow)
 		if v.RespondedAt == nil || *v.RespondedAt != responded.Format(time.RFC3339) {
 			t.Errorf("respondedAt mismatch: %v", v.RespondedAt)
