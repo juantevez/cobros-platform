@@ -39,7 +39,7 @@ func TestSetBankAccount_UpdateErrorPropagates(t *testing.T) {
 	repo.updateErr = errBoom
 	uc := NewSetBankAccountUseCase(repo, fakeTx{})
 
-	err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: tenantID.String(), AccountType: "CBU", AccountNumber: "1", HolderName: "A"})
+	err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: tenantID.String(), AccountType: "CBU", AccountNumber: "1", HolderName: "A", Currency: "ARS"})
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("expected errBoom, got %v", err)
 	}

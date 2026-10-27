@@ -209,7 +209,8 @@ func respondDomainError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domain.ErrApplicationNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrApplicationExists):
+	case errors.Is(err, domain.ErrApplicationExists),
+		errors.Is(err, domain.ErrConcurrentModification):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidTransition),
 		errors.Is(err, domain.ErrIncompleteApplication):
@@ -220,7 +221,11 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidPersonRole),
 		errors.Is(err, domain.ErrInvalidAccountType),
 		errors.Is(err, domain.ErrRejectionReasonEmpty),
-		errors.Is(err, domain.ErrReviewNotesEmpty):
+		errors.Is(err, domain.ErrReviewNotesEmpty),
+		errors.Is(err, domain.ErrInvalidDecision),
+		errors.Is(err, domain.ErrInvalidID),
+		errors.Is(err, domain.ErrRequiredField),
+		errors.Is(err, domain.ErrInvalidCurrency):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
@@ -233,6 +238,10 @@ func respondDomainError(c *gin.Context, err error) {
 // Se inyecta desde el composition root para no acoplar este contexto con Auth;
 // en producción es RequireRole(platform_support). Sin él, cualquier usuario
 // autenticado podría aprobar su propia solicitud y saltear el KYC.
+//
+// Las rutas de operador corren además con platformOperatorScope: la solicitud
+// revisada pertenece a otro tenant, así que RLS la expone solo vía la política
+// de operador (app.platform_operator), nunca por el tenant del JWT.
 func RegisterRoutes(rg *gin.RouterGroup, onboarding *OnboardingHandler, review *ReviewHandler, reviewGuard gin.HandlerFunc) {
 	if reviewGuard == nil {
 		panic("onboarding: RegisterRoutes requires a reviewGuard")
@@ -246,6 +255,13 @@ func RegisterRoutes(rg *gin.RouterGroup, onboarding *OnboardingHandler, review *
 		ob.POST("/persons", onboarding.AddPerson)
 		ob.PUT("/bank-account", onboarding.SetBankAccount)
 		ob.POST("/submit", onboarding.SubmitForReview)
-		ob.POST("/applications/:id/review", reviewGuard, review.Review)
+		ob.POST("/applications/:id/review", reviewGuard, platformOperatorScope, review.Review)
 	}
+}
+
+// platformOperatorScope marca el request como acción de operador para RLS.
+// Debe ir siempre DESPUÉS del guard de rol.
+func platformOperatorScope(c *gin.Context) {
+	c.Request = c.Request.WithContext(postgres.WithPlatformOperator(c.Request.Context()))
+	c.Next()
 }

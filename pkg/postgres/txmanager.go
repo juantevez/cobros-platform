@@ -34,6 +34,8 @@ func NewTxManager(pool *pgxpool.Pool) *TxManager {
 //
 //   - Si el contexto contiene un tenantID, lo configura con set_config
 //     para que las políticas de RLS tomen efecto automáticamente.
+//   - Aplica además las variables de WithAppTenant/WithPlatformOperator
+//     (pisan a app.current_tenant si repiten la clave).
 //   - Inyecta la transacción en el contexto resultante para que los
 //     repositorios la reutilicen vía ConnFromContext.
 //   - Si fn retorna error, hace rollback y propaga el error.
@@ -54,6 +56,13 @@ func (m *TxManager) RunInTx(ctx context.Context, fn func(context.Context) error)
 		); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("txmanager: set rls context: %w", err)
+		}
+	}
+	// Variables de aplicación explícitas (WithAppTenant / WithPlatformOperator).
+	for key, value := range appVarsFromContext(ctx) {
+		if _, err := tx.Exec(ctx, `SELECT set_config($1, $2, true)`, key, value); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("txmanager: set %s: %w", key, err)
 		}
 	}
 

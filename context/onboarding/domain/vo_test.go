@@ -160,3 +160,56 @@ func TestBusinessInfo_IsComplete(t *testing.T) {
 		t.Error("business info with incomplete address should be incomplete")
 	}
 }
+
+func TestParseTaxIDForCountry(t *testing.T) {
+	tests := []struct {
+		name, raw, country, want string
+		ok                       bool
+	}{
+		{"AR valid CUIT with separators", "20-30405060-9", "AR", "20304050609", true},
+		{"AR valid CUIT check digit 0", "30-71234567-1", "ar", "30712345671", true},
+		{"AR wrong check digit", "20-30405060-7", "AR", "", false},
+		{"AR wrong length", "2030405060", "AR", "", false},
+		{"AR letters", "20A04050609", "AR", "", false},
+		{"MX alphanumeric RFC", "abc-680524-p76", "MX", "ABC680524P76", true},
+		{"US EIN", "12-3456789", "US", "123456789", true},
+		{"other too short", "1234", "CL", "", false},
+		{"other invalid chars", "12345_678", "CL", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseTaxIDForCountry(tt.raw, tt.country)
+			if tt.ok {
+				if err != nil || got.String() != tt.want {
+					t.Fatalf("got (%q, %v), want %q", got, err, tt.want)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidTaxID) {
+				t.Fatalf("expected ErrInvalidTaxID, got (%q, %v)", got, err)
+			}
+		})
+	}
+}
+
+func TestParseCurrency(t *testing.T) {
+	if c, err := ParseCurrency(" usd "); err != nil || c != "USD" {
+		t.Errorf("got (%q, %v), want USD", c, err)
+	}
+	for _, bad := range []string{"", "US", "USDT", "U$D"} {
+		if _, err := ParseCurrency(bad); !errors.Is(err, ErrInvalidCurrency) {
+			t.Errorf("%q: expected ErrInvalidCurrency, got %v", bad, err)
+		}
+	}
+}
+
+func TestParseReviewDecision(t *testing.T) {
+	for _, d := range []string{"approve", "reject", "request_more_info", "reopen"} {
+		if got, err := ParseReviewDecision(d); err != nil || string(got) != d {
+			t.Errorf("%q: got (%q, %v)", d, got, err)
+		}
+	}
+	if _, err := ParseReviewDecision("maybe"); !errors.Is(err, ErrInvalidDecision) {
+		t.Errorf("expected ErrInvalidDecision, got %v", err)
+	}
+}

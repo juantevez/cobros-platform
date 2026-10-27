@@ -85,3 +85,14 @@ type MoreInfoRequestedEvent struct {
 }
 
 func (e MoreInfoRequestedEvent) EventType() string { return "onboarding.application.more_info.v1" }
+
+// ApplicationReopenedEvent se emite cuando el operador reabre una solicitud
+// rechazada (rejected → requires_more_info).
+type ApplicationReopenedEvent struct {
+	baseEvent
+	ApplicationID string `json:"application_id"`
+	TenantID      string `json:"tenant_id"`
+	Notes         string `json:"notes"`
+}
+
+func (e ApplicationReopenedEvent) EventType() string { return "onboarding.application.reopened.v1" }

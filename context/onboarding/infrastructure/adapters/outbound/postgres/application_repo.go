@@ -42,22 +42,36 @@ func (r *pgApplicationRepository) Save(ctx context.Context, app *domain.Onboardi
 	return wrapErr("save", err)
 }
 
+// rlsTenantKey es la variable de sesión que leen las políticas RLS de las
+// tablas onboarding_* (ver migraciones 000005 y 000017).
+const rlsTenantKey = "app.current_tenant"
+
 // Update persiste los cambios del aggregate (status + colecciones).
+//
+// Optimistic locking: el UPDATE solo aplica si la fila sigue en la versión
+// leída (app.Version()); si no, retorna ErrConcurrentModification y, como
+// corre dentro de RunInTx, nada de lo demás se persiste.
 func (r *pgApplicationRepository) Update(ctx context.Context, app *domain.OnboardingApplication) error {
 	conn := postgres.ConnFromContext(ctx, r.pool)
 
-	_, err := conn.Exec(ctx, `
+	tag, err := conn.Exec(ctx, `
 		UPDATE onboarding_applications SET
 			status=$2, review_notes=$3, rejection_reason=$4,
-			submitted_at=$5, reviewed_at=$6, updated_at=$7
-		WHERE id=$1`,
+			submitted_at=$5, reviewed_at=$6, updated_at=$7,
+			version=version+1
+		WHERE id=$1 AND version=$8`,
 		app.ID().String(), app.Status().String(),
 		nullStr(app.ReviewNotes()), nullStr(app.RejectionReason()),
 		app.SubmittedAt(), app.ReviewedAt(), app.UpdatedAt(),
+		app.Version(),
 	)
 	if err != nil {
 		return wrapErr("update status", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrConcurrentModification
+	}
+	app.MarkVersionPersisted()
 
 	// Insertar documentos nuevos (append-only: ON CONFLICT DO NOTHING).
 	for _, doc := range app.Documents() {
@@ -113,16 +127,34 @@ func (r *pgApplicationRepository) Update(ctx context.Context, app *domain.Onboar
 	return nil
 }
 
+// FindByID busca por ID. La usa el operador sobre solicitudes de otros
+// tenants: bajo RLS efectivo solo encuentra la fila si el contexto trae
+// WithPlatformOperator (o el tenant dueño de la solicitud).
 func (r *pgApplicationRepository) FindByID(ctx context.Context, id domain.ApplicationID) (*domain.OnboardingApplication, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, baseQuery+" WHERE a.id = $1", id.String())
-	return r.scanWithRelations(ctx, conn, row)
+	if tenantID, ok := postgres.TenantIDFromContext(ctx); ok {
+		ctx = postgres.WithAppTenant(ctx, rlsTenantKey, tenantID)
+	}
+	return r.findOne(ctx, " WHERE a.id = $1", id.String())
 }
 
+// FindByTenantID fija app.current_tenant al tenant buscado, así la lectura
+// funciona bajo RLS efectivo aunque corra fuera de una transacción.
 func (r *pgApplicationRepository) FindByTenantID(ctx context.Context, tenantID domain.TenantID) (*domain.OnboardingApplication, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, baseQuery+" WHERE a.tenant_id = $1", tenantID.String())
-	return r.scanWithRelations(ctx, conn, row)
+	ctx = postgres.WithAppTenant(ctx, rlsTenantKey, tenantID.String())
+	return r.findOne(ctx, " WHERE a.tenant_id = $1", tenantID.String())
+}
+
+// findOne ejecuta la lectura con las variables RLS del contexto fijadas en la
+// sesión (tx efímera si no hay una activa).
+func (r *pgApplicationRepository) findOne(ctx context.Context, where string, arg string) (*domain.OnboardingApplication, error) {
+	var app *domain.OnboardingApplication
+	err := postgres.RunWithAppTenant(ctx, r.pool, func(ctx context.Context) error {
+		conn := postgres.ConnFromContext(ctx, r.pool)
+		var err error
+		app, err = r.scanWithRelations(ctx, conn, conn.QueryRow(ctx, baseQuery+where, arg))
+		return err
+	})
+	return app, err
 }
 
 const baseQuery = `
@@ -130,7 +162,8 @@ const baseQuery = `
 	       a.addr_street, a.addr_city, a.addr_state, a.addr_country, a.addr_postal,
 	       a.website, a.phone_number,
 	       a.review_notes, a.rejection_reason,
-	       a.submitted_at, a.reviewed_at, a.created_at, a.updated_at
+	       a.submitted_at, a.reviewed_at, a.created_at, a.updated_at,
+	       a.version
 	FROM onboarding_applications a`
 
 func (r *pgApplicationRepository) scanWithRelations(ctx context.Context, conn postgres.Conn, row pgx.Row) (*domain.OnboardingApplication, error) {
@@ -141,6 +174,7 @@ func (r *pgApplicationRepository) scanWithRelations(ctx context.Context, conn po
 		reviewNotes, rejectionReason                            *string
 		submittedAt, reviewedAt                                 *time.Time
 		createdAt, updatedAt                                    time.Time
+		version                                                 int64
 	)
 
 	if err := row.Scan(
@@ -149,6 +183,7 @@ func (r *pgApplicationRepository) scanWithRelations(ctx context.Context, conn po
 		&website, &phone,
 		&reviewNotes, &rejectionReason,
 		&submittedAt, &reviewedAt, &createdAt, &updatedAt,
+		&version,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrApplicationNotFound
@@ -156,7 +191,8 @@ func (r *pgApplicationRepository) scanWithRelations(ctx context.Context, conn po
 		return nil, fmt.Errorf("application repo: scan: %w", err)
 	}
 
-	taxID, _ := domain.ParseTaxID(taxIDStr)
+	// Ya validado al crear (el formato depende del país): no se re-parsea.
+	taxID := domain.TaxID(taxIDStr)
 	cat, _ := domain.ParseBusinessCategory(catStr)
 
 	info := domain.BusinessInfo{
@@ -240,6 +276,7 @@ func (r *pgApplicationRepository) scanWithRelations(ctx context.Context, conn po
 		deref(reviewNotes), deref(rejectionReason),
 		submittedAt, reviewedAt,
 		createdAt.UTC(), updatedAt.UTC(),
+		version,
 	)
 	return app, nil
 }

@@ -17,7 +17,10 @@ import (
 
 const defaultTestDSN = "postgres://cobros:cobros@localhost:5432/cobros?sslmode=disable"
 
-var testPool *pgxpool.Pool
+var (
+	testPool *pgxpool.Pool
+	testDSN  string
+)
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
@@ -25,6 +28,7 @@ func TestMain(m *testing.M) {
 	if dsn == "" {
 		dsn = defaultTestDSN
 	}
+	testDSN = dsn
 	if pool, err := pkgpostgres.New(ctx, pkgpostgres.DefaultConfig(dsn)); err == nil {
 		if pool.Ping(ctx) == nil {
 			testPool = pool

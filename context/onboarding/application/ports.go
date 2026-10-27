@@ -13,6 +13,9 @@ type TxManager interface {
 
 // ApplicationRepository persiste y recupera el agregado OnboardingApplication.
 // Persiste el aggregate completo incluyendo documentos, personas y cuenta bancaria.
+//
+// Update aplica optimistic locking: si la fila ya no está en app.Version()
+// retorna domain.ErrConcurrentModification.
 type ApplicationRepository interface {
 	Save(ctx context.Context, app *domain.OnboardingApplication) error
 	Update(ctx context.Context, app *domain.OnboardingApplication) error

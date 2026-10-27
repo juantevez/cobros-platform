@@ -13,8 +13,12 @@ import (
 //	pending ──────────────── SubmitForReview ──→ in_review
 //	                                                │
 //	requires_more_info ←── RequestMoreInfo ─────────┤
-//	       │                                        ├── Approve ──→ approved (final)
-//	       └──── SubmitForReview ──→ in_review      └── Reject  ──→ rejected  (final)
+//	       │   ↑                                    ├── Approve ──→ approved (final)
+//	       │   └──────── Reopen (operador) ─────────┼── rejected ←── Reject
+//	       └──── SubmitForReview ──→ in_review
+//
+// rejected solo sale por Reopen, una decisión del operador: el comercio no
+// puede reabrir por su cuenta ni crear otra solicitud.
 //
 // Cuando pasa a approved, emite ApplicationApprovedEvent que activa el Tenant
 // en Auth y crea las cuentas contables en Ledger.
@@ -32,6 +36,9 @@ type OnboardingApplication struct {
 	reviewedAt      *time.Time
 	createdAt       time.Time
 	updatedAt       time.Time
+	// version es el contador de optimistic locking: el repositorio solo
+	// actualiza si la fila sigue en la versión leída.
+	version int64
 
 	events []Event
 }
@@ -39,7 +46,7 @@ type OnboardingApplication struct {
 // NewOnboardingApplication crea una solicitud de onboarding en estado Pending.
 func NewOnboardingApplication(id ApplicationID, tenantID TenantID, info BusinessInfo) (*OnboardingApplication, error) {
 	if info.LegalName == "" {
-		return nil, fmt.Errorf("legal name is required to start onboarding")
+		return nil, fmt.Errorf("%w: legal name is required to start onboarding", ErrRequiredField)
 	}
 
 	now := time.Now().UTC()
@@ -73,6 +80,7 @@ func ReconstituteOnboardingApplication(
 	reviewNotes, rejectionReason string,
 	submittedAt, reviewedAt *time.Time,
 	createdAt, updatedAt time.Time,
+	version int64,
 ) *OnboardingApplication {
 	return &OnboardingApplication{
 		id: id, tenantID: tenantID, status: status,
@@ -81,6 +89,7 @@ func ReconstituteOnboardingApplication(
 		reviewNotes: reviewNotes, rejectionReason: rejectionReason,
 		submittedAt: submittedAt, reviewedAt: reviewedAt,
 		createdAt: createdAt, updatedAt: updatedAt,
+		version: version,
 	}
 }
 
@@ -150,17 +159,18 @@ func (a *OnboardingApplication) Approve(notes string) error {
 	if a.status != StatusInReview {
 		return fmt.Errorf("%w: cannot approve from status %q", ErrInvalidTransition, a.status)
 	}
+	// La moneda del comercio (cuentas Ledger) es la de su cuenta de desembolso.
+	// SubmitForReview ya exige la cuenta; esto cubre datos inconsistentes.
+	if a.bankAccount == nil || a.bankAccount.Currency() == "" {
+		return fmt.Errorf("%w: bank account currency is required to approve", ErrIncompleteApplication)
+	}
+	currency := a.bankAccount.Currency()
 
 	now := time.Now().UTC()
 	a.status = StatusApproved
 	a.reviewNotes = notes
 	a.reviewedAt = &now
 	a.updatedAt = now
-
-	currency := "ARS" // default Argentina; en Fase 3 configurable por comercio
-	if a.bankAccount != nil && a.bankAccount.Currency() != "" {
-		currency = a.bankAccount.Currency()
-	}
 
 	a.record(ApplicationApprovedEvent{
 		baseEvent:        newBase(a.tenantID.String()),
@@ -222,6 +232,31 @@ func (a *OnboardingApplication) RequestMoreInfo(notes string) error {
 	return nil
 }
 
+// Reopen reabre una solicitud rechazada para que el comercio la corrija.
+// Solo desde rejected; la deja en requires_more_info (editable) con las notas
+// del operador. Conserva rejectionReason como historial del último rechazo.
+func (a *OnboardingApplication) Reopen(notes string) error {
+	if a.status != StatusRejected {
+		return fmt.Errorf("%w: cannot reopen from status %q", ErrInvalidTransition, a.status)
+	}
+	if notes == "" {
+		return ErrReviewNotesEmpty
+	}
+
+	a.status = StatusRequiresMoreInfo
+	a.reviewNotes = notes
+	a.updatedAt = time.Now().UTC()
+
+	a.record(ApplicationReopenedEvent{
+		baseEvent:     newBase(a.tenantID.String()),
+		ApplicationID: a.id.String(),
+		TenantID:      a.tenantID.String(),
+		Notes:         notes,
+	})
+
+	return nil
+}
+
 // ── Validación ────────────────────────────────────────────────────────────────
 
 func (a *OnboardingApplication) validateCompleteness() error {
@@ -242,19 +277,24 @@ func (a *OnboardingApplication) validateCompleteness() error {
 
 // ── Getters ───────────────────────────────────────────────────────────────────
 
-func (a *OnboardingApplication) ID() ApplicationID              { return a.id }
-func (a *OnboardingApplication) TenantID() TenantID             { return a.tenantID }
-func (a *OnboardingApplication) Status() ApplicationStatus      { return a.status }
-func (a *OnboardingApplication) BusinessInfo() BusinessInfo     { return a.businessInfo }
-func (a *OnboardingApplication) BankAccount() *BankAccount      { return a.bankAccount }
-func (a *OnboardingApplication) Documents() []BusinessDocument  { return a.documents }
-func (a *OnboardingApplication) Persons() []Person              { return a.persons }
-func (a *OnboardingApplication) ReviewNotes() string            { return a.reviewNotes }
-func (a *OnboardingApplication) RejectionReason() string        { return a.rejectionReason }
-func (a *OnboardingApplication) SubmittedAt() *time.Time        { return a.submittedAt }
-func (a *OnboardingApplication) ReviewedAt() *time.Time         { return a.reviewedAt }
-func (a *OnboardingApplication) CreatedAt() time.Time           { return a.createdAt }
-func (a *OnboardingApplication) UpdatedAt() time.Time           { return a.updatedAt }
+func (a *OnboardingApplication) ID() ApplicationID             { return a.id }
+func (a *OnboardingApplication) TenantID() TenantID            { return a.tenantID }
+func (a *OnboardingApplication) Status() ApplicationStatus     { return a.status }
+func (a *OnboardingApplication) BusinessInfo() BusinessInfo    { return a.businessInfo }
+func (a *OnboardingApplication) BankAccount() *BankAccount     { return a.bankAccount }
+func (a *OnboardingApplication) Documents() []BusinessDocument { return a.documents }
+func (a *OnboardingApplication) Persons() []Person             { return a.persons }
+func (a *OnboardingApplication) ReviewNotes() string           { return a.reviewNotes }
+func (a *OnboardingApplication) RejectionReason() string       { return a.rejectionReason }
+func (a *OnboardingApplication) SubmittedAt() *time.Time       { return a.submittedAt }
+func (a *OnboardingApplication) ReviewedAt() *time.Time        { return a.reviewedAt }
+func (a *OnboardingApplication) CreatedAt() time.Time          { return a.createdAt }
+func (a *OnboardingApplication) UpdatedAt() time.Time          { return a.updatedAt }
+func (a *OnboardingApplication) Version() int64                { return a.version }
+
+// MarkVersionPersisted avanza la versión tras un Update exitoso, para que el
+// agregado en memoria siga coincidiendo con la fila. Uso exclusivo del repositorio.
+func (a *OnboardingApplication) MarkVersionPersisted() { a.version++ }
 
 func (a *OnboardingApplication) PullEvents() []Event {
 	evs := a.events

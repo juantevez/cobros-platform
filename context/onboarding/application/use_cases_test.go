@@ -12,7 +12,7 @@ func validSubmitCmd(tenantID string) SubmitApplicationCmd {
 	return SubmitApplicationCmd{
 		TenantID:         tenantID,
 		LegalName:        "Acme SA",
-		TaxID:            "20-30405060-7",
+		TaxID:            "20-30405060-9",
 		BusinessCategory: "retail",
 		Street:           "Calle 1",
 		City:             "CABA",
@@ -240,7 +240,7 @@ func TestSetBankAccount_Errors(t *testing.T) {
 
 	t.Run("invalid account type", func(t *testing.T) {
 		uc := NewSetBankAccountUseCase(newFakeRepo(pendingApp(t, tenantID)), fakeTx{})
-		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: tenantID.String(), AccountType: "paypal", AccountNumber: "1", HolderName: "A"})
+		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: tenantID.String(), AccountType: "paypal", AccountNumber: "1", HolderName: "A", Currency: "ARS"})
 		if !errors.Is(err, domain.ErrInvalidAccountType) {
 			t.Fatalf("expected ErrInvalidAccountType, got %v", err)
 		}
@@ -254,21 +254,21 @@ func TestSetBankAccount_Errors(t *testing.T) {
 	})
 	t.Run("invalid tenant id", func(t *testing.T) {
 		uc := NewSetBankAccountUseCase(newFakeRepo(), fakeTx{})
-		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: "nope", AccountType: "CBU", AccountNumber: "1", HolderName: "A"})
+		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: "nope", AccountType: "CBU", AccountNumber: "1", HolderName: "A", Currency: "ARS"})
 		if err == nil {
 			t.Fatal("expected error for invalid tenant id")
 		}
 	})
 	t.Run("application not found", func(t *testing.T) {
 		uc := NewSetBankAccountUseCase(newFakeRepo(), fakeTx{})
-		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: validUUID(), AccountType: "CBU", AccountNumber: "1", HolderName: "A"})
+		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: validUUID(), AccountType: "CBU", AccountNumber: "1", HolderName: "A", Currency: "ARS"})
 		if err == nil {
 			t.Fatal("expected error when application not found")
 		}
 	})
 	t.Run("not editable in review", func(t *testing.T) {
 		uc := NewSetBankAccountUseCase(newFakeRepo(inReviewApp(t, tenantID)), fakeTx{})
-		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: tenantID.String(), AccountType: "CBU", AccountNumber: "1", HolderName: "A"})
+		err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: tenantID.String(), AccountType: "CBU", AccountNumber: "1", HolderName: "A", Currency: "ARS"})
 		if !errors.Is(err, domain.ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
@@ -373,6 +373,38 @@ func TestReviewApplication_RequestMoreInfo(t *testing.T) {
 	}
 }
 
+func TestReviewApplication_Reopen(t *testing.T) {
+	tenantID := testTenantID(t)
+	app := inReviewApp(t, tenantID)
+	if err := app.Reject("docs falsos"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	app.PullEvents()
+	repo := newFakeRepo(app)
+	pub := &fakePublisher{}
+	uc := NewReviewApplicationUseCase(repo, fakeTx{}, pub)
+
+	err := uc.Execute(context.Background(), ReviewApplicationCmd{ApplicationID: app.ID().String(), Decision: "reopen", Notes: "reenviar docs"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.updated.Status() != domain.StatusRequiresMoreInfo {
+		t.Errorf("status = %q, want requires_more_info", repo.updated.Status())
+	}
+	if _, ok := pub.published[0].(domain.ApplicationReopenedEvent); !ok {
+		t.Fatalf("expected ApplicationReopenedEvent, got %T", pub.published[0])
+	}
+}
+
+func TestSetBankAccount_InvalidCurrency(t *testing.T) {
+	tenantID := testTenantID(t)
+	uc := NewSetBankAccountUseCase(newFakeRepo(pendingApp(t, tenantID)), fakeTx{})
+	err := uc.Execute(context.Background(), SetBankAccountCmd{TenantID: tenantID.String(), AccountType: "CBU", AccountNumber: "1", HolderName: "A", Currency: "pesos"})
+	if !errors.Is(err, domain.ErrInvalidCurrency) {
+		t.Fatalf("expected ErrInvalidCurrency, got %v", err)
+	}
+}
+
 func TestReviewApplication_Errors(t *testing.T) {
 	tenantID := testTenantID(t)
 
@@ -388,15 +420,15 @@ func TestReviewApplication_Errors(t *testing.T) {
 		app := inReviewApp(t, tenantID)
 		uc := NewReviewApplicationUseCase(newFakeRepo(app), fakeTx{}, &fakePublisher{})
 		err := uc.Execute(context.Background(), ReviewApplicationCmd{ApplicationID: app.ID().String(), Decision: "maybe", Notes: "x"})
-		if err == nil {
-			t.Fatal("expected error for invalid decision")
+		if !errors.Is(err, domain.ErrInvalidDecision) {
+			t.Fatalf("expected ErrInvalidDecision, got %v", err)
 		}
 	})
 	t.Run("invalid application id", func(t *testing.T) {
 		uc := NewReviewApplicationUseCase(newFakeRepo(), fakeTx{}, &fakePublisher{})
 		err := uc.Execute(context.Background(), ReviewApplicationCmd{ApplicationID: "nope", Decision: "approve"})
-		if err == nil {
-			t.Fatal("expected error for invalid application id")
+		if !errors.Is(err, domain.ErrInvalidID) {
+			t.Fatalf("expected ErrInvalidID, got %v", err)
 		}
 	})
 	t.Run("not found", func(t *testing.T) {

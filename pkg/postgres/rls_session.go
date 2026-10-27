@@ -41,6 +41,17 @@ func WithAppTenant(ctx context.Context, key, value string) context.Context {
 	return context.WithValue(ctx, appVarsKey{}, next)
 }
 
+// PlatformOperatorKey es la variable de sesión que habilita las políticas RLS
+// de operador de plataforma (lectura/escritura cross-tenant, p. ej. revisión
+// de KYC). Solo debe fijarla código de servidor detrás de un guard de rol.
+const PlatformOperatorKey = "app.platform_operator"
+
+// WithPlatformOperator marca el contexto como acción de operador de
+// plataforma: RunInTx y RunWithAppTenant fijan app.platform_operator='on'.
+func WithPlatformOperator(ctx context.Context) context.Context {
+	return WithAppTenant(ctx, PlatformOperatorKey, "on")
+}
+
 func appVarsFromContext(ctx context.Context) map[string]string {
 	vars, _ := ctx.Value(appVarsKey{}).(map[string]string)
 	return vars

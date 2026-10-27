@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/juantevez/cobros-platform/context/onboarding/domain"
@@ -28,7 +29,7 @@ func (uc *SubmitApplicationUseCase) Execute(ctx context.Context, cmd SubmitAppli
 		return SubmitApplicationResult{}, err
 	}
 
-	taxID, err := domain.ParseTaxID(cmd.TaxID)
+	taxID, err := domain.ParseTaxIDForCountry(cmd.TaxID, cmd.Country)
 	if err != nil {
 		return SubmitApplicationResult{}, err
 	}
@@ -40,8 +41,11 @@ func (uc *SubmitApplicationUseCase) Execute(ctx context.Context, cmd SubmitAppli
 
 	// Un tenant solo puede tener una solicitud activa.
 	existing, err := uc.repo.FindByTenantID(ctx, tenantID)
-	if err == nil && existing != nil {
+	switch {
+	case err == nil && existing != nil:
 		return SubmitApplicationResult{}, domain.ErrApplicationExists
+	case err != nil && !errors.Is(err, domain.ErrApplicationNotFound):
+		return SubmitApplicationResult{}, fmt.Errorf("find application: %w", err)
 	}
 
 	info := domain.BusinessInfo{
@@ -99,7 +103,7 @@ func (uc *UploadDocumentUseCase) Execute(ctx context.Context, cmd UploadDocument
 		return err
 	}
 	if cmd.Reference == "" {
-		return fmt.Errorf("document reference is required")
+		return fmt.Errorf("%w: document reference", domain.ErrRequiredField)
 	}
 
 	app, err := uc.repo.FindByTenantID(ctx, tenantID)
@@ -134,7 +138,7 @@ func (uc *AddPersonUseCase) Execute(ctx context.Context, cmd AddPersonCmd) error
 		return err
 	}
 	if cmd.FullName == "" {
-		return fmt.Errorf("full name is required")
+		return fmt.Errorf("%w: full name", domain.ErrRequiredField)
 	}
 
 	role, err := domain.ParsePersonRole(cmd.Role)
@@ -186,7 +190,11 @@ func (uc *SetBankAccountUseCase) Execute(ctx context.Context, cmd SetBankAccount
 		return err
 	}
 	if cmd.AccountNumber == "" || cmd.HolderName == "" {
-		return fmt.Errorf("account number and holder name are required")
+		return fmt.Errorf("%w: account number and holder name", domain.ErrRequiredField)
+	}
+	currency, err := domain.ParseCurrency(cmd.Currency)
+	if err != nil {
+		return err
 	}
 
 	app, err := uc.repo.FindByTenantID(ctx, tenantID)
@@ -200,7 +208,7 @@ func (uc *SetBankAccountUseCase) Execute(ctx context.Context, cmd SetBankAccount
 		cmd.AccountNumber,
 		cmd.BankName,
 		cmd.HolderName,
-		cmd.Currency,
+		currency,
 	)
 
 	if err := app.SetBankAccount(account); err != nil {
@@ -249,7 +257,8 @@ func (uc *SubmitForReviewUseCase) Execute(ctx context.Context, cmd SubmitForRevi
 
 // ── ReviewApplication ─────────────────────────────────────────────────────────
 
-// ReviewApplicationUseCase permite al operador aprobar, rechazar o pedir más info.
+// ReviewApplicationUseCase permite al operador aprobar, rechazar, pedir más
+// info o reabrir una solicitud rechazada.
 // Solo usuarios con rol platform_support pueden ejecutar esto.
 type ReviewApplicationUseCase struct {
 	repo      ApplicationRepository
@@ -266,27 +275,28 @@ func (uc *ReviewApplicationUseCase) Execute(ctx context.Context, cmd ReviewAppli
 	if err != nil {
 		return err
 	}
+	decision, err := domain.ParseReviewDecision(cmd.Decision)
+	if err != nil {
+		return err
+	}
 
 	app, err := uc.repo.FindByID(ctx, appID)
 	if err != nil {
 		return fmt.Errorf("find application: %w", err)
 	}
 
-	switch cmd.Decision {
-	case "approve":
-		if err := app.Approve(cmd.Notes); err != nil {
-			return err
-		}
-	case "reject":
-		if err := app.Reject(cmd.Notes); err != nil {
-			return err
-		}
-	case "request_more_info":
-		if err := app.RequestMoreInfo(cmd.Notes); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("invalid decision %q: must be approve, reject, or request_more_info", cmd.Decision)
+	switch decision {
+	case domain.DecisionApprove:
+		err = app.Approve(cmd.Notes)
+	case domain.DecisionReject:
+		err = app.Reject(cmd.Notes)
+	case domain.DecisionRequestMoreInfo:
+		err = app.RequestMoreInfo(cmd.Notes)
+	case domain.DecisionReopen:
+		err = app.Reopen(cmd.Notes)
+	}
+	if err != nil {
+		return err
 	}
 
 	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {

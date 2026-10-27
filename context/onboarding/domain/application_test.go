@@ -167,19 +167,18 @@ func TestApprove(t *testing.T) {
 		}
 	})
 
-	t.Run("defaults currency to ARS when no bank account", func(t *testing.T) {
-		// Reconstituir un in_review sin cuenta bancaria para alcanzar el default.
+	t.Run("approve without bank account currency is incomplete", func(t *testing.T) {
+		// Datos inconsistentes (in_review sin cuenta): ya no hay default ARS.
 		a := ReconstituteOnboardingApplication(
 			NewApplicationID(), testTenantID(), StatusInReview,
 			completeBusinessInfo(), nil, nil, nil, "", "", nil, nil,
-			time.Now().UTC(), time.Now().UTC(),
+			time.Now().UTC(), time.Now().UTC(), 0,
 		)
-		if err := a.Approve(""); err != nil {
-			t.Fatalf("approve: %v", err)
+		if err := a.Approve(""); !errors.Is(err, ErrIncompleteApplication) {
+			t.Fatalf("expected ErrIncompleteApplication, got %v", err)
 		}
-		approved := a.PullEvents()[0].(ApplicationApprovedEvent)
-		if approved.Currency != "ARS" {
-			t.Errorf("currency = %q, want ARS default", approved.Currency)
+		if a.Status() != StatusInReview || len(a.PullEvents()) != 0 {
+			t.Error("failed approve must not mutate state nor emit events")
 		}
 	})
 
@@ -220,6 +219,52 @@ func TestReject(t *testing.T) {
 	t.Run("cannot reject from pending", func(t *testing.T) {
 		a := completeApp(t)
 		if err := a.Reject("x"); !errors.Is(err, ErrInvalidTransition) {
+			t.Fatalf("expected ErrInvalidTransition, got %v", err)
+		}
+	})
+}
+
+func TestReopen(t *testing.T) {
+	rejected := func(t *testing.T) *OnboardingApplication {
+		t.Helper()
+		a := completeApp(t)
+		_ = a.SubmitForReview()
+		_ = a.Reject("docs ilegibles")
+		a.PullEvents()
+		return a
+	}
+
+	t.Run("from rejected to requires_more_info", func(t *testing.T) {
+		a := rejected(t)
+		if err := a.Reopen("reenviar DNI legible"); err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		if a.Status() != StatusRequiresMoreInfo || !a.Status().IsEditable() {
+			t.Errorf("status = %s, want editable requires_more_info", a.Status())
+		}
+		if a.ReviewNotes() != "reenviar DNI legible" || a.RejectionReason() != "docs ilegibles" {
+			t.Errorf("notes/history mismatch: notes=%q reason=%q", a.ReviewNotes(), a.RejectionReason())
+		}
+		ev, ok := a.PullEvents()[0].(ApplicationReopenedEvent)
+		if !ok || ev.EventType() != "onboarding.application.reopened.v1" || ev.Notes != "reenviar DNI legible" {
+			t.Errorf("expected ApplicationReopenedEvent, got %+v", ev)
+		}
+		// El comercio puede corregir y volver a enviar.
+		if err := a.SubmitForReview(); err != nil {
+			t.Errorf("resubmit after reopen: %v", err)
+		}
+	})
+
+	t.Run("requires notes", func(t *testing.T) {
+		if err := rejected(t).Reopen(""); !errors.Is(err, ErrReviewNotesEmpty) {
+			t.Fatalf("expected ErrReviewNotesEmpty, got %v", err)
+		}
+	})
+
+	t.Run("only from rejected", func(t *testing.T) {
+		a := completeApp(t)
+		_ = a.SubmitForReview()
+		if err := a.Reopen("x"); !errors.Is(err, ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
 	})
@@ -331,9 +376,9 @@ func TestReconstituteOnboardingApplication(t *testing.T) {
 		id, tid, StatusApproved, completeBusinessInfo(), nil,
 		[]BusinessDocument{NewBusinessDocument(NewDocumentID(), DocTypeIDCard, "r")},
 		[]Person{NewPerson(NewPersonID(), "O", RoleOwner, "DNI", "1", "AR")},
-		"notas", "", nil, nil, created, created,
+		"notas", "", nil, nil, created, created, 7,
 	)
-	if a.ID() != id || a.Status() != StatusApproved || a.ReviewNotes() != "notas" {
+	if a.ID() != id || a.Status() != StatusApproved || a.ReviewNotes() != "notas" || a.Version() != 7 {
 		t.Errorf("not restored: %+v", a)
 	}
 	if len(a.Documents()) != 1 || len(a.Persons()) != 1 {

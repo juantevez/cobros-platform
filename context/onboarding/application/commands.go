@@ -64,8 +64,8 @@ type SubmitForReviewCmd struct {
 
 type ReviewApplicationCmd struct {
 	ApplicationID string
-	Decision      string // "approve" | "reject" | "request_more_info"
-	Notes         string // requerido para reject y request_more_info
+	Decision      string // "approve" | "reject" | "request_more_info" | "reopen"
+	Notes         string // requerido para reject, request_more_info y reopen
 }
 
 // ── Get ───────────────────────────────────────────────────────────────────────
@@ -76,19 +76,19 @@ type GetApplicationQuery struct {
 
 // ApplicationView es la representación de lectura de una solicitud.
 type ApplicationView struct {
-	ID               string            `json:"id"`
-	TenantID         string            `json:"tenant_id"`
-	Status           string            `json:"status"`
-	LegalName        string            `json:"legal_name"`
-	TaxID            string            `json:"tax_id"`
-	BusinessCategory string            `json:"business_category"`
-	DocumentCount    int               `json:"document_count"`
-	PersonCount      int               `json:"person_count"`
-	HasBankAccount   bool              `json:"has_bank_account"`
-	ReviewNotes      string            `json:"review_notes,omitempty"`
-	RejectionReason  string            `json:"rejection_reason,omitempty"`
-	SubmittedAt      *time.Time        `json:"submitted_at,omitempty"`
-	ReviewedAt       *time.Time        `json:"reviewed_at,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID               string     `json:"id"`
+	TenantID         string     `json:"tenant_id"`
+	Status           string     `json:"status"`
+	LegalName        string     `json:"legal_name"`
+	TaxID            string     `json:"tax_id"`
+	BusinessCategory string     `json:"business_category"`
+	DocumentCount    int        `json:"document_count"`
+	PersonCount      int        `json:"person_count"`
+	HasBankAccount   bool       `json:"has_bank_account"`
+	ReviewNotes      string     `json:"review_notes,omitempty"`
+	RejectionReason  string     `json:"rejection_reason,omitempty"`
+	SubmittedAt      *time.Time `json:"submitted_at,omitempty"`
+	ReviewedAt       *time.Time `json:"reviewed_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }

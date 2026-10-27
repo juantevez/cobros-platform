@@ -13,7 +13,7 @@ import (
 
 func validSubmitReq() map[string]string {
 	return map[string]string{
-		"legal_name": "Acme SA", "tax_id": "20-30405060-7", "business_category": "retail",
+		"legal_name": "Acme SA", "tax_id": "20-30405060-9", "business_category": "retail",
 		"city": "CABA", "country": "AR",
 	}
 }
@@ -222,6 +222,21 @@ func TestReview_RejectWithoutNotes400(t *testing.T) {
 	}
 }
 
+// Antes respondían 500 (errores no tipados).
+func TestReview_InvalidInput400(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(http.MethodPost, "/api/v1/onboarding/applications/not-a-uuid/review",
+		map[string]string{"decision": "approve"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-uuid id: status = %d, want 400", rec.Code)
+	}
+	rec = env.do(http.MethodPost, "/api/v1/onboarding/applications/"+uuid.NewString()+"/review",
+		map[string]string{"decision": "maybe"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid decision: status = %d, want 400", rec.Code)
+	}
+}
+
 func TestReview_BadBody400(t *testing.T) {
 	env := newTestEnv(t)
 	rec := env.do(http.MethodPost, "/api/v1/onboarding/applications/"+uuid.NewString()+"/review", map[string]string{})
@@ -292,6 +307,11 @@ func TestRespondDomainError(t *testing.T) {
 		{"invalid account type", domain.ErrInvalidAccountType, http.StatusBadRequest},
 		{"rejection reason empty", domain.ErrRejectionReasonEmpty, http.StatusBadRequest},
 		{"review notes empty", domain.ErrReviewNotesEmpty, http.StatusBadRequest},
+		{"invalid decision", domain.ErrInvalidDecision, http.StatusBadRequest},
+		{"invalid id", domain.ErrInvalidID, http.StatusBadRequest},
+		{"required field", domain.ErrRequiredField, http.StatusBadRequest},
+		{"invalid currency", domain.ErrInvalidCurrency, http.StatusBadRequest},
+		{"concurrent modification", domain.ErrConcurrentModification, http.StatusConflict},
 		{"unknown internal", errors.New("db exploded"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {

@@ -77,7 +77,7 @@ func (p *fakePublisher) Publish(ctx context.Context, events ...domain.Event) err
 func completeInfo() domain.BusinessInfo {
 	return domain.BusinessInfo{
 		LegalName:        "Acme SA",
-		TaxID:            domain.TaxID("20304050607"),
+		TaxID:            domain.TaxID("20304050609"),
 		BusinessCategory: domain.CategoryRetail,
 		Address:          domain.Address{Street: "Calle 1", City: "CABA", Country: "AR"},
 	}

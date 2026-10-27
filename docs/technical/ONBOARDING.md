@@ -1,7 +1,7 @@
 # Onboarding (KYC/KYB) — Documentación técnico-funcional
 
 > **Bounded Context:** `context/onboarding`
-> **Migración:** [`000005_onboarding_init`](../../migrations/000005_onboarding_init.up.sql)
+> **Migraciones:** [`000005_onboarding_init`](../../migrations/000005_onboarding_init.up.sql), [`000017_onboarding_version_operator_rls`](../../migrations/000017_onboarding_version_operator_rls.up.sql)
 > **Stream NATS:** `ONBOARDING` (`onboarding.>`)
 
 ---
@@ -33,6 +33,7 @@ La aprobación es el **disparador del alta operativa del comercio**: a partir de
 | **Cuenta bancaria** (`BankAccount`) | Destino de los desembolsos (CBU, CVU o IBAN). Una por solicitud. |
 | **Enviar a revisión** | El comercio declara la solicitud completa y la pasa a `in_review`. |
 | **Pedir más información** | El operador devuelve la solicitud al comercio con notas. |
+| **Reabrir** | El operador devuelve una solicitud **rechazada** al comercio (`requires_more_info`). Única salida de `rejected`. |
 
 ---
 
@@ -65,6 +66,10 @@ sequenceDiagram
         N-->>X: Auth activa tenant (production) · Ledger crea 5 cuentas · Notification envía email
     else reject
         OB->>DB: UPDATE → rejected + outbox rejected.v1
+        opt reopen (más tarde)
+            O->>OB: POST /onboarding/applications/:id/review {reopen}
+            OB->>DB: UPDATE → requires_more_info + outbox reopened.v1
+        end
     else request_more_info
         OB->>DB: UPDATE → requires_more_info + outbox more_info.v1
         Note over C: El comercio completa y vuelve a enviar (submit)
@@ -88,11 +93,12 @@ Archivo: [domain/application.go](../../context/onboarding/domain/application.go)
 | `bankAccount` | `*BankAccount` | Opcional hasta el envío a revisión. Se **reemplaza** si se vuelve a setear. |
 | `documents` | `[]BusinessDocument` | Append-only. |
 | `persons` | `[]Person` | Append-only. |
-| `reviewNotes` | `string` | Notas de `approve` o `request_more_info`. |
-| `rejectionReason` | `string` | Obligatorio en `reject`. |
+| `reviewNotes` | `string` | Notas de `approve`, `request_more_info` o `reopen`. |
+| `rejectionReason` | `string` | Obligatorio en `reject`. Se conserva al reabrir (historial del último rechazo). |
 | `submittedAt` | `*time.Time` | Se actualiza en **cada** envío a revisión (incluye reenvíos). |
 | `reviewedAt` | `*time.Time` | Se setea en `approve` y `reject` (no en `request_more_info`). |
 | `createdAt` / `updatedAt` | `time.Time` | UTC. |
+| `version` | `int64` | Optimistic locking: `Update` solo aplica si la fila sigue en esta versión (§8.2). |
 
 Las entidades internas (`BusinessDocument`, `Person`, `BankAccount`) solo se crean y modifican a través del agregado.
 
@@ -106,8 +112,8 @@ stateDiagram-v2
     in_review --> requires_more_info: RequestMoreInfo
     in_review --> approved: Approve
     in_review --> rejected: Reject
+    rejected --> requires_more_info: Reopen (operador)
     approved --> [*]
-    rejected --> [*]
 ```
 
 | Estado | ¿Editable por el comercio? | ¿Acción del operador? | Final |
@@ -116,9 +122,11 @@ stateDiagram-v2
 | `in_review` | No | Sí | No |
 | `requires_more_info` | Sí | No | No |
 | `approved` | No | No | **Sí** |
-| `rejected` | No | No | **Sí** |
+| `rejected` | No | Sí (`reopen`) | No |
 
 "Editable" (`ApplicationStatus.IsEditable()`) habilita: agregar documentos, agregar personas, setear cuenta bancaria y enviar a revisión.
+
+`rejected` deja de ser terminal, pero solo el **operador** puede reabrir: el comercio no puede auto-reabrir ni crear otra solicitud (sigue `UNIQUE (tenant_id)`), lo que evita reintentos indiscriminados de solicitudes rechazadas por fraude.
 
 ### 4.3 Invariantes
 
@@ -129,8 +137,9 @@ stateDiagram-v2
    - Al menos **1 documento**.
    - Al menos **1 persona**.
    - **Cuenta bancaria** cargada.
-4. **Decisiones del operador solo desde `in_review`.**
-5. `Reject` exige motivo; `RequestMoreInfo` exige notas. `Approve` acepta notas vacías.
+4. **Decisiones del operador solo desde `in_review`**, salvo `Reopen`, que solo aplica desde `rejected`.
+5. `Reject` exige motivo; `RequestMoreInfo` y `Reopen` exigen notas. `Approve` acepta notas vacías.
+6. `Approve` exige cuenta bancaria con moneda: es la moneda del comercio en `approved.v1` (no hay default).
 
 ### 4.4 Value Objects y catálogos
 
@@ -142,11 +151,13 @@ Archivo: [domain/vo.go](../../context/onboarding/domain/vo.go)
 | `DocumentType` | `id_card`, `passport`, `business_registration`, `tax_certificate`, `bank_statement`, `proof_of_address`, `ownership_proof` |
 | `PersonRole` | `owner`, `director`, `ubo` |
 | `BankAccountType` | `CBU`, `CVU`, `IBAN` (case-insensitive en la entrada, se normaliza a mayúsculas) |
-| `TaxID` | Se eliminan `-`, `.` y `/`; el resultado debe tener **8 a 20 dígitos**. Se persiste normalizado (`20-12345678-9` → `20123456789`). |
+| `TaxID` | Validado según el país del domicilio (`ParseTaxIDForCountry`). Se eliminan `-`, `.`, `/` y espacios. **`AR`:** CUIT/CUIL de 11 dígitos con dígito verificador (módulo 11, pesos `5,4,3,2,7,6,5,4,3,2`). **Otros países:** alfanumérico de 5 a 20 caracteres, en mayúsculas (RFC, RUT, EIN, VAT…). Se persiste normalizado (`30-71234567-1` → `30712345671`). |
+| `Currency` | ISO 4217 de 3 letras, normalizado a mayúsculas (`ParseCurrency`); se valida al setear la cuenta bancaria. |
+| `ReviewDecision` | `approve`, `reject`, `request_more_info`, `reopen`. |
 | `Address` | Completo si tiene `Street`, `City` y `Country` (ISO 3166-1 alpha-2). |
 | `DocumentStatus` | `pending`, `verified`, `rejected` (hoy todos nacen `pending`; no hay caso de uso que los cambie). |
 
-> ⚠️ Un `TaxID` de IBAN o con letras (p. ej. RFC mexicano) es rechazado por la validación actual: solo dígitos.
+> La verificación contra el organismo fiscal (AFIP, SII, RFB) sigue fuera de alcance: solo se valida el formato.
 
 ### 4.5 Errores de dominio
 
@@ -155,10 +166,12 @@ Archivo: [domain/errors.go](../../context/onboarding/domain/errors.go)
 | Error | HTTP |
 |---|---|
 | `ErrApplicationNotFound` | 404 |
-| `ErrApplicationExists` | 409 |
+| `ErrApplicationExists`, `ErrConcurrentModification` | 409 |
 | `ErrInvalidTransition`, `ErrIncompleteApplication` | 422 |
-| `ErrInvalidTaxID`, `ErrInvalidBusinessCat`, `ErrInvalidDocumentType`, `ErrInvalidPersonRole`, `ErrInvalidAccountType`, `ErrRejectionReasonEmpty`, `ErrReviewNotesEmpty` | 400 |
-| Cualquier otro | 500 (`internal server error`) |
+| `ErrInvalidTaxID`, `ErrInvalidBusinessCat`, `ErrInvalidDocumentType`, `ErrInvalidPersonRole`, `ErrInvalidAccountType`, `ErrRejectionReasonEmpty`, `ErrReviewNotesEmpty`, `ErrInvalidDecision`, `ErrInvalidID` (UUID inválido), `ErrRequiredField`, `ErrInvalidCurrency` | 400 |
+| Cualquier otro (fallas de DB/tx) | 500 (`internal server error`) |
+
+`ErrConcurrentModification` indica que otra escritura modificó la solicitud entre la lectura y el `UPDATE`: el cliente debe releer (`GET`) y reintentar.
 
 ---
 
@@ -171,9 +184,9 @@ Archivo: [application/use_cases.go](../../context/onboarding/application/use_cas
 | `SubmitApplication` | Comercio | No existe solicitud para el tenant | Crea la solicitud en `pending` | `submitted.v1` |
 | `UploadDocument` | Comercio | Solicitud editable | Agrega un documento (`pending`) | — |
 | `AddPerson` | Comercio | Solicitud editable | Agrega una persona | — |
-| `SetBankAccount` | Comercio | Solicitud editable | Crea o reemplaza la cuenta bancaria | — |
+| `SetBankAccount` | Comercio | Solicitud editable, moneda ISO 4217 válida | Crea o reemplaza la cuenta bancaria | — |
 | `SubmitForReview` | Comercio | Solicitud editable **y completa** | `in_review`, setea `submittedAt` | `sent_for_review.v1` |
-| `ReviewApplication` | Operador | Solicitud en `in_review` | `approved` / `rejected` / `requires_more_info` | `approved.v1` / `rejected.v1` / `more_info.v1` |
+| `ReviewApplication` | Operador | `in_review` (o `rejected` para `reopen`) | `approved` / `rejected` / `requires_more_info` | `approved.v1` / `rejected.v1` / `more_info.v1` / `reopened.v1` |
 | `GetApplication` | Comercio | Existe solicitud | `ApplicationView` (resumen, sin detalle de colecciones) | — |
 
 ### Patrón transaccional
@@ -182,15 +195,15 @@ Todos los comandos siguen el mismo esquema:
 
 ```
 1. Parsear/validar input (VOs)            → errores 400
-2. repo.FindByTenantID / FindByID         → fuera de la transacción
+2. repo.FindByTenantID / FindByID         → fuera de la tx, con RLS fijado (§9)
 3. Mutar el agregado                      → reglas de dominio (422)
 4. txManager.RunInTx {
-       repo.Save / repo.Update
+       repo.Save / repo.Update            → Update con optimistic lock (409)
        publisher.Publish(app.PullEvents()) → outbox_messages (misma tx)
    }
 ```
 
-El estado y sus eventos se confirman atómicamente (Transactional Outbox). El relay de `cmd/worker` los publica luego en JetStream.
+El estado y sus eventos se confirman atómicamente (Transactional Outbox). El relay de `cmd/worker` los publica luego en JetStream. Como la lectura ocurre fuera de la tx, el `UPDATE` verifica la `version` leída: si otra escritura (otro operador, o comercio y operador en paralelo) se adelantó, falla con `ErrConcurrentModification` y no se persiste nada ni se publican eventos.
 
 ---
 
@@ -208,7 +221,7 @@ Todas las rutas cuelgan de `/api/v1` y requieren `Authorization: Bearer <JWT>`. 
 | `POST` | `/onboarding/persons` | Comercio | `201` (sin body) |
 | `PUT` | `/onboarding/bank-account` | Comercio | `204` |
 | `POST` | `/onboarding/submit` | Comercio | `204` |
-| `POST` | `/onboarding/applications/:id/review` | Operador (`platform_support`) | `204` |
+| `POST` | `/onboarding/applications/:id/review` | Operador (`platform_support`) | `204` (`409` si hubo una escritura concurrente) |
 
 Un body que no pasa el binding de Gin (JSON inválido o campo `required` ausente) responde `400 {"error": "invalid request body"}`.
 
@@ -217,7 +230,7 @@ Un body que no pasa el binding de Gin (JSON inválido o campo `required` ausente
 ```json
 {
   "legal_name": "Panadería El Sol S.R.L.",
-  "tax_id": "30-71234567-9",
+  "tax_id": "30-71234567-1",
   "business_category": "food_beverage",
   "street": "Av. Corrientes 1234",
   "city": "CABA",
@@ -265,7 +278,7 @@ Requeridos: `full_name`, `role`.
 }
 ```
 
-Requeridos: `account_type`, `account_number`, `holder_name`, `currency`. Idempotente: un nuevo `PUT` reemplaza la cuenta anterior. No se valida el formato del número (largo/dígito verificador de CBU).
+Requeridos: `account_type`, `account_number`, `holder_name`, `currency` (ISO 4217, 3 letras; si no → `400`). Idempotente: un nuevo `PUT` reemplaza la cuenta anterior. No se valida el formato del número (largo/dígito verificador de CBU).
 
 ### 6.5 Enviar a revisión — `POST /onboarding/submit`
 
@@ -282,10 +295,11 @@ Sin body. Valida completitud (§4.3).
 | `approve` | opcional | `approved` |
 | `reject` | **requerido** (motivo) | `rejected` |
 | `request_more_info` | **requerido** | `requires_more_info` |
+| `reopen` | **requerido** (qué corregir) | `requires_more_info` (solo desde `rejected`) |
 
-Requiere rol `platform_support`; si no → `403 insufficient permissions`. El guard se inyecta en `RegisterRoutes(..., reviewGuard)` desde `cmd/api` (`authttp.RequireRole(authdomain.RolePlatformSupport)`), así Onboarding no importa Auth. `RegisterRoutes` entra en pánico si el guard es `nil`.
+Requiere rol `platform_support`; si no → `403 insufficient permissions`. El guard se inyecta en `RegisterRoutes(..., reviewGuard)` desde `cmd/api` (`authttp.RequireRole(authdomain.RolePlatformSupport)`), así Onboarding no importa Auth. `RegisterRoutes` entra en pánico si el guard es `nil`. Detrás del guard, `platformOperatorScope` marca el request como acción de operador para RLS (§9).
 
-Una `decision` desconocida responde **500** (el error no está tipado en el mapeo; ver §10).
+Una `decision` desconocida o un `:id` que no es UUID responden `400`.
 
 ### 6.7 Consulta — `GET /onboarding`
 
@@ -295,7 +309,7 @@ Una `decision` desconocida responde **500** (el error no está tipado en el mape
   "tenant_id": "a2b4…",
   "status": "requires_more_info",
   "legal_name": "Panadería El Sol S.R.L.",
-  "tax_id": "30712345679",
+  "tax_id": "30712345671",
   "business_category": "food_beverage",
   "document_count": 2,
   "person_count": 1,
@@ -331,8 +345,9 @@ Se publican vía Outbox en el stream `ONBOARDING`. El subject es el `EventType()
 | `onboarding.application.approved.v1` | El operador aprueba | `application_id`, `tenant_id`, `business_category`, `currency` |
 | `onboarding.application.rejected.v1` | El operador rechaza | `application_id`, `tenant_id`, `rejection_reason` |
 | `onboarding.application.more_info.v1` | El operador pide más información | `application_id`, `tenant_id`, `notes` |
+| `onboarding.application.reopened.v1` | El operador reabre una solicitud rechazada | `application_id`, `tenant_id`, `notes` |
 
-`currency` en `approved.v1` es la moneda de la cuenta bancaria; si no hay, se usa `ARS` por defecto.
+`currency` en `approved.v1` es la moneda de la cuenta bancaria (obligatoria para aprobar; no hay default).
 
 > ⚠️ El nombre `submitted` corresponde a la **creación** de la solicitud, no al envío a revisión (que es `sent_for_review`). Tenerlo en cuenta al suscribirse.
 
@@ -345,7 +360,7 @@ Todos se ejecutan en `cmd/worker`.
 | **Auth** | `auth-onboarding-consumer` | `onboarding.application.approved.v1` | `ActivateTenant` con `Environment: production` | 5 |
 | **Ledger** | `ledger-onboarding-consumer` | `onboarding.application.approved.v1` | Crea 5 cuentas en `currency`: `merchant_balance`, `reserve`, `dispute_hold`, `payout_transit`, `payout_sent` | 5 |
 | **Compliance** | `compliance-onboarding-consumer` | `onboarding.application.submitted.>` | `ScreenApplication` (screening por razón social) | 5 |
-| **Notification** | `notification-onboarding-consumer` | `onboarding.application.>` | Envía email solo para `approved.v1` y `rejected.v1` (con `rejection_reason`); el resto se ignora | 3 |
+| **Notification** | `notification-onboarding-consumer` | `onboarding.application.>` | Envía email solo para `approved.v1` y `rejected.v1` (con `rejection_reason`); el resto (incluido `reopened.v1`) se ignora | 3 |
 | **Webhook** | `webhook-onboarding-consumer` | `onboarding.>` | Crea deliveries a los endpoints suscriptos del comercio | — |
 
 > Ledger crea las 5 cuentas en un loop y devuelve error si falla alguna; en el reintento intentará crear de nuevo las ya creadas. La idempotencia depende de `CreateAccount` en Ledger.
@@ -380,6 +395,7 @@ erDiagram
         text rejection_reason
         timestamptz submitted_at
         timestamptz reviewed_at
+        bigint version
     }
     onboarding_documents {
         uuid id PK
@@ -413,15 +429,18 @@ Restricciones relevantes:
 - `UNIQUE (tenant_id)` en solicitudes → una por tenant, para siempre.
 - `UNIQUE (application_id)` en cuentas bancarias → una por solicitud.
 - `CHECK` en `onboarding_persons.role`, `onboarding_documents.status` y `onboarding_bank_accounts.account_type`.
-- Las 4 tablas tienen **RLS** por `tenant_id = current_setting('app.current_tenant', true)::uuid`.
+- Las 4 tablas tienen **RLS** con dos políticas permisivas (se combinan con OR):
+  - **Tenant:** `tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid`. El `NULLIF` ([000017](../../migrations/000017_onboarding_version_operator_rls.up.sql)) evita el error `invalid input syntax for type uuid: ""` en conexiones del pool donde una tx previa dejó la variable vacía.
+  - **Operador:** `current_setting('app.platform_operator', true) = 'on'`.
+- `version BIGINT NOT NULL DEFAULT 0` (000017) para optimistic locking.
 
 ### 8.2 Estrategia de escritura
 
 | Operación | SQL |
 |---|---|
 | `Save` | `INSERT` solo de la cabecera (`onboarding_applications`). Las colecciones están vacías al crear. |
-| `Update` | `UPDATE` de estado/notas/fechas + `INSERT … ON CONFLICT (id) DO NOTHING` por cada documento y persona + upsert de cuenta bancaria `ON CONFLICT (application_id) DO UPDATE`. |
-| `FindByID` / `FindByTenantID` | 1 query de cabecera + 1 de documentos + 1 de personas + 1 de cuenta bancaria. |
+| `Update` | `UPDATE … SET …, version=version+1 WHERE id=$1 AND version=$n` (0 filas → `ErrConcurrentModification`) + `INSERT … ON CONFLICT (id) DO NOTHING` por cada documento y persona + upsert de cuenta bancaria `ON CONFLICT (application_id) DO UPDATE`. |
+| `FindByID` / `FindByTenantID` | 1 query de cabecera + 1 de documentos + 1 de personas + 1 de cuenta bancaria, dentro de `RunWithAppTenant` (tx efímera con las variables RLS si no hay una activa). |
 
 Consecuencias:
 
@@ -434,11 +453,10 @@ Consecuencias:
 ## 9. Seguridad y multi-tenancy
 
 - El comercio solo opera sobre **su** solicitud: todos los endpoints del comercio resuelven la solicitud por el `tenant_id` del JWT.
-- Las escrituras corren dentro de `RunInTx`, que setea `app.current_tenant` para RLS.
-- Las lecturas (`Find*`) se hacen **fuera** de la transacción, directamente sobre el pool, sin `app.current_tenant`.
-- La revisión del operador busca por `application_id`, que pertenece a **otro** tenant que el del operador.
-
-Ver §10 para las implicancias de estos dos últimos puntos.
+- Las escrituras corren dentro de `RunInTx`, que setea `app.current_tenant` (y las variables de `WithAppTenant` / `WithPlatformOperator`) para RLS.
+- Las lecturas fuera de tx también fijan las variables: `FindByTenantID` usa el tenant buscado y `FindByID` el del contexto, vía `pkg/postgres.RunWithAppTenant`.
+- **Operador:** la solicitud revisada pertenece a **otro** tenant. Las rutas de operador pasan por `platformOperatorScope` (después del guard de rol), que fija `app.platform_operator='on'`; la política de operador expone la fila sin depender del tenant del JWT. Sin ese flag, un `FindByID` de otro tenant devuelve `404`.
+- El aislamiento **no depende del rol de DB**: los tests de integración ([rls_test.go](../../context/onboarding/infrastructure/adapters/outbound/postgres/rls_test.go)) corren con un rol sin `BYPASSRLS` (`onboarding_rls_probe`, creado por el test) y verifican lectura propia fuera de tx, aislamiento entre tenants y revisión cross-tenant del operador. Hoy la app conecta como `cobros` (superuser), que saltea RLS; pasar a un rol sin bypass no requiere cambios en este BC.
 
 ---
 
@@ -446,18 +464,10 @@ Ver §10 para las implicancias de estos dos últimos puntos.
 
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
-| 1 | ~~Endpoint de revisión sin control de rol~~ ✅ **Resuelto** | La revisión exige `platform_support` mediante un `reviewGuard` inyectado. | — |
-| 2 | RLS efectivo depende del rol de DB | La app conecta como `cobros` (owner de las tablas, sin `FORCE ROW LEVEL SECURITY`), por lo que RLS no se aplica. Hoy eso permite que el operador lea solicitudes de otros tenants y que las lecturas fuera de tx funcionen. Si se pasa a un rol sin bypass, `FindByID` del operador y las lecturas fuera de tx dejarían de encontrar filas. | Medio |
-| 3 | Sin control de concurrencia | Lectura fuera de tx + `UPDATE` sin versión (optimistic lock). Dos operadores revisando a la vez, o comercio y operador en paralelo, pueden pisarse (last write wins) y emitir eventos contradictorios. | Medio |
-| 4 | Rechazo definitivo | `rejected` es final y `UNIQUE (tenant_id)` impide crear otra solicitud. No hay camino de re-aplicación. | Funcional |
-| 5 | `BusinessInfo` no editable | No hay caso de uso para corregir razón social, CUIT, rubro o domicilio. Combinado con `street` opcional en HTTP (§6.1) puede dejar una solicitud imposible de enviar. | Funcional |
-| 6 | `decision` inválida → 500 | El error de decisión desconocida no es un error de dominio tipado; cae en el `default` del mapeo. Debería ser 400. | Bajo |
-| 7 | Errores de parseo de IDs → 500 | `ParseTenantID` / `ParseApplicationID` devuelven errores no tipados: un `:id` no UUID en la revisión responde 500. Lo mismo para `document reference is required`, `full name is required` y `account number and holder name are required` (aunque el binding HTTP ya los cubre). | Bajo |
-| 8 | Sin verificación de documentos ni cuenta | `DocumentStatus` y `BankAccount.verified` existen en el modelo y en DB pero ningún caso de uso los modifica. | Funcional |
-| 9 | Sin vista de operador | No hay endpoint para listar solicitudes `in_review` ni para ver el detalle (documentos, personas, cuenta). El operador necesita el `application_id` por otro medio (p. ej. evento `sent_for_review.v1`). | Funcional |
-| 10 | Acoplamiento Payout ↔ esquema | Payout lee las tablas de Onboarding directamente (§7.2). | Arquitectura |
-| 11 | Moneda por defecto | `approved.v1` usa `ARS` si no hay moneda; marcado en código como configurable "en Fase 3". | Bajo |
-| 12 | Validación de `TaxID` | Solo dígitos, 8–20 caracteres. No valida dígito verificador de CUIT ni formatos alfanuméricos de otros países. | Bajo |
+| 1 | `BusinessInfo` no editable | No hay caso de uso para corregir razón social, CUIT, rubro o domicilio. Combinado con `street` opcional en HTTP (§6.1) puede dejar una solicitud imposible de enviar. | Funcional |
+| 2 | Sin verificación de documentos ni cuenta | `DocumentStatus` y `BankAccount.verified` existen en el modelo y en DB pero ningún caso de uso los modifica. | Funcional |
+| 3 | Sin vista de operador | No hay endpoint para listar solicitudes `in_review` ni para ver el detalle (documentos, personas, cuenta). El operador necesita el `application_id` por otro medio (p. ej. evento `sent_for_review.v1`). | Funcional |
+| 4 | Acoplamiento Payout ↔ esquema | Payout lee las tablas de Onboarding directamente (§7.2). | Arquitectura |
 
 ---
 
@@ -468,7 +478,7 @@ Ver §10 para las implicancias de estos dos últimos puntos.
 | Dominio | `domain/*_test.go` | Unitarios: transiciones, completitud, VOs, eventos. |
 | Aplicación | `application/use_cases_test.go`, `error_paths_test.go` (+ `mocks_test.go`) | Unitarios con repositorio, TxManager y publisher en memoria. |
 | HTTP | `infrastructure/adapters/inbound/http/handlers_test.go` | Handlers Gin con `httptest`; incluye el mapeo de errores. |
-| Postgres | `infrastructure/adapters/outbound/postgres/application_repo_test.go` | Integración contra PostgreSQL real (`DATABASE_URL`, por defecto `postgres://cobros:cobros@localhost:5432/cobros`). **Se saltan** si la DB no está disponible. |
+| Postgres | `infrastructure/adapters/outbound/postgres/application_repo_test.go`, `rls_test.go` | Integración contra PostgreSQL real (`DATABASE_URL`, por defecto `postgres://cobros:cobros@localhost:5432/cobros`): persistencia, optimistic lock y RLS efectivo con el rol `onboarding_rls_probe` (sin `BYPASSRLS`; el test lo crea si no existe). **Se saltan** si la DB no está disponible. |
 
 ```bash
 go test ./context/onboarding/...
@@ -484,8 +494,8 @@ context/onboarding/
 ├── domain/
 │   ├── application.go      # Agregado OnboardingApplication + máquina de estados
 │   ├── entities.go         # BusinessDocument, Person, BankAccount
-│   ├── vo.go               # IDs, Status, Category, DocumentType, Role, TaxID, Address, BusinessInfo
-│   ├── events.go           # 5 eventos de dominio
+│   ├── vo.go               # IDs, Status, Category, DocumentType, Role, TaxID (CUIT), Currency, ReviewDecision, Address, BusinessInfo
+│   ├── events.go           # 6 eventos de dominio
 │   └── errors.go           # Errores sentinela
 ├── application/
 │   ├── commands.go         # Comandos, query y ApplicationView
@@ -493,7 +503,7 @@ context/onboarding/
 │   └── use_cases.go        # 7 casos de uso
 └── infrastructure/adapters/
     ├── inbound/http/handlers.go             # OnboardingHandler, ReviewHandler, RegisterRoutes
-    └── outbound/postgres/application_repo.go
+    └── outbound/postgres/application_repo.go  # optimistic lock + lecturas con RLS
 ```
 
 Cableado: [cmd/api/main.go](../../cmd/api/main.go) (sección `Onboarding`). El publisher es el genérico `outbox.NewEventPublisher[onboardingdomain.Event]`; el BC no tiene adaptador de eventos propio.
