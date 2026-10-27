@@ -11,11 +11,18 @@ func tenantID(t *testing.T) TenantID {
 	return TenantID("tenant-1")
 }
 
+// capturedPayment devuelve un PaymentRef capturado suficiente para crear
+// disputas de hasta 5000 centavos en ARS dentro del mismo tenant.
+func capturedPayment() PaymentRef {
+	return PaymentRef{ID: "pay-1", TenantID: "tenant-1", Status: "captured", Amount: 5000, Currency: "ARS"}
+}
+
 // openDispute crea una disputa abierta con deadline en el futuro y descarta
 // el evento DisputeOpenedEvent.
 func openDispute(t *testing.T, deadline time.Time) *Dispute {
 	t.Helper()
-	d, err := NewDispute(NewDisputeID(), tenantID(t), "pay-1", "psp-1", 5000, "ARS", ReasonFraudulent, deadline)
+	now := time.Now()
+	d, err := NewDispute(NewDisputeID(), tenantID(t), capturedPayment(), "psp-1", 5000, "ARS", ReasonFraudulent, deadline, now)
 	if err != nil {
 		t.Fatalf("new dispute: %v", err)
 	}
@@ -23,8 +30,22 @@ func openDispute(t *testing.T, deadline time.Time) *Dispute {
 	return d
 }
 
-func someEvidence() []Evidence {
-	return []Evidence{NewEvidence(NewEvidenceID(), "receipt", "s3://r", "desc")}
+func someEvidence(t *testing.T) []Evidence {
+	t.Helper()
+	ev, err := NewEvidence(NewEvidenceID(), "receipt", "s3://r", "desc", time.Now())
+	if err != nil {
+		t.Fatalf("new evidence: %v", err)
+	}
+	return []Evidence{ev}
+}
+
+// overdueDispute reconstituye una disputa open con deadline ya vencido:
+// NewDispute rechaza deadlines pasados, así que se construye como vendría
+// del repositorio.
+func overdueDispute(t *testing.T, past time.Time) *Dispute {
+t.Helper()
+return ReconstituteDispute(NewDisputeID(), tenantID(t), "pay-1", "psp-1", 5000, "ARS",
+ReasonFraudulent, StatusOpen, nil, "", "", past, past.Add(-time.Hour), nil, nil, 1)
 }
 
 func TestNewDispute(t *testing.T) {
@@ -33,7 +54,8 @@ func TestNewDispute(t *testing.T) {
 	t.Run("valid creates open dispute and emits opened event", func(t *testing.T) {
 		id := NewDisputeID()
 		tid := tenantID(t)
-		d, err := NewDispute(id, tid, "pay-1", "psp-9", 5000, "ARS", ReasonDuplicate, deadline)
+		now := time.Now()
+		d, err := NewDispute(id, tid, capturedPayment(), "psp-9", 5000, "ARS", ReasonDuplicate, deadline, now)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -73,7 +95,9 @@ func TestNewDispute(t *testing.T) {
 	})
 
 	t.Run("empty payment id rejected", func(t *testing.T) {
-		_, err := NewDispute(NewDisputeID(), tenantID(t), "", "psp", 5000, "ARS", ReasonGeneral, deadline)
+		emptyPayment := capturedPayment()
+		emptyPayment.ID = ""
+		_, err := NewDispute(NewDisputeID(), tenantID(t), emptyPayment, "psp", 5000, "ARS", ReasonGeneral, deadline, time.Now())
 		if err == nil {
 			t.Fatal("expected error for empty payment id")
 		}
@@ -81,7 +105,7 @@ func TestNewDispute(t *testing.T) {
 
 	t.Run("non-positive amount rejected", func(t *testing.T) {
 		for _, amt := range []int64{0, -100} {
-			_, err := NewDispute(NewDisputeID(), tenantID(t), "pay-1", "psp", amt, "ARS", ReasonGeneral, deadline)
+			_, err := NewDispute(NewDisputeID(), tenantID(t), capturedPayment(), "psp", amt, "ARS", ReasonGeneral, deadline, time.Now())
 			if err == nil {
 				t.Errorf("expected error for amount %d", amt)
 			}
@@ -95,7 +119,7 @@ func TestDispute_Contest(t *testing.T) {
 	t.Run("valid contest moves to under_review", func(t *testing.T) {
 		d := openDispute(t, future)
 		now := time.Now()
-		if err := d.Contest(someEvidence(), "aquí está la prueba", now); err != nil {
+		if err := d.Contest(someEvidence(t), "aquí está la prueba", now); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if d.Status() != StatusUnderReview {
@@ -118,9 +142,9 @@ func TestDispute_Contest(t *testing.T) {
 
 	t.Run("cannot contest when not open", func(t *testing.T) {
 		d := openDispute(t, future)
-		_ = d.Accept("")
+		_ = d.Accept("", time.Now())
 		d.PullEvents()
-		err := d.Contest(someEvidence(), "", time.Now())
+		err := d.Contest(someEvidence(t), "", time.Now())
 		if !errors.Is(err, ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
@@ -128,8 +152,8 @@ func TestDispute_Contest(t *testing.T) {
 
 	t.Run("expired deadline rejected", func(t *testing.T) {
 		past := time.Now().Add(-time.Hour)
-		d := openDispute(t, past)
-		err := d.Contest(someEvidence(), "", time.Now())
+		d := overdueDispute(t, past)
+		err := d.Contest(someEvidence(t), "", time.Now())
 		if !errors.Is(err, ErrDisputeExpired) {
 			t.Fatalf("expected ErrDisputeExpired, got %v", err)
 		}
@@ -152,7 +176,7 @@ func TestDispute_Accept(t *testing.T) {
 
 	t.Run("valid accept resolves as accepted", func(t *testing.T) {
 		d := openDispute(t, future)
-		if err := d.Accept("acepto"); err != nil {
+		if err := d.Accept("acepto", time.Now()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if d.Status() != StatusAccepted || d.ResolvedNote() != "acepto" {
@@ -173,8 +197,8 @@ func TestDispute_Accept(t *testing.T) {
 
 	t.Run("cannot accept when not open", func(t *testing.T) {
 		d := openDispute(t, future)
-		_ = d.Contest(someEvidence(), "", time.Now())
-		err := d.Accept("")
+		_ = d.Contest(someEvidence(t), "", time.Now())
+		err := d.Accept("", time.Now())
 		if !errors.Is(err, ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
@@ -186,7 +210,7 @@ func TestDispute_Resolve(t *testing.T) {
 
 	underReview := func(t *testing.T) *Dispute {
 		d := openDispute(t, future)
-		if err := d.Contest(someEvidence(), "", time.Now()); err != nil {
+		if err := d.Contest(someEvidence(t), "", time.Now()); err != nil {
 			t.Fatalf("contest: %v", err)
 		}
 		d.PullEvents()
@@ -195,7 +219,7 @@ func TestDispute_Resolve(t *testing.T) {
 
 	t.Run("won", func(t *testing.T) {
 		d := underReview(t)
-		if err := d.Resolve(OutcomeWon, "ganada"); err != nil {
+		if err := d.Resolve(OutcomeWon, "ganada", time.Now()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if d.Status() != StatusWon {
@@ -209,7 +233,7 @@ func TestDispute_Resolve(t *testing.T) {
 
 	t.Run("lost", func(t *testing.T) {
 		d := underReview(t)
-		if err := d.Resolve(OutcomeLost, "perdida"); err != nil {
+		if err := d.Resolve(OutcomeLost, "perdida", time.Now()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if d.Status() != StatusLost {
@@ -219,7 +243,7 @@ func TestDispute_Resolve(t *testing.T) {
 
 	t.Run("cannot resolve from open", func(t *testing.T) {
 		d := openDispute(t, future)
-		err := d.Resolve(OutcomeWon, "")
+		err := d.Resolve(OutcomeWon, "", time.Now())
 		if !errors.Is(err, ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
@@ -228,7 +252,7 @@ func TestDispute_Resolve(t *testing.T) {
 	t.Run("invalid outcome for resolve", func(t *testing.T) {
 		for _, o := range []ResolutionOutcome{OutcomeAccepted, OutcomeExpired} {
 			d := underReview(t)
-			err := d.Resolve(o, "")
+			err := d.Resolve(o, "", time.Now())
 			if !errors.Is(err, ErrInvalidResolutionOutcome) {
 				t.Errorf("outcome %q: expected ErrInvalidResolutionOutcome, got %v", o, err)
 			}
@@ -244,7 +268,7 @@ func TestDispute_Expire(t *testing.T) {
 
 	t.Run("valid expire from open", func(t *testing.T) {
 		d := openDispute(t, future)
-		if err := d.Expire(); err != nil {
+		if err := d.Expire(time.Now()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if d.Status() != StatusExpired || d.ResolvedAt() == nil {
@@ -258,8 +282,8 @@ func TestDispute_Expire(t *testing.T) {
 
 	t.Run("cannot expire when not open", func(t *testing.T) {
 		d := openDispute(t, future)
-		_ = d.Accept("")
-		err := d.Expire()
+		_ = d.Accept("", time.Now())
+		err := d.Expire(time.Now())
 		if !errors.Is(err, ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
@@ -271,7 +295,7 @@ func TestDispute_IsOverdue(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 
 	t.Run("open past deadline is overdue", func(t *testing.T) {
-		d := openDispute(t, past)
+		d := overdueDispute(t, past)
 		if !d.IsOverdue(time.Now()) {
 			t.Error("expected overdue")
 		}
@@ -285,8 +309,8 @@ func TestDispute_IsOverdue(t *testing.T) {
 	})
 
 	t.Run("resolved dispute is never overdue", func(t *testing.T) {
-		d := openDispute(t, past)
-		_ = d.Accept("")
+		d := overdueDispute(t, past)
+		_ = d.Accept("", time.Now())
 		if d.IsOverdue(time.Now()) {
 			t.Error("resolved dispute should not be overdue")
 		}

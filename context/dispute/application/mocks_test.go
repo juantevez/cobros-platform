@@ -104,6 +104,13 @@ func (r *fakeRepo) ListOverdue(ctx context.Context, now time.Time, limit int) ([
 	return r.overdue, nil
 }
 
+func (r *fakeRepo) ListAll(ctx context.Context, statusFilter string, limit int) ([]*domain.Dispute, error) {
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	return r.listed, nil
+}
+
 type fakePublisher struct {
 	published []domain.Event
 	err       error
@@ -123,11 +130,42 @@ func (c fixedClock) Now() time.Time { return c.t }
 
 func newClock() fixedClock { return fixedClock{t: testNow} }
 
+// ── Fake PaymentReader ────────────────────────────────────────────────────────
+
+// fakePayments implementa PaymentReader. Por defecto devuelve un pago capturado
+// válido para cualquier payment_id; se puede forzar un ref particular o un error.
+type fakePayments struct {
+	refs map[string]domain.PaymentRef // opcional: refs específicos por ID
+	err  error                        // opcional: error del reader
+}
+
+func (f fakePayments) FindPayment(ctx context.Context, paymentID string) (domain.PaymentRef, error) {
+	if f.err != nil {
+		return domain.PaymentRef{}, f.err
+	}
+	if ref, ok := f.refs[paymentID]; ok {
+		return ref, nil
+	}
+	if paymentID == "" {
+		return domain.PaymentRef{}, errors.New("payment not found")
+	}
+	return domain.PaymentRef{
+		ID:       paymentID,
+		Status:   "captured",
+		Amount:   5000,
+		Currency: "ARS",
+	}, nil
+}
+
 // ── Helpers de agregados ──────────────────────────────────────────────────────
 
+func capturedPayment(id string) domain.PaymentRef {
+	return domain.PaymentRef{ID: id, Status: "captured", Amount: 5000, Currency: "ARS"}
+}
+
 func seedOpen(r *fakeRepo, tenantID domain.TenantID, deadline time.Time) *domain.Dispute {
-	d, _ := domain.NewDispute(domain.NewDisputeID(), tenantID, "pay-1", "psp-1", 5000, "ARS",
-		domain.ReasonFraudulent, deadline)
+	d, _ := domain.NewDispute(domain.NewDisputeID(), tenantID, capturedPayment("pay-1"), "psp-1", 5000, "ARS",
+		domain.ReasonFraudulent, deadline, testNow)
 	d.PullEvents()
 	r.byID[d.ID()] = d
 	r.byPayment[d.PaymentID()] = d
