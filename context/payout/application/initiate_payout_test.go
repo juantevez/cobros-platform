@@ -101,7 +101,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 			Amount:         2_500,
 			Currency:       "ARS",
 			AccountType:    ba.AccountType,
-			AccountNumber:  ba.AccountNumber,
+			AccountNumber:  ba.AccountNumber(),
 			BankName:       ba.BankName,
 			HolderName:     ba.HolderName,
 			Description:    "Desembolso " + res.PayoutID[:8],

@@ -11,7 +11,7 @@ const testTenant = TenantID("11111111-1111-1111-1111-111111111111")
 func testBankAccount() BankAccountInfo {
 	return BankAccountInfo{
 		AccountType:   "CBU",
-		AccountNumber: "0170099220000067797370",
+		accountNumber: "0170099220000067797370",
 		BankName:      "Banco Test",
 		HolderName:    "Comercio SA",
 		Currency:      "ARS",

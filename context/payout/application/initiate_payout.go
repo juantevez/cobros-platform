@@ -66,7 +66,7 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 	if err != nil {
 		return InitiatePayoutResult{}, fmt.Errorf("get bank account: %w", err)
 	}
-	if bankAccount.AccountNumber == "" {
+	if bankAccount.AccountNumber() == "" {
 		return InitiatePayoutResult{}, domain.ErrNoBankAccount
 	}
 
@@ -130,7 +130,7 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 		Amount:         payoutAmount,
 		Currency:       currency,
 		AccountType:    bankAccount.AccountType,
-		AccountNumber:  bankAccount.AccountNumber,
+		AccountNumber:  bankAccount.AccountNumber(),
 		BankName:       bankAccount.BankName,
 		HolderName:     bankAccount.HolderName,
 		Description:    fmt.Sprintf("Desembolso %s", id.String()[:8]),

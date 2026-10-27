@@ -117,6 +117,19 @@ func NewBankAccountInfo(accountType, accountNumber, bankName, holderName, curren
 // outbound (transferencia bancaria y persistencia del snapshot).
 func (b BankAccountInfo) AccountNumber() string { return b.accountNumber }
 
+// MustBankAccountInfo reconstruye un BankAccountInfo desde datos ya
+// persistidos (reconstitución), sin revalidar. Es responsabilidad del
+// adaptador de persistencia garantizar la integridad del dato.
+func MustBankAccountInfo(accountType, accountNumber, bankName, holderName, currency string) BankAccountInfo {
+	return BankAccountInfo{
+		AccountType:   accountType,
+		accountNumber: accountNumber,
+		BankName:      bankName,
+		HolderName:    holderName,
+		Currency:      currency,
+	}
+}
+
 // MaskedAccountNumber oculta todos menos los últimos 4 caracteres
 // (ej. "••••••••••••••••7370"). Es la única forma permitida de exponer la
 // cuenta en APIs de lectura o logs.

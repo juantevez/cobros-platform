@@ -161,13 +161,8 @@ func (p *fakePublisher) eventTypes() []string {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func validBankAccount() domain.BankAccountInfo {
-	return domain.BankAccountInfo{
-		AccountType:   "CBU",
-		AccountNumber: "0170099220000067797370",
-		BankName:      "Banco Test",
-		HolderName:    "Comercio SA",
-		Currency:      "ARS",
-	}
+	ba, _ := domain.NewBankAccountInfo("CBU", "0170099220000067797370", "Banco Test", "Comercio SA", "ARS")
+	return ba
 }
 
 // buildPayout crea un payout real en estado initiated (sin eventos pendientes).

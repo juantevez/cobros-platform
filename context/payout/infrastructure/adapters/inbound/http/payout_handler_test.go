@@ -92,7 +92,7 @@ type handlerOpts struct {
 func defaultOpts() handlerOpts {
 	return handlerOpts{
 		balance: 10_000,
-		account: domain.BankAccountInfo{AccountType: "CBU", AccountNumber: "0170099220000067797370", HolderName: "Comercio SA"},
+		account: domain.MustBankAccountInfo("CBU", "0170099220000067797370", "", "Comercio SA", ""),
 	}
 }
 

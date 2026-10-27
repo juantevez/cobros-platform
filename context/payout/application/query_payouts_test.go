@@ -30,7 +30,7 @@ func TestGetPayoutUseCase_Execute(t *testing.T) {
 		if v.Amount != 5000 || v.Currency != "ARS" || v.Status != "confirmed" {
 			t.Errorf("amount/status not mapped: %+v", v)
 		}
-		if v.BankAccountType != ba.AccountType || v.BankAccountNum != ba.AccountNumber || v.HolderName != ba.HolderName {
+		if v.BankAccountType != ba.AccountType || v.BankAccountNum != ba.MaskedAccountNumber() || v.HolderName != ba.HolderName {
 			t.Errorf("bank account not mapped: %+v", v)
 		}
 		if v.BankReference != "REF-9" || v.FailureReason != "" {

@@ -37,13 +37,7 @@ func TestBankAccountProvider_GetBankAccount(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := domain.BankAccountInfo{
-			AccountType:   "CVU",
-			AccountNumber: "0000003100010000000001",
-			BankName:      "",
-			HolderName:    "Comercio SA",
-			Currency:      "ARS",
-		}
+		want := domain.MustBankAccountInfo("CVU", "0000003100010000000001", "", "Comercio SA", "ARS")
 		if got != want {
 			t.Errorf("got %+v, want %+v", got, want)
 		}

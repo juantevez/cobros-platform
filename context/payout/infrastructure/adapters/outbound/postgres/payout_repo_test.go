@@ -46,13 +46,7 @@ func anyArgs(n int) []any {
 func strPtr(s string) *string { return &s }
 
 func testBankAccount() domain.BankAccountInfo {
-	return domain.BankAccountInfo{
-		AccountType:   "CBU",
-		AccountNumber: "0170099220000067797370",
-		BankName:      "Banco Test",
-		HolderName:    "Comercio SA",
-		Currency:      "ARS",
-	}
+	return domain.MustBankAccountInfo("CBU", "0170099220000067797370", "Banco Test", "Comercio SA", "ARS")
 }
 
 func newPayout(t *testing.T) *domain.Payout {
