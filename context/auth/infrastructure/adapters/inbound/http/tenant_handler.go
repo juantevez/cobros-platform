@@ -52,13 +52,15 @@ func (h *TenantHandler) Register(c *gin.Context) {
 
 	result, err := h.register.Execute(c.Request.Context(), application.RegisterTenantCmd{
 		LegalName: req.LegalName,
+		Email:     req.Email,
+		Password:  req.Password,
 	})
 	if err != nil {
 		respondDomainError(c, err)
 		return
 	}
 
-	respondJSON(c, http.StatusCreated, registerTenantResponse{TenantID: result.TenantID})
+	respondJSON(c, http.StatusCreated, registerTenantResponse{TenantID: result.TenantID, UserID: result.UserID})
 }
 
 // ── Activate ──────────────────────────────────────────────────────────────────

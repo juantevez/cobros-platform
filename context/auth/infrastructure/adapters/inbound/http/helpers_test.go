@@ -322,7 +322,7 @@ func newTestEnv(
 	tx := fakeTx{}
 	clock := realClockTest{}
 
-	registerTenant := application.NewRegisterTenantUseCase(tenants, tx, pub)
+	registerTenant := application.NewRegisterTenantUseCase(tenants, users, members, hasher, tx, pub)
 	activateTenant := application.NewActivateTenantUseCase(tenants, tx, pub)
 	suspendTenant := application.NewSuspendTenantUseCase(tenants, tx, pub)
 	registerUser := application.NewRegisterUserUseCase(tenants, users, members, hasher, tx, pub)
