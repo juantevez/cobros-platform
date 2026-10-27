@@ -14,10 +14,10 @@ import (
 
 // ComplianceHandler expone las alertas de AML y la gestión de la watchlist.
 type ComplianceHandler struct {
-	listAlerts   *application.ListAlertsUseCase
-	getAlert     *application.GetAlertUseCase
-	resolveAlert *application.ResolveAlertUseCase
-	addEntry     *application.AddWatchlistEntryUseCase
+	listAlerts    *application.ListAlertsUseCase
+	getAlert      *application.GetAlertUseCase
+	resolveAlert  *application.ResolveAlertUseCase
+	addEntry      *application.AddWatchlistEntryUseCase
 	listWatchlist *application.ListWatchlistUseCase
 }
 
@@ -144,12 +144,7 @@ func (h *ComplianceHandler) AddWatchlistEntry(c *gin.Context) {
 		FullName: req.FullName, ListType: req.ListType,
 		Country: req.Country, Source: req.Source,
 	}); err != nil {
-		switch {
-		case errors.Is(err, domain.ErrInvalidListType):
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.Status(http.StatusCreated)
