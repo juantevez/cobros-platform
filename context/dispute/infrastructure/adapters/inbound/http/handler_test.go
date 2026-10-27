@@ -60,6 +60,9 @@ func (r *fakeRepo) ListByTenant(ctx context.Context, t domain.TenantID, s string
 func (r *fakeRepo) ListOverdue(ctx context.Context, now time.Time, limit int) ([]*domain.Dispute, error) {
 	return nil, nil
 }
+func (r *fakeRepo) ListAll(ctx context.Context, statusFilter string, limit int) ([]*domain.Dispute, error) {
+	return r.listed, nil
+}
 
 type fakeTx struct{}
 
@@ -69,16 +72,27 @@ type fakePublisher struct{}
 
 func (fakePublisher) Publish(ctx context.Context, events ...domain.Event) error { return nil }
 
+// fakePayments implementa application.PaymentReader: devuelve un pago capturado
+// válido para cualquier payment_id no vacío.
+type fakePayments struct{}
+
+func (fakePayments) FindPayment(ctx context.Context, paymentID string) (domain.PaymentRef, error) {
+	if paymentID == "" {
+		return domain.PaymentRef{}, domain.ErrDisputeNotFound
+	}
+	return domain.PaymentRef{ID: paymentID, Status: "captured", Amount: 5000, Currency: "ARS"}, nil
+}
+
 type fixedClock struct{}
 
 func (fixedClock) Now() time.Time { return time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC) }
 
 func newHandler(r *fakeRepo) *DisputeHandler {
 	return NewDisputeHandler(
-		application.NewOpenDisputeUseCase(r, fakeTx{}, fakePublisher{}),
+		application.NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, fakePublisher{}, fixedClock{}),
 		application.NewContestDisputeUseCase(r, fakeTx{}, fixedClock{}),
-		application.NewAcceptDisputeUseCase(r, fakeTx{}, fakePublisher{}),
-		application.NewResolveDisputeUseCase(r, fakeTx{}, fakePublisher{}),
+		application.NewAcceptDisputeUseCase(r, fakeTx{}, fakePublisher{}, fixedClock{}),
+		application.NewResolveDisputeUseCase(r, fakeTx{}, fakePublisher{}, fixedClock{}),
 		application.NewGetDisputeUseCase(r, fixedClock{}),
 		application.NewListDisputesUseCase(r, fixedClock{}),
 	)
@@ -100,8 +114,11 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 
 // seedOpen crea una disputa abierta con deadline futuro.
 func seedOpen(r *fakeRepo, tid domain.TenantID) *domain.Dispute {
-	d, _ := domain.NewDispute(domain.NewDisputeID(), tid, "pay-1", "psp-1", 5000, "ARS",
-		domain.ReasonFraudulent, time.Now().Add(48*time.Hour))
+	now := time.Now()
+	d, _ := domain.NewDispute(domain.NewDisputeID(), tid,
+		domain.PaymentRef{ID: "pay-1", Status: "captured", Amount: 5000, Currency: "ARS"},
+		"psp-1", 5000, "ARS",
+		domain.ReasonFraudulent, now.Add(48*time.Hour), now)
 	d.PullEvents()
 	r.byID[d.ID()] = d
 	r.byPayment[d.PaymentID()] = d
@@ -263,7 +280,7 @@ func TestAccept(t *testing.T) {
 	t.Run("already resolved yields 422", func(t *testing.T) {
 		r := newRepo()
 		d := seedOpen(r, tid)
-		_ = d.Accept("")
+		_ = d.Accept("", time.Now())
 		d.PullEvents()
 		rec := doRequest(newHandler(r).Accept, http.MethodPost, "/x", `{"note":"x"}`, tid.String(), param(d.ID().String()))
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -279,7 +296,8 @@ func TestResolve(t *testing.T) {
 
 	underReview := func(r *fakeRepo) *domain.Dispute {
 		d := seedOpen(r, tid)
-		_ = d.Contest([]domain.Evidence{domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d")}, "", time.Now())
+		ev, _ := domain.NewEvidence(domain.NewEvidenceID(), "receipt", "r", "d", time.Now())
+		_ = d.Contest([]domain.Evidence{ev}, "", time.Now())
 		d.PullEvents()
 		return d
 	}

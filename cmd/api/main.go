@@ -359,10 +359,11 @@ func main() {
 	// ── Disputes & Chargebacks ────────────────────────────────────────────────
 
 	disputeRepo := disputepg.NewDisputeRepository(pool)
-	openDispute := disputeapp.NewOpenDisputeUseCase(disputeRepo, txManager, disputePub)
+	disputePayments := disputepg.NewPaymentReader(pool)
+	openDispute := disputeapp.NewOpenDisputeUseCase(disputeRepo, disputePayments, txManager, disputePub, clock)
 	contestDisp := disputeapp.NewContestDisputeUseCase(disputeRepo, txManager, clock)
-	acceptDisp := disputeapp.NewAcceptDisputeUseCase(disputeRepo, txManager, disputePub)
-	resolveDisp := disputeapp.NewResolveDisputeUseCase(disputeRepo, txManager, disputePub)
+	acceptDisp := disputeapp.NewAcceptDisputeUseCase(disputeRepo, txManager, disputePub, clock)
+	resolveDisp := disputeapp.NewResolveDisputeUseCase(disputeRepo, txManager, disputePub, clock)
 	getDisp := disputeapp.NewGetDisputeUseCase(disputeRepo, clock)
 	listDisp := disputeapp.NewListDisputesUseCase(disputeRepo, clock)
 

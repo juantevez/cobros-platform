@@ -103,6 +103,39 @@ func (r *pgDisputeRepository) ListByTenant(ctx context.Context, tenantID domain.
 	return disputes, rows.Err()
 }
 
+// ListAll retorna disputas de TODOS los tenants (vista operatoria global del
+// back-office). No filtra por tenant_id: se ejecuta con una conexión sin RLS
+// activado, igual que ListOverdue.
+func (r *pgDisputeRepository) ListAll(ctx context.Context, statusFilter string, limit int) ([]*domain.Dispute, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if statusFilter != "" {
+		rows, err = r.pool.Query(ctx,
+			baseSelect+" WHERE status=$1 ORDER BY opened_at DESC LIMIT $2",
+			statusFilter, limit)
+	} else {
+		rows, err = r.pool.Query(ctx,
+			baseSelect+" ORDER BY opened_at DESC LIMIT $1",
+			limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("dispute repo: list all: %w", err)
+	}
+	defer rows.Close()
+
+	var disputes []*domain.Dispute
+	for rows.Next() {
+		d, err := r.scanWithEvidence(ctx, r.pool, rows)
+		if err != nil {
+			return nil, err
+		}
+		disputes = append(disputes, d)
+	}
+	return disputes, rows.Err()
+}
+
 func (r *pgDisputeRepository) ListOverdue(ctx context.Context, now time.Time, limit int) ([]*domain.Dispute, error) {
 	rows, err := r.pool.Query(ctx,
 		baseSelect+" WHERE status='open' AND deadline < $1 ORDER BY deadline ASC LIMIT $2",
