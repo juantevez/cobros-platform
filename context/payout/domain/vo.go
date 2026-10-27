@@ -43,9 +43,16 @@ const (
 	// StatusFailed: la transferencia falló (cuenta inválida, rechazo bancario).
 	// El asiento en Ledger se revierte automáticamente.
 	StatusFailed PayoutStatus = "failed"
+	// StatusUnknown: el banco no respondió (timeout / error de red). NO es un
+	// estado final: los fondos siguen en payout_transit y el dinero puede haber
+	// sido acreditado o no. Debe resolverse por reconciliación antes de cerrar.
+	StatusUnknown PayoutStatus = "unknown"
 )
 
 func (s PayoutStatus) String() string { return string(s) }
+
+// IsFinal indica que el payout no admite más transiciones.
+// StatusUnknown NO es final: requiere resolución (§10.3).
 func (s PayoutStatus) IsFinal() bool {
 	return s == StatusConfirmed || s == StatusFailed
 }
@@ -81,10 +88,63 @@ func (m Money) String() string   { return fmt.Sprintf("%d %s", m.amount, m.curre
 
 // BankAccountInfo contiene los datos de la cuenta bancaria destino del payout.
 // Se obtiene del contexto Onboarding al momento de calcular el payout.
+//
+// El número de cuenta es dato sensible: se guarda sin enmascarar (hace falta
+// para transferir y para el snapshot de auditoría) pero sólo puede leerse vía
+// AccountNumber() —para el adaptador bancario y la persistencia— o vía
+// MaskedAccountNumber() —para respuestas HTTP y logs—.
 type BankAccountInfo struct {
 	AccountType   string // "CBU", "CVU", "IBAN"
-	AccountNumber string
+	accountNumber string
 	BankName      string
 	HolderName    string
 	Currency      string
+}
+
+// NewBankAccountInfo construye y valida la info de la cuenta destino.
+// Un número vacío significa que no hay cuenta utilizable: ErrNoBankAccount.
+func NewBankAccountInfo(accountType, accountNumber, bankName, holderName, currency string) (BankAccountInfo, error) {
+	num := strings.TrimSpace(accountNumber)
+	if num == "" {
+		return BankAccountInfo{}, ErrNoBankAccount
+	}
+	if len(num) > 64 {
+		return BankAccountInfo{}, fmt.Errorf("%w: account number too long", ErrNoBankAccount)
+	}
+	return BankAccountInfo{
+		AccountType:   strings.ToUpper(strings.TrimSpace(accountType)),
+		accountNumber: num,
+		BankName:      bankName,
+		HolderName:    holderName,
+		Currency:      currency,
+	}, nil
+}
+
+// AccountNumber retorna el número completo. Usar únicamente en el camino
+// outbound (transferencia bancaria y persistencia del snapshot).
+func (b BankAccountInfo) AccountNumber() string { return b.accountNumber }
+
+// MustBankAccountInfo reconstruye un BankAccountInfo desde datos ya
+// persistidos (reconstitución), sin revalidar. Es responsabilidad del
+// adaptador de persistencia garantizar la integridad del dato.
+func MustBankAccountInfo(accountType, accountNumber, bankName, holderName, currency string) BankAccountInfo {
+	return BankAccountInfo{
+		AccountType:   accountType,
+		accountNumber: accountNumber,
+		BankName:      bankName,
+		HolderName:    holderName,
+		Currency:      currency,
+	}
+}
+
+// MaskedAccountNumber oculta todos menos los últimos 4 caracteres
+// (ej. "••••••••••••••••7370"). Es la única forma permitida de exponer la
+// cuenta en APIs de lectura o logs.
+func (b BankAccountInfo) MaskedAccountNumber() string {
+	const visible = 4
+	r := []rune(b.accountNumber)
+	if len(r) <= visible {
+		return strings.Repeat("•", len(r))
+	}
+	return strings.Repeat("•", len(r)-visible) + string(r[len(r)-visible:])
 }

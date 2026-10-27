@@ -75,7 +75,8 @@ func toView(p *domain.Payout) PayoutView {
 		Currency:        p.Amount().Currency(),
 		Status:          p.Status().String(),
 		BankAccountType: ba.AccountType,
-		BankAccountNum:  ba.AccountNumber,
+		// Dato sensible: la API de lectura sólo expone la cuenta enmascarada.
+		BankAccountNum:  ba.MaskedAccountNumber(),
 		HolderName:      ba.HolderName,
 		BankReference:   p.BankReference(),
 		FailureReason:   p.FailureReason(),

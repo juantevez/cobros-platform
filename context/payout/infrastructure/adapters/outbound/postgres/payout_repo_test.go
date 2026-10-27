@@ -19,6 +19,7 @@ var payoutCols = []string{
 	"id", "tenant_id", "amount", "currency",
 	"bank_acct_type", "bank_acct_num", "bank_name", "holder_name",
 	"status", "bank_reference", "failure_reason", "ledger_entry_key",
+	"idempotency_key",
 	"initiated_at", "confirmed_at", "failed_at",
 	"created_at", "updated_at",
 }
@@ -46,19 +47,13 @@ func anyArgs(n int) []any {
 func strPtr(s string) *string { return &s }
 
 func testBankAccount() domain.BankAccountInfo {
-	return domain.BankAccountInfo{
-		AccountType:   "CBU",
-		AccountNumber: "0170099220000067797370",
-		BankName:      "Banco Test",
-		HolderName:    "Comercio SA",
-		Currency:      "ARS",
-	}
+	return domain.MustBankAccountInfo("CBU", "0170099220000067797370", "Banco Test", "Comercio SA", "ARS")
 }
 
 func newPayout(t *testing.T) *domain.Payout {
 	t.Helper()
 	money, _ := domain.NewMoney(5000, "ARS")
-	p, err := domain.NewPayout(domain.NewPayoutID(), domain.TenantID(uuid.NewString()), money, testBankAccount())
+	p, err := domain.NewPayout(domain.NewPayoutID(), domain.TenantID(uuid.NewString()), money, testBankAccount(), "idem-key-1")
 	if err != nil {
 		t.Fatalf("NewPayout: %v", err)
 	}
@@ -72,6 +67,7 @@ func confirmedRow(id, tenantID string) []any {
 		id, tenantID, int64(5000), "ARS",
 		"CBU", "0170099220000067797370", "Banco Test", "Comercio SA",
 		"confirmed", "BANK-1", "", "payout_initiated_" + id,
+		"idem-key-1",
 		&testTime, &confirmed, (*time.Time)(nil),
 		testTime, confirmed,
 	}
@@ -88,7 +84,7 @@ func TestPayoutRepository_Save(t *testing.T) {
 			int64(5000), "ARS",
 			"CBU", "0170099220000067797370", strPtr("Banco Test"), "Comercio SA",
 			"initiated", (*string)(nil), (*string)(nil),
-			p.LedgerEntryKey(),
+			p.LedgerEntryKey(), p.IdempotencyKey(),
 			(*time.Time)(nil), (*time.Time)(nil), (*time.Time)(nil),
 			p.CreatedAt(), p.UpdatedAt(),
 		).WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -105,7 +101,7 @@ func TestPayoutRepository_Save(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPayoutRepository(mock)
 
-		mock.ExpectExec("INSERT INTO payouts").WithArgs(anyArgs(17)...).WillReturnError(errBoom)
+		mock.ExpectExec("INSERT INTO payouts").WithArgs(anyArgs(18)...).WillReturnError(errBoom)
 
 		err := repo.Save(context.Background(), newPayout(t))
 		if !errors.Is(err, errBoom) {

@@ -4,9 +4,10 @@ import "time"
 
 // InitiatePayoutCmd solicita un desembolso para un tenant.
 type InitiatePayoutCmd struct {
-	TenantID string
-	Amount   int64  // si es 0, usa el saldo disponible completo
-	Currency string
+	TenantID       string
+	Amount         int64  // si es 0, usa el saldo disponible completo
+	Currency       string
+	IdempotencyKey string // obligatorio: previene desembolsos duplicados por retries
 }
 
 type InitiatePayoutResult struct {
@@ -15,6 +16,7 @@ type InitiatePayoutResult struct {
 	Currency      string
 	Status        string
 	BankReference string
+	Replayed      bool // true si se retornó un payout existente (retry idempotente)
 }
 
 // ConfirmPayoutCmd registra la confirmación del banco.

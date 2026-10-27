@@ -27,20 +27,34 @@ var errBoom = errors.New("boom")
 
 type fakeRepo struct {
 	byID      map[domain.PayoutID]*domain.Payout
+	byKey     map[string]*domain.Payout
 	listed    []*domain.Payout
 	listErr   error
 	lastLimit int
 }
 
-func newRepo() *fakeRepo { return &fakeRepo{byID: map[domain.PayoutID]*domain.Payout{}} }
+func newRepo() *fakeRepo {
+	return &fakeRepo{byID: map[domain.PayoutID]*domain.Payout{}, byKey: map[string]*domain.Payout{}}
+}
 
 func (r *fakeRepo) Save(ctx context.Context, p *domain.Payout) error {
 	r.byID[p.ID()] = p
+	if r.byKey == nil {
+		r.byKey = map[string]*domain.Payout{}
+	}
+	r.byKey[p.IdempotencyKey()] = p
 	return nil
 }
 func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout) error { return nil }
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.PayoutID) (*domain.Payout, error) {
 	p, ok := r.byID[id]
+	if !ok {
+		return nil, domain.ErrPayoutNotFound
+	}
+	return p, nil
+}
+func (r *fakeRepo) FindByIdempotencyKey(ctx context.Context, t domain.TenantID, key string) (*domain.Payout, error) {
+	p, ok := r.byKey[key]
 	if !ok {
 		return nil, domain.ErrPayoutNotFound
 	}
@@ -92,7 +106,7 @@ type handlerOpts struct {
 func defaultOpts() handlerOpts {
 	return handlerOpts{
 		balance: 10_000,
-		account: domain.BankAccountInfo{AccountType: "CBU", AccountNumber: "0170099220000067797370", HolderName: "Comercio SA"},
+		account: domain.MustBankAccountInfo("CBU", "0170099220000067797370", "", "Comercio SA", ""),
 	}
 }
 
@@ -106,9 +120,17 @@ func newHandler(r *fakeRepo, o handlerOpts) *PayoutHandler {
 }
 
 func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params gin.Params) *httptest.ResponseRecorder {
+	return doRequestWithHeader(h, method, target, body, tenantID, params, "", "")
+}
+
+// doRequestWithHeader permite inyectar un header adicional (p. ej. Idempotency-Key).
+func doRequestWithHeader(h gin.HandlerFunc, method, target, body, tenantID string, params gin.Params, header, headerValue string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	if header != "" {
+		req.Header.Set(header, headerValue)
+	}
 	if tenantID != "" {
 		req = req.WithContext(postgres.WithTenantID(req.Context(), tenantID))
 	}
@@ -119,11 +141,23 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 	return rec
 }
 
+// postPayout envía un POST /payouts con clave de idempotencia en el body
+// (el use case ahora la exige para prevenir desembolsos duplicados).
+func postPayout(h *PayoutHandler, tid, body string) *httptest.ResponseRecorder {
+	if body == "{}" {
+		body = `{"idempotency_key":"key-1"}`
+	} else if strings.HasPrefix(body, "{") && !strings.Contains(body, "idempotency_key") {
+		body = strings.Replace(body, "{", `{"idempotency_key":"key-1",`, 1)
+	}
+	return doRequest(h.Initiate, http.MethodPost, "/payouts", body, tid, nil)
+}
+
 func seedPayout(r *fakeRepo, tenantID string) *domain.Payout {
 	money, _ := domain.NewMoney(5000, "ARS")
-	p, _ := domain.NewPayout(domain.NewPayoutID(), domain.TenantID(tenantID), money, defaultOpts().account)
+	p, _ := domain.NewPayout(domain.NewPayoutID(), domain.TenantID(tenantID), money, defaultOpts().account, "seed_"+tenantID)
 	p.PullEvents()
 	r.byID[p.ID()] = p
+	r.byKey[p.IdempotencyKey()] = p
 	return p
 }
 
@@ -147,8 +181,7 @@ func TestInitiate(t *testing.T) {
 
 	t.Run("creates payout returns 201", func(t *testing.T) {
 		r := newRepo()
-		rec := doRequest(newHandler(r, defaultOpts()).Initiate, http.MethodPost, "/payouts",
-			`{"amount":3000,"currency":"ARS"}`, tid, nil)
+		rec := postPayout(newHandler(r, defaultOpts()), tid, `{"amount":3000,"currency":"ARS"}`)
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body)
@@ -166,7 +199,7 @@ func TestInitiate(t *testing.T) {
 	})
 
 	t.Run("empty body object uses full balance", func(t *testing.T) {
-		rec := doRequest(newHandler(newRepo(), defaultOpts()).Initiate, http.MethodPost, "/payouts", `{}`, tid, nil)
+		rec := postPayout(newHandler(newRepo(), defaultOpts()), tid, `{}`)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body)
 		}
@@ -188,8 +221,7 @@ func TestInitiate(t *testing.T) {
 	})
 
 	t.Run("amount over balance returns 422", func(t *testing.T) {
-		rec := doRequest(newHandler(newRepo(), defaultOpts()).Initiate, http.MethodPost, "/payouts",
-			`{"amount":10001}`, tid, nil)
+		rec := postPayout(newHandler(newRepo(), defaultOpts()), tid, `{"amount":10001}`)
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("status = %d, want 422", rec.Code)
 		}
@@ -198,15 +230,14 @@ func TestInitiate(t *testing.T) {
 	t.Run("no bank account returns 422", func(t *testing.T) {
 		o := defaultOpts()
 		o.account = domain.BankAccountInfo{}
-		rec := doRequest(newHandler(newRepo(), o).Initiate, http.MethodPost, "/payouts", `{}`, tid, nil)
+		rec := postPayout(newHandler(newRepo(), o), tid, `{}`)
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("status = %d, want 422", rec.Code)
 		}
 	})
 
 	t.Run("invalid currency returns 400", func(t *testing.T) {
-		rec := doRequest(newHandler(newRepo(), defaultOpts()).Initiate, http.MethodPost, "/payouts",
-			`{"amount":100,"currency":"PESOS"}`, tid, nil)
+		rec := postPayout(newHandler(newRepo(), defaultOpts()), tid, `{"amount":100,"currency":"PESOS"}`)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", rec.Code)
 		}
@@ -215,7 +246,7 @@ func TestInitiate(t *testing.T) {
 	t.Run("transfer failure returns 500 without leaking details", func(t *testing.T) {
 		o := defaultOpts()
 		o.transferErr = errors.New("bank secret detail")
-		rec := doRequest(newHandler(newRepo(), o).Initiate, http.MethodPost, "/payouts", `{"amount":100}`, tid, nil)
+		rec := postPayout(newHandler(newRepo(), o), tid, `{"amount":100}`)
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", rec.Code)
 		}

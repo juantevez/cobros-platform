@@ -7,10 +7,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juantevez/cobros-platform/context/payout/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
+
+const pgErrUniqueViolation = "23505"
 
 type pgPayoutRepository struct {
 	pool postgres.Conn
@@ -28,18 +31,28 @@ func (r *pgPayoutRepository) Save(ctx context.Context, p *domain.Payout) error {
 			id, tenant_id, amount, currency,
 			bank_acct_type, bank_acct_num, bank_name, holder_name,
 			status, bank_reference, failure_reason, ledger_entry_key,
+			idempotency_key,
 			initiated_at, confirmed_at, failed_at,
 			created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		p.ID().String(), p.TenantID().String(),
 		p.Amount().Amount(), p.Amount().Currency(),
-		ba.AccountType, ba.AccountNumber, nullStr(ba.BankName), ba.HolderName,
+		ba.AccountType, ba.AccountNumber(), nullStr(ba.BankName), ba.HolderName,
 		p.Status().String(), nullStr(p.BankReference()), nullStr(p.FailureReason()),
-		p.LedgerEntryKey(),
+		p.LedgerEntryKey(), p.IdempotencyKey(),
 		p.InitiatedAt(), p.ConfirmedAt(), p.FailedAt(),
 		p.CreatedAt(), p.UpdatedAt(),
 	)
-	return wrapErr("save", err)
+	if err != nil {
+		// Violación del UNIQUE (tenant_id, idempotency_key): otro request con la
+		// misma clave ganó la carrera. El caso de uso la mapea a un retry.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUniqueViolation {
+			return fmt.Errorf("payout repo: save: %w", domain.ErrPayoutAlreadyExists)
+		}
+		return wrapErr("save", err)
+	}
+	return nil
 }
 
 func (r *pgPayoutRepository) Update(ctx context.Context, p *domain.Payout) error {
@@ -60,6 +73,18 @@ func (r *pgPayoutRepository) FindByID(ctx context.Context, id domain.PayoutID) (
 	conn := postgres.ConnFromContext(ctx, r.pool)
 	row := conn.QueryRow(ctx, baseSelect+" WHERE id=$1", id.String())
 	return scanPayout(row)
+}
+
+// FindByIdempotencyKey busca el payout del tenant con la clave dada.
+// Usa la columna idempotency_key con su índice UNIQUE parcial.
+func (r *pgPayoutRepository) FindByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, key string) (*domain.Payout, error) {
+if key == "" {
+return nil, domain.ErrPayoutNotFound
+}
+conn := postgres.ConnFromContext(ctx, r.pool)
+row := conn.QueryRow(ctx, baseSelect+" WHERE tenant_id=$1 AND idempotency_key=$2",
+tenantID.String(), key)
+return scanPayout(row)
 }
 
 func (r *pgPayoutRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Payout, error) {
@@ -86,6 +111,7 @@ const baseSelect = `
 	SELECT id, tenant_id, amount, currency,
 	       bank_acct_type, bank_acct_num, COALESCE(bank_name,''), holder_name,
 	       status, COALESCE(bank_reference,''), COALESCE(failure_reason,''), ledger_entry_key,
+	       COALESCE(idempotency_key,''),
 	       initiated_at, confirmed_at, failed_at,
 	       created_at, updated_at
 	FROM payouts`
@@ -94,7 +120,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 	var (
 		idStr, tenantIDStr, currency                        string
 		acctType, acctNum, bankName, holderName             string
-		status, bankRef, failReason, ledgerKey              string
+		status, bankRef, failReason, ledgerKey, idemKey            string
 		amount                                              int64
 		initiatedAt, confirmedAt, failedAt                  *time.Time
 		createdAt, updatedAt                                time.Time
@@ -104,6 +130,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		&idStr, &tenantIDStr, &amount, &currency,
 		&acctType, &acctNum, &bankName, &holderName,
 		&status, &bankRef, &failReason, &ledgerKey,
+		&idemKey,
 		&initiatedAt, &confirmedAt, &failedAt,
 		&createdAt, &updatedAt,
 	); err != nil {
@@ -113,13 +140,13 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		return nil, fmt.Errorf("payout repo: scan: %w", err)
 	}
 
-	return domain.ReconstitutePayout(
+	return domain.ReconstitutePayoutWithIdempotency(
 		domain.PayoutID(idStr),
 		domain.TenantID(tenantIDStr),
 		domain.ReconstituteMoney(amount, currency),
-		domain.BankAccountInfo{AccountType: acctType, AccountNumber: acctNum, BankName: bankName, HolderName: holderName, Currency: currency},
+		domain.MustBankAccountInfo(acctType, acctNum, bankName, holderName, currency),
 		domain.PayoutStatus(status),
-		bankRef, failReason, ledgerKey,
+		bankRef, failReason, ledgerKey, idemKey,
 		initiatedAt, confirmedAt, failedAt,
 		createdAt.UTC(), updatedAt.UTC(),
 	), nil

@@ -47,11 +47,5 @@ func (p *BankAccountProvider) GetBankAccount(
 		return domain.BankAccountInfo{}, fmt.Errorf("bank account provider: %w", err)
 	}
 
-	return domain.BankAccountInfo{
-		AccountType:   accountType,
-		AccountNumber: accountNum,
-		BankName:      bankName,
-		HolderName:    holderName,
-		Currency:      currency,
-	}, nil
+	return domain.NewBankAccountInfo(accountType, accountNum, bankName, holderName, currency)
 }

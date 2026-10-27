@@ -12,4 +12,21 @@ var (
 	ErrPayoutAlreadyConfirmed = errors.New("payout is already confirmed")
 	ErrPayoutAlreadyFailed    = errors.New("payout already failed")
 	ErrFailureReasonRequired  = errors.New("failure reason is required")
+
+	// ErrPayoutAlreadyExists indica que ya existe un payout del tenant con la
+	// misma idempotency key. El caso de uso lo resuelve retornando el payout
+	// existente; el repositorio lo mapea desde un violation de UNIQUE.
+	ErrPayoutAlreadyExists = errors.New("payout with this idempotency key already exists")
+
+	// ErrBankTransferUnknown indica que el resultado de la transferencia es
+	// indeterminado (timeout, error de red, respuesta ambigua del banco).
+	// NO debe tratarse como fallo: los fondos pueden haber sido acreditados.
+	ErrBankTransferUnknown = errors.New("bank transfer result unknown")
+
+	// ErrIdempotencyKeyConflict: la clave reutilizada corresponde a un payout
+	// con monto o moneda distintos.
+	ErrIdempotencyKeyConflict = errors.New("idempotency key reused with different amount or currency")
+
+	// ErrIdempotencyKeyRequired: todo desembolso debe traer clave de idempotencia.
+	ErrIdempotencyKeyRequired = errors.New("payout idempotency key is required")
 )

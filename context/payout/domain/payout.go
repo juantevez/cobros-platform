@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -23,8 +24,9 @@ type Payout struct {
 	bankAccount    BankAccountInfo
 	status         PayoutStatus
 	bankReference  string // referencia asignada por el banco/adapter
-	failureReason  string
+	failureReason  string // motivo técnico del fallo (se persiste, no se expone en la API)
 	ledgerEntryKey string // clave de idempotencia del asiento en Ledger
+	idempotencyKey string // clave de idempotencia de negocio del desembolso
 	initiatedAt    *time.Time
 	confirmedAt    *time.Time
 	failedAt       *time.Time
@@ -36,12 +38,17 @@ type Payout struct {
 
 // NewPayout crea un Payout en estado Initiated.
 // Emite PayoutInitiatedEvent para que el Ledger registre el movimiento.
+// idempotencyKey (no vacía) evita desembolsos duplicados por retries del caller.
 func NewPayout(
 	id PayoutID,
 	tenantID TenantID,
 	amount Money,
 	bankAccount BankAccountInfo,
+	idempotencyKey string,
 ) (*Payout, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, ErrIdempotencyKeyRequired
+	}
 	now := time.Now().UTC()
 	ledgerKey := fmt.Sprintf("payout_initiated_%s", id.String())
 
@@ -52,6 +59,7 @@ func NewPayout(
 		bankAccount:    bankAccount,
 		status:         StatusInitiated,
 		ledgerEntryKey: ledgerKey,
+		idempotencyKey: strings.TrimSpace(idempotencyKey),
 		createdAt:      now,
 		updatedAt:      now,
 	}
@@ -77,13 +85,31 @@ func ReconstitutePayout(
 	initiatedAt, confirmedAt, failedAt *time.Time,
 	createdAt, updatedAt time.Time,
 ) *Payout {
+	return ReconstitutePayoutWithIdempotency(
+		id, tenantID, amount, bankAccount, status,
+		bankReference, failureReason, ledgerEntryKey, "",
+		initiatedAt, confirmedAt, failedAt, createdAt, updatedAt,
+	)
+}
+
+// ReconstitutePayoutWithIdempotency reconstruye el agregado incluyendo la
+// clave de idempotencia persistida.
+func ReconstitutePayoutWithIdempotency(
+	id PayoutID, tenantID TenantID,
+	amount Money, bankAccount BankAccountInfo,
+	status PayoutStatus,
+	bankReference, failureReason, ledgerEntryKey, idempotencyKey string,
+	initiatedAt, confirmedAt, failedAt *time.Time,
+	createdAt, updatedAt time.Time,
+) *Payout {
 	return &Payout{
 		id: id, tenantID: tenantID,
 		amount: amount, bankAccount: bankAccount,
 		status: status,
 		bankReference: bankReference, failureReason: failureReason,
 		ledgerEntryKey: ledgerEntryKey,
-		initiatedAt: initiatedAt, confirmedAt: confirmedAt, failedAt: failedAt,
+		idempotencyKey: idempotencyKey,
+		initiatedAt:    initiatedAt, confirmedAt: confirmedAt, failedAt: failedAt,
 		createdAt: createdAt, updatedAt: updatedAt,
 	}
 }
@@ -102,8 +128,10 @@ func (p *Payout) MarkProcessing() error {
 
 // Confirm registra la confirmación del banco.
 // Emite PayoutConfirmedEvent para que el Ledger cierre el asiento.
+// Permitido desde processing (camino normal) y desde unknown (resolución de
+// reconciliación: el banco terminó acreditando una transferencia ambigua).
 func (p *Payout) Confirm(bankReference string) error {
-	if p.status != StatusProcessing {
+	if p.status != StatusProcessing && p.status != StatusUnknown {
 		return fmt.Errorf("%w: cannot confirm from %q", ErrInvalidTransition, p.status)
 	}
 
@@ -125,10 +153,12 @@ func (p *Payout) Confirm(bankReference string) error {
 	return nil
 }
 
-// Fail registra el fallo de la transferencia.
-// Emite PayoutFailedEvent para que el Ledger revierta el asiento.
+// Fail registra el fallo definitivo de la transferencia (rechazo conocido del
+// banco). Emite PayoutFailedEvent para que el Ledger revierta el asiento.
+// Permitido desde processing y desde unknown (resolución de reconciliación:
+// se confirma que el banco NO acreditó los fondos).
 func (p *Payout) Fail(reason string) error {
-	if p.status != StatusProcessing {
+	if p.status != StatusProcessing && p.status != StatusUnknown {
 		return fmt.Errorf("%w: cannot fail from %q", ErrInvalidTransition, p.status)
 	}
 	if reason == "" {
@@ -153,6 +183,35 @@ func (p *Payout) Fail(reason string) error {
 	return nil
 }
 
+// MarkUnknown registra un resultado INDETERMINADO de la transferencia
+// (timeout, error de red, respuesta ambigua del banco). A diferencia de Fail,
+// NO emite payout.failed.v1: los fondos permanecen en payout_transit hasta que
+// la reconciliación resuelva el payout como Confirm o Fail (§10.3).
+func (p *Payout) MarkUnknown(reason string) error {
+	if p.status != StatusProcessing {
+		return fmt.Errorf("%w: cannot mark unknown from %q", ErrInvalidTransition, p.status)
+	}
+	if reason == "" {
+		return ErrFailureReasonRequired
+	}
+
+	now := time.Now().UTC()
+	p.status = StatusUnknown
+	p.failureReason = reason
+	p.updatedAt = now
+
+	p.record(PayoutUnknownEvent{
+		baseEvent:     newBase(p.tenantID.String()),
+		PayoutID:      p.id.String(),
+		TenantID:      p.tenantID.String(),
+		Amount:        p.amount.Amount(),
+		Currency:      p.amount.Currency(),
+		FailureReason: reason,
+	})
+
+	return nil
+}
+
 // ── Getters ───────────────────────────────────────────────────────────────────
 
 func (p *Payout) ID() PayoutID                { return p.id }
@@ -163,6 +222,7 @@ func (p *Payout) Status() PayoutStatus        { return p.status }
 func (p *Payout) BankReference() string       { return p.bankReference }
 func (p *Payout) FailureReason() string       { return p.failureReason }
 func (p *Payout) LedgerEntryKey() string      { return p.ledgerEntryKey }
+func (p *Payout) IdempotencyKey() string      { return p.idempotencyKey }
 func (p *Payout) InitiatedAt() *time.Time     { return p.initiatedAt }
 func (p *Payout) ConfirmedAt() *time.Time     { return p.confirmedAt }
 func (p *Payout) FailedAt() *time.Time        { return p.failedAt }
@@ -173,6 +233,20 @@ func (p *Payout) PullEvents() []Event {
 	evs := p.events
 	p.events = nil
 	return evs
+}
+
+// MatchesRequest verifica si un payout existente corresponde a la misma
+// solicitud original para fines de replay idempotente:
+//   - amount == 0 en el request significa "saldo completo": no se puede
+//     validar el monto, sólo la moneda.
+func (p *Payout) MatchesRequest(amount int64, currency string) bool {
+	if p.amount.Currency() != strings.ToUpper(strings.TrimSpace(currency)) {
+		return false
+	}
+	if amount == 0 {
+		return true
+	}
+	return p.amount.Amount() == amount
 }
 
 func (p *Payout) record(e Event) { p.events = append(p.events, e) }

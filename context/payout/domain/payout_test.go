@@ -11,7 +11,7 @@ const testTenant = TenantID("11111111-1111-1111-1111-111111111111")
 func testBankAccount() BankAccountInfo {
 	return BankAccountInfo{
 		AccountType:   "CBU",
-		AccountNumber: "0170099220000067797370",
+		accountNumber: "0170099220000067797370",
 		BankName:      "Banco Test",
 		HolderName:    "Comercio SA",
 		Currency:      "ARS",
@@ -25,7 +25,7 @@ func newTestPayout(t *testing.T) *Payout {
 	if err != nil {
 		t.Fatalf("NewMoney: %v", err)
 	}
-	p, err := NewPayout(NewPayoutID(), testTenant, money, testBankAccount())
+	p, err := NewPayout(NewPayoutID(), testTenant, money, testBankAccount(), "test-key")
 	if err != nil {
 		t.Fatalf("NewPayout: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestNewPayout(t *testing.T) {
 	money, _ := NewMoney(5000, "ARS")
 	before := time.Now().UTC()
 
-	p, err := NewPayout(id, testTenant, money, testBankAccount())
+	p, err := NewPayout(id, testTenant, money, testBankAccount(), "test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestNewPayout(t *testing.T) {
 
 func TestPayout_PullEvents(t *testing.T) {
 	money, _ := NewMoney(100, "ARS")
-	p, _ := NewPayout(NewPayoutID(), testTenant, money, testBankAccount())
+	p, _ := NewPayout(NewPayoutID(), testTenant, money, testBankAccount(), "test-key")
 
 	if got := len(p.PullEvents()); got != 1 {
 		t.Fatalf("first pull = %d events, want 1", got)
