@@ -76,11 +76,6 @@ func NewAddWatchlistEntryUseCase(watchlist WatchlistRepository, clock Clock) *Ad
 }
 
 func (uc *AddWatchlistEntryUseCase) Execute(ctx context.Context, cmd AddWatchlistEntryCmd) error {
-	switch cmd.ListType {
-	case "sanctions", "pep":
-	default:
-		return domain.ErrInvalidListType
-	}
 	entry := domain.WatchlistEntry{
 		ID:       uuid.NewString(),
 		FullName: cmd.FullName,
