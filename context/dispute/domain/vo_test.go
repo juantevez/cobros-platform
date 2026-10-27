@@ -109,10 +109,12 @@ func TestParseResolutionOutcome(t *testing.T) {
 }
 
 func TestNewEvidence(t *testing.T) {
-	before := time.Now().UTC()
+	now := time.Now().UTC()
 	id := NewEvidenceID()
-	e := NewEvidence(id, "receipt", "s3://ref", "comprobante")
-	after := time.Now().UTC()
+	e, err := NewEvidence(id, "receipt", "s3://ref", "comprobante", now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if e.ID() != id || e.EvidenceType() != "receipt" || e.Reference() != "s3://ref" {
 		t.Errorf("fields mismatch: %+v", e)
@@ -120,8 +122,8 @@ func TestNewEvidence(t *testing.T) {
 	if e.Description() != "comprobante" {
 		t.Errorf("description = %q", e.Description())
 	}
-	if e.SubmittedAt().Before(before) || e.SubmittedAt().After(after) {
-		t.Errorf("submittedAt %v not within [%v,%v]", e.SubmittedAt(), before, after)
+	if !e.SubmittedAt().Equal(now) {
+		t.Errorf("submittedAt = %v, want %v", e.SubmittedAt(), now)
 	}
 	if e.SubmittedAt().Location() != time.UTC {
 		t.Errorf("submittedAt not UTC")

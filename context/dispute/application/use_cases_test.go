@@ -39,7 +39,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 	t.Run("opens dispute, saves and publishes", func(t *testing.T) {
 		r := newRepo()
 		p := &fakePublisher{}
-		uc := NewOpenDisputeUseCase(r, fakeTx{}, p)
+		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, p, newClock())
 
 		res, err := uc.Execute(context.Background(), baseCmd())
 		if err != nil {
@@ -61,7 +61,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 
 	t.Run("default deadline applied when zero", func(t *testing.T) {
 		r := newRepo()
-		uc := NewOpenDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		if _, err := uc.Execute(context.Background(), baseCmd()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -76,7 +76,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 
 	t.Run("explicit deadline preserved", func(t *testing.T) {
 		r := newRepo()
-		uc := NewOpenDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := baseCmd()
 		cmd.Deadline = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 		if _, err := uc.Execute(context.Background(), cmd); err != nil {
@@ -88,7 +88,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 	})
 
 	t.Run("invalid tenant rejected", func(t *testing.T) {
-		uc := NewOpenDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewOpenDisputeUseCase(newRepo(), fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := baseCmd()
 		cmd.TenantID = "bad"
 		if _, err := uc.Execute(context.Background(), cmd); err == nil {
@@ -97,7 +97,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 	})
 
 	t.Run("invalid reason rejected", func(t *testing.T) {
-		uc := NewOpenDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewOpenDisputeUseCase(newRepo(), fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := baseCmd()
 		cmd.Reason = "bogus"
 		if _, err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrInvalidDisputeReason) {
@@ -109,7 +109,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 		r := newRepo()
 		tid := tenantID(t)
 		seedOpen(r, tid, time.Now().Add(24*time.Hour))
-		uc := NewOpenDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := baseCmd()
 		cmd.TenantID = tid.String()
 		cmd.PaymentID = "pay-1" // ya existe
@@ -119,7 +119,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 	})
 
 	t.Run("invalid domain (empty payment) rejected", func(t *testing.T) {
-		uc := NewOpenDisputeUseCase(newRepo(), fakeTx{}, &fakePublisher{})
+		uc := NewOpenDisputeUseCase(newRepo(), fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := baseCmd()
 		cmd.PaymentID = ""
 		if _, err := uc.Execute(context.Background(), cmd); err == nil {
@@ -130,7 +130,7 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 	t.Run("save error propagated", func(t *testing.T) {
 		r := newRepo()
 		r.saveErr = errBoom
-		uc := NewOpenDisputeUseCase(r, fakeTx{}, &fakePublisher{})
+		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		if _, err := uc.Execute(context.Background(), baseCmd()); !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}

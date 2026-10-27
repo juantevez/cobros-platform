@@ -18,11 +18,12 @@ func TestExpiryPoller_runCycle(t *testing.T) {
 	past := testNow.Add(-time.Hour)
 
 	// overdueDispute crea una disputa abierta con deadline vencido.
+	// NewDispute rechaza deadlines pasados (ErrInvalidDeadline), así que se
+	// reconstituye como si viniera del repositorio (status open, version 1).
 	overdueDispute := func() *domain.Dispute {
-		d, _ := domain.NewDispute(domain.NewDisputeID(), domain.TenantID("t"), "pay-1", "psp", 5000, "ARS",
-			domain.ReasonGeneral, past)
-		d.PullEvents()
-		return d
+		return domain.ReconstituteDispute(domain.NewDisputeID(), domain.TenantID("t"),
+			"pay-1", "psp", 5000, "ARS", domain.ReasonGeneral, domain.StatusOpen,
+			nil, "", "", past, testNow, nil, nil, 1)
 	}
 
 	t.Run("expires overdue disputes and publishes", func(t *testing.T) {
@@ -69,10 +70,11 @@ func TestExpiryPoller_runCycle(t *testing.T) {
 	t.Run("skips disputes that cannot expire", func(t *testing.T) {
 		r := newRepo()
 		// Una disputa ya aceptada no puede expirar; Expire() falla y se saltea.
-		accepted, _ := domain.NewDispute(domain.NewDisputeID(), domain.TenantID("t"), "pay-2", "psp", 5000, "ARS",
-			domain.ReasonGeneral, past)
-		_ = accepted.Accept("")
-		accepted.PullEvents()
+		// Se reconstituye directamente en status accepted (NewDispute solo crea open
+		// y rechazaría un deadline pasado).
+		accepted := domain.ReconstituteDispute(domain.NewDisputeID(), domain.TenantID("t"),
+			"pay-2", "psp", 5000, "ARS", domain.ReasonGeneral, domain.StatusAccepted,
+			nil, "", "", past, testNow, nil, &past, 1)
 		r.overdue = []*domain.Dispute{accepted}
 		poller := NewExpiryPoller(r, fakeTx{}, &fakePublisher{}, newClock(), discardLogger())
 
