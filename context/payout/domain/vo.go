@@ -43,9 +43,16 @@ const (
 	// StatusFailed: la transferencia falló (cuenta inválida, rechazo bancario).
 	// El asiento en Ledger se revierte automáticamente.
 	StatusFailed PayoutStatus = "failed"
+	// StatusUnknown: el banco no respondió (timeout / error de red). NO es un
+	// estado final: los fondos siguen en payout_transit y el dinero puede haber
+	// sido acreditado o no. Debe resolverse por reconciliación antes de cerrar.
+	StatusUnknown PayoutStatus = "unknown"
 )
 
 func (s PayoutStatus) String() string { return string(s) }
+
+// IsFinal indica que el payout no admite más transiciones.
+// StatusUnknown NO es final: requiere resolución (§10.3).
 func (s PayoutStatus) IsFinal() bool {
 	return s == StatusConfirmed || s == StatusFailed
 }

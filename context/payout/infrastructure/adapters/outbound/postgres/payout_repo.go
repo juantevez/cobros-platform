@@ -7,10 +7,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juantevez/cobros-platform/context/payout/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
+
+const pgErrUniqueViolation = "23505"
 
 type pgPayoutRepository struct {
 	pool postgres.Conn
@@ -62,6 +65,18 @@ func (r *pgPayoutRepository) FindByID(ctx context.Context, id domain.PayoutID) (
 	return scanPayout(row)
 }
 
+// FindByIdempotencyKey busca el payout del tenant con la clave dada.
+// Usa la columna idempotency_key con su índice UNIQUE parcial.
+func (r *pgPayoutRepository) FindByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, key string) (*domain.Payout, error) {
+if key == "" {
+return nil, domain.ErrPayoutNotFound
+}
+conn := postgres.ConnFromContext(ctx, r.pool)
+row := conn.QueryRow(ctx, baseSelect+" WHERE tenant_id=$1 AND idempotency_key=$2",
+tenantID.String(), key)
+return scanPayout(row)
+}
+
 func (r *pgPayoutRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Payout, error) {
 	conn := postgres.ConnFromContext(ctx, r.pool)
 	rows, err := conn.Query(ctx, baseSelect+" WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2",
@@ -94,7 +109,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 	var (
 		idStr, tenantIDStr, currency                        string
 		acctType, acctNum, bankName, holderName             string
-		status, bankRef, failReason, ledgerKey              string
+		status, bankRef, failReason, ledgerKey, idemKey            string
 		amount                                              int64
 		initiatedAt, confirmedAt, failedAt                  *time.Time
 		createdAt, updatedAt                                time.Time
@@ -113,7 +128,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		return nil, fmt.Errorf("payout repo: scan: %w", err)
 	}
 
-	return domain.ReconstitutePayout(
+	return domain.ReconstitutePayoutWithIdempotency(
 		domain.PayoutID(idStr),
 		domain.TenantID(tenantIDStr),
 		domain.ReconstituteMoney(amount, currency),

@@ -65,3 +65,18 @@ type PayoutFailedEvent struct {
 }
 
 func (e PayoutFailedEvent) EventType() string { return "payout.failed.v1" }
+
+// PayoutUnknownEvent se emite cuando el resultado de la transferencia es
+// INDETERMINADO (timeout / error de red del banco). A diferencia de
+// PayoutFailedEvent, NO provoca reversa en el Ledger: los fondos permanecen
+// en payout_transit hasta que la reconciliación resuelva el payout.
+type PayoutUnknownEvent struct {
+	baseEvent
+	PayoutID      string `json:"payout_id"`
+	TenantID      string `json:"tenant_id"`
+	Amount        int64  `json:"amount"`
+	Currency      string `json:"currency"`
+	FailureReason string `json:"failure_reason"` // motivo técnico (timeout, red, etc.)
+}
+
+func (e PayoutUnknownEvent) EventType() string { return "payout.unknown.v1" }
