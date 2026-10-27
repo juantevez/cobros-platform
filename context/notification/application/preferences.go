@@ -22,14 +22,21 @@ func (uc *UpdatePreferenceUseCase) Execute(ctx context.Context, cmd UpdatePrefer
 		return err
 	}
 
+	// Normalizar al event type canónico del catálogo: la preferencia SIEMPRE
+	// se guarda bajo la clave sin versión ("payment.captured.v1" →
+	// "payment.captured"). Así la clave que acepta el PUT es exactamente la
+	// que muestra el GET y la que busca el consumer al resolver el
+	// destinatario.
+	eventType := domain.NormalizeEventType(cmd.EventType)
+
 	// Validar que el event type tiene template registrado.
-	if _, ok := domain.FindTemplate(cmd.EventType); !ok {
+	if _, ok := domain.FindTemplate(eventType); !ok {
 		return fmt.Errorf("no template registered for event type %q", cmd.EventType)
 	}
 
 	pref := domain.NewNotificationPreference(
 		tenantID,
-		cmd.EventType,
+		eventType,
 		domain.ChannelEmail,
 		cmd.Enabled,
 		cmd.RecipientEmail,
@@ -61,9 +68,15 @@ func (uc *GetPreferencesUseCase) Execute(ctx context.Context, q GetPreferencesQu
 		return nil, fmt.Errorf("list preferences: %w", err)
 	}
 
+	// Indexar por event type NORMALIZADO: tolera filas legacy escritas con
+	// sufijo de versión ("payment.captured.v1") y las muestra bajo la misma
+	// clave canónica que acepta el PUT.
 	savedIndex := make(map[string]*domain.NotificationPreference)
 	for _, p := range saved {
-		savedIndex[p.EventType()] = p
+		key := domain.NormalizeEventType(p.EventType())
+		if prev, ok := savedIndex[key]; !ok || prev.UpdatedAt().Before(p.UpdatedAt()) {
+			savedIndex[key] = p
+		}
 	}
 
 	// Construir la vista completa: para cada event type con template,
@@ -73,7 +86,9 @@ func (uc *GetPreferencesUseCase) Execute(ctx context.Context, q GetPreferencesQu
 	for _, et := range allEventTypes {
 		if pref, ok := savedIndex[et]; ok {
 			views = append(views, PreferenceView{
-				EventType:      pref.EventType(),
+				// Mostrar SIEMPRE la clave canónica (normalizada), que es la
+				// misma que el cliente debe usar en el PUT.
+				EventType:      et,
 				Channel:        pref.Channel().String(),
 				Enabled:        pref.Enabled(),
 				RecipientEmail: pref.RecipientEmail(),

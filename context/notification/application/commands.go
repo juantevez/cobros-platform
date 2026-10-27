@@ -3,8 +3,9 @@ package application
 // SendNotificationCmd es el comando interno usado por el consumer NATS.
 type SendNotificationCmd struct {
 	TenantID       string
-	EventType      string            // ej: "payment.captured.v1"
+	EventType      string            // ej: "payment.captured.v1" (se normaliza internamente)
 	TemplateData   map[string]string // datos para renderizar el template
+	NatsMsgID      string            // ID del mensaje NATS (Nats-Msg-Id) para dedupe/idempotencia
 }
 
 // UpdatePreferenceCmd actualiza una preferencia de notificación.

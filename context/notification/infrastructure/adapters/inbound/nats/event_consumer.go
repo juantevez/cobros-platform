@@ -15,6 +15,7 @@ type eventPayload struct {
 	TenantID        string `json:"tenant_id"`
 	PaymentID       string `json:"payment_id"`
 	Amount          int64  `json:"amount"`
+	RefundAmount    int64  `json:"refund_amount"` // PaymentRefundedEvent usa refund_amount, no amount
 	Currency        string `json:"currency"`
 	FailureReason   string `json:"failure_reason"`
 	PaymentMethod   string `json:"payment_method"`
@@ -80,13 +81,20 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 		TenantID:     p.TenantID,
 		EventType:    msg.Subject,
 		TemplateData: data,
+		// ID del mensaje NATS (Nats-Msg-Id = EventID del evento de dominio):
+		// clave natural de dedupe/idempotencia del consumo.
+		NatsMsgID: msg.ID,
 	}); err != nil {
 		c.logger.Error("notification consumer: send failed",
 			"subject", msg.Subject,
 			"tenant_id", p.TenantID,
 			"error", err,
 		)
-		// No retornamos el error → ack (las notificaciones no son críticas).
+		// Retornamos el error → nak: si falló la verificación de dedupe
+		// (transitorio), la reentrega reintentará; el dedupe evita que el
+		// reintento duplique el envío. Si el handler siempre ackeaba, un
+		// fallo de BD impedía notificar jamás.
+		return err
 	}
 
 	return nil
@@ -112,9 +120,16 @@ func buildTemplateData(subject string, p eventPayload) map[string]string {
 			"failure_reason": p.FailureReason,
 		}
 	case "payment.refunded.v1":
+		// PaymentRefundedEvent publica refund_amount (no amount): mapearlo a
+		// la clave del template; si viniera 0, tolerar eventos que usen
+		// "amount" directamente.
+		refund := p.RefundAmount
+		if refund == 0 {
+			refund = p.Amount
+		}
 		return map[string]string{
 			"payment_id": p.PaymentID,
-			"amount":     amountStr,
+			"amount":     fmt.Sprintf("%.2f", float64(refund)/100),
 			"currency":   p.Currency,
 		}
 	case "payout.confirmed.v1":
