@@ -84,7 +84,7 @@ func TestPayoutRepository_Save(t *testing.T) {
 			int64(5000), "ARS",
 			"CBU", "0170099220000067797370", strPtr("Banco Test"), "Comercio SA",
 			"initiated", (*string)(nil), (*string)(nil),
-			p.LedgerEntryKey(),
+			p.LedgerEntryKey(), p.IdempotencyKey(),
 			(*time.Time)(nil), (*time.Time)(nil), (*time.Time)(nil),
 			p.CreatedAt(), p.UpdatedAt(),
 		).WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -101,7 +101,7 @@ func TestPayoutRepository_Save(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPayoutRepository(mock)
 
-		mock.ExpectExec("INSERT INTO payouts").WithArgs(anyArgs(17)...).WillReturnError(errBoom)
+		mock.ExpectExec("INSERT INTO payouts").WithArgs(anyArgs(18)...).WillReturnError(errBoom)
 
 		err := repo.Save(context.Background(), newPayout(t))
 		if !errors.Is(err, errBoom) {
