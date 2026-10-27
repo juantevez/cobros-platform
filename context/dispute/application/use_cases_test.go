@@ -61,7 +61,8 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 
 	t.Run("default deadline applied when zero", func(t *testing.T) {
 		r := newRepo()
-		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
+		clock := newClock()
+		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, clock)
 		if _, err := uc.Execute(context.Background(), baseCmd()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -69,8 +70,13 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 		if d.Deadline().IsZero() {
 			t.Error("deadline should have been defaulted")
 		}
-		if d.Deadline().Before(time.Now()) {
-			t.Error("default deadline should be in the future")
+		// El deadline por defecto se corre desde el reloj inyectado al caso de uso,
+		// no desde el wall clock: así el test es determinístico y no depende de la
+		// fecha en que se ejecuta (con un reloj fijo en el pasado, comparar contra
+		// time.Now() real fallaba).
+		want := clock.Now().Add(defaultResponseWindow)
+		if !d.Deadline().Equal(want) {
+			t.Errorf("default deadline = %v, want %v", d.Deadline(), want)
 		}
 	})
 

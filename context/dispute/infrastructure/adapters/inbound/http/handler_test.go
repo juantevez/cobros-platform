@@ -85,7 +85,19 @@ func (fakePayments) FindPayment(ctx context.Context, paymentID string) (domain.P
 
 type fixedClock struct{}
 
-func (fixedClock) Now() time.Time { return time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC) }
+func (fixedClock) Now() time.Time { return testNow }
+
+// testNow es el instante fijo del reloj inyectado en los casos de uso. El deadline
+// del body de OpenDispute se corre desde acá (y no desde una fecha absoluta) para
+// que el handler reciba siempre un plazo vigente: un deadline hardcodeado vence
+// algún día y el test deja de ser determinístico.
+var testNow = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+// openBody arma el JSON de apertura con un deadline futuro relativo a testNow.
+func openBody(paymentID string) string {
+	return `{"payment_id":"` + paymentID + `","amount":5000,"currency":"ARS",` +
+		`"reason":"fraudulent","deadline":"` + testNow.Add(48*time.Hour).Format(time.RFC3339) + `"}`
+}
 
 func newHandler(r *fakeRepo) *DisputeHandler {
 	return NewDisputeHandler(
@@ -134,7 +146,7 @@ func TestOpen(t *testing.T) {
 
 	t.Run("creates dispute returns 201", func(t *testing.T) {
 		rec := doRequest(newHandler(newRepo()).Open, http.MethodPost, "/disputes",
-			`{"payment_id":"pay-1","amount":5000,"currency":"ARS","reason":"fraudulent","deadline":"2026-08-01T00:00:00Z"}`,
+			openBody("pay-1"),
 			tid.String(), nil)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201", rec.Code)

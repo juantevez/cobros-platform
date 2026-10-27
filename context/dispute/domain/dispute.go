@@ -152,6 +152,10 @@ func ReconstituteDispute(
 		deadline: deadline, openedAt: openedAt,
 		respondedAt: respondedAt, resolvedAt: resolvedAt,
 		version: loadedVersion,
+		// El monto capturado no se persiste en la fila (es una foto del pago al
+		// momento de abrir la disputa): al reconstituir se toma como referencia
+		// el propio monto disputado, que nunca lo excede (validado en NewDispute).
+		capturedAmount: amount,
 	}
 }
 
@@ -179,14 +183,13 @@ func (d *Dispute) Contest(evidence []Evidence, note string, now time.Time) error
 }
 
 // Accept acepta la disputa sin contestar (el comercio reconoce la devolución).
-// now se valida contra el deadline: aceptar después de vencido el plazo ya no
-// tiene sentido (el poller cerrará la disputa como expired).
+// A diferencia de Contest, el plazo no es una guard: el comercio puede aceptar
+// una disputa aunque haya vencido el deadline (de hecho suele ser la decisión
+// natural del que nunca presentó evidencia); el poller cierra como expired solo
+// las que siguen abiertas.
 func (d *Dispute) Accept(note string, now time.Time) error {
 	if d.status != StatusOpen {
 		return fmt.Errorf("%w: cannot accept from %q", ErrInvalidTransition, d.status)
-	}
-	if now.After(d.deadline) {
-		return ErrDisputeExpired
 	}
 
 	now = now.UTC()
@@ -321,9 +324,19 @@ func (d *Dispute) ResolvedAt() *time.Time  { return d.resolvedAt }
 // repositorio como expectedVersion (concurrencia optimista).
 func (d *Dispute) Version() int64 { return d.version }
 
-// IsOverdue retorna true si el plazo de respuesta venció y sigue abierta.
+// IsOverdue retorna true si el plazo de respuesta venció y la disputa sigue
+// sin resolución. Las disputas cerradas por el banco (won/lost) nunca están
+// vencidas: el deadline dejó de importar en el momento del cierre. En cambio,
+// una disputa aceptada o expirada después de vencido el plazo sí lo estuvo:
+// "overdue" alimenta el SLA de respuesta del comercio, y cerrar tarde no borra
+// que se respondió fuera de término.
 func (d *Dispute) IsOverdue(now time.Time) bool {
-	return d.status == StatusOpen && now.After(d.deadline)
+	switch d.status {
+	case StatusWon, StatusLost:
+		return false
+	default:
+		return now.After(d.deadline)
+	}
 }
 
 func (d *Dispute) PullEvents() []Event {

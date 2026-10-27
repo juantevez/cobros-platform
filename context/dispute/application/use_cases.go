@@ -53,6 +53,10 @@ func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (
 		return OpenDisputeResult{}, err
 	}
 
+	// now se resuelve con el reloj inyectado: en producción es time.Now(), pero
+	// los tests lo fijan para poder construir disputas con deadlines relativos a
+	// "ahora" (un deadline fijo en el tiempo eventualmente vence, y un caso de uso
+	// que dependa del reloj real no es determinístico).
 	now := uc.clock.Now()
 
 	// Idempotencia: solo una disputa por pago. Un error de infraestructura NO
