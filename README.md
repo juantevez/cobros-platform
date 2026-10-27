@@ -52,7 +52,7 @@ El `domain` no conoce a nadie. La `application` define puertos (interfaces) e im
 
 ### Comunicación entre contextos
 
-Los contextos **no se llaman entre sí directamente**. Toda integración ocurre por **eventos de dominio** publicados en NATS JetStream vía el patrón **Transactional Outbox**:
+Los contextos se integran por **eventos de dominio** publicados en NATS JetStream vía el patrón **Transactional Outbox**:
 
 ```
 Caso de uso
@@ -66,6 +66,8 @@ cmd/worker (relay)
               publica en JetStream (Nats-Msg-Id para deduplicación)
               marca como publicado
 ```
+
+**Única excepción síncrona:** Payment calcula la comisión de cada cobro llamando in-process a `billing.CalculateFeeUseCase` (adaptador `fees.BillingFeeCalculator` en Payment; Billing no conoce a Payment). Ver [BILLING.md §9](docs/technical/BILLING.md).
 
 ### Multi-tenancy
 
@@ -81,25 +83,30 @@ El `TxManager` ejecuta `set_config('app.current_tenant', $1, true)` al inicio de
 cobros-platform/
 ├── cmd/
 │   ├── api/            # Servidor HTTP (todos los contextos)
-│   └── worker/         # Relay del Outbox → NATS JetStream
+│   └── worker/         # Relay del Outbox → NATS + consumers de eventos + pollers
 │
 ├── context/            # Contextos acotados (Bounded Contexts)
-│   ├── auth/           # ✅ Auth & Multi-Tenant
-│   │   ├── domain/
-│   │   ├── application/
-│   │   └── infrastructure/adapters/{inbound/http, outbound/{postgres,events,token,crypto}}
-│   ├── ledger/         # ✅ Libro Mayor (doble partida)
-│   │   ├── domain/
-│   │   ├── application/
-│   │   └── infrastructure/adapters/{inbound/http, outbound/{postgres,events}}
-│   └── audit/          # 🚧 Bitácora inmutable (en desarrollo)
+│   ├── auth/           # Auth & Multi-Tenant
+│   ├── ledger/         # Libro Mayor (doble partida)
+│   ├── audit/          # Bitácora inmutable (hash chain)
+│   ├── onboarding/     # KYC/KYB de comercios
+│   ├── payment/        # Payment Processing (PSP router, risk, fees)
+│   ├── payout/         # Desembolsos al comercio
+│   ├── billing/        # Planes de tarifas y cálculo de comisiones
+│   ├── reconciliation/ # Conciliación contra el PSP
+│   ├── webhook/        # Webhooks salientes con reintentos
+│   ├── notification/   # Emails transaccionales
+│   ├── dispute/        # Disputas y contracargos
+│   ├── reporting/      # Read-model CQRS para dashboard
+│   └── compliance/     # Screening y monitoreo AML
 │
 ├── pkg/                # Código transversal (no de dominio)
-│   ├── postgres/       # Pool, TxManager, RLS helper, ConnFromContext
+│   ├── postgres/       # Pool, TxManager, RLS (WithAppTenant/RunWithAppTenant), ConnFromContext
 │   ├── eventbus/       # Abstracción sobre NATS JetStream
 │   ├── outbox/         # Transactional Outbox (Store + Relay)
 │   └── config/         # Carga de configuración desde env vars
 │
+├── docs/technical/     # Documentación técnico-funcional por contexto
 ├── migrations/         # SQL versionado (golang-migrate)
 ├── deploy/docker/      # Docker Compose + Dockerfile multi-stage
 └── Makefile
@@ -124,6 +131,24 @@ context/<nombre>/
 ---
 
 ## Contextos implementados
+
+La documentación técnico-funcional de cada contexto (modelo, casos de uso, API, eventos, persistencia) vive en [`docs/technical/`](docs/technical/). Abajo se resumen algunos.
+
+| Contexto | Responsabilidad | Doc |
+|---|---|---|
+| Auth & Multi-Tenant | Tenants, usuarios, roles, JWT y API keys | [AUTH.md](docs/technical/AUTH.md) |
+| Ledger | Libro mayor de doble partida, fuente de verdad del dinero | [LEDGER.md](docs/technical/LEDGER.md) |
+| Audit | Bitácora inmutable con verificación de cadena | *(pendiente)* |
+| Onboarding | Solicitudes KYC/KYB y revisión por operador | [ONBOARDING.md](docs/technical/ONBOARDING.md) |
+| Payment Processing | Cobros contra PSP con evaluación de riesgo y comisión | [PAYMENT.md](docs/technical/PAYMENT.md) |
+| Payouts | Desembolsos del saldo del comercio a su banco | [PAYOUT.md](docs/technical/PAYOUT.md) |
+| Billing & Fees | Planes de tarifas, asignación por tenant y cálculo de comisión | [BILLING.md](docs/technical/BILLING.md) |
+| Reconciliation | Conciliación de registros internos contra fuentes externas, con gestión de discrepancias | *(pendiente)* |
+| Webhooks | Entrega de eventos a endpoints del comercio con reintentos | *(pendiente)* |
+| Notifications | Emails transaccionales con preferencias por tenant | [NOTIFICATION.md](docs/technical/NOTIFICATION.md) |
+| Disputes | Disputas y contracargos con impacto en Ledger | [DISPUTE.md](docs/technical/DISPUTE.md) |
+| Dashboard & Reporting | Read-model CQRS de volumen, comisiones y saldos | *(pendiente)* |
+| Compliance & AML | Screening contra watchlist y monitoreo transaccional | [COMPLIANCE.md](docs/technical/COMPLIANCE.md) |
 
 ### ✅ Auth & Multi-Tenant
 
@@ -175,10 +200,10 @@ Contabilidad de doble partida como única fuente de verdad del dinero.
 **Endpoints:**
 
 ```
-POST  /api/v1/ledger/accounts                         Crear cuenta contable  [JWT]
+POST  /api/v1/ledger/accounts                         Crear cuenta contable  [JWT + platform_support]
 GET   /api/v1/ledger/accounts/:accountID/balance      Consultar saldo        [JWT]
-POST  /api/v1/ledger/entries                          Registrar asiento      [JWT]
-POST  /api/v1/ledger/entries/:entryID/reverse         Crear reversa          [JWT]
+POST  /api/v1/ledger/entries                          Registrar asiento      [JWT + platform_support]
+POST  /api/v1/ledger/entries/:entryID/reverse         Crear reversa          [JWT + platform_support]
 ```
 
 **Ejemplo de asiento (pago acreditado):**
@@ -254,7 +279,7 @@ POST /api/v1/compliance/watchlist                      Agregar entrada         [
 
 ---
 
-## Módulos pendientes (Roadmap)
+## Roadmap
 
 | Fase | Contexto | Estado |
 |---|---|---|
@@ -315,6 +340,8 @@ make run-worker
 | Variable | Default (dev) | Descripción |
 |---|---|---|
 | `HTTP_ADDR` | `:8080` | Dirección del servidor HTTP |
+| `HTTP_READ_TIMEOUT_SEC` | `10` | Timeout de lectura HTTP |
+| `HTTP_WRITE_TIMEOUT_SEC` | `30` | Timeout de escritura HTTP |
 | `DATABASE_URL` | `postgres://cobros:cobros@localhost:5432/cobros?sslmode=disable` | DSN de PostgreSQL |
 | `NATS_URL` | `nats://localhost:4222` | URL de NATS |
 | `JWT_SECRET` | *(valor de dev)* | Secreto para firmar JWT (mín. 32 chars) |
@@ -322,6 +349,11 @@ make run-worker
 | `OUTBOX_BATCH_SIZE` | `50` | Mensajes por ciclo del relay |
 | `DB_MAX_CONNS` | `25` | Máximo de conexiones al pool |
 | `DB_MIN_CONNS` | `5` | Mínimo de conexiones al pool |
+| `SMTP_HOST` | *(vacío)* | Servidor SMTP del worker. Vacío ⇒ los emails se loguean en stdout (dev) |
+| `SMTP_PORT` | `587` | Puerto SMTP |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | *(vacío)* | Credenciales SMTP |
+| `SMTP_FROM` | `noreply@cobros-platform.com` | Remitente de los emails |
+| `SMTP_USE_TLS` | `false` | `true` ⇒ TLS implícito (puerto 465); si no, STARTTLS cuando el servidor lo ofrece |
 
 > ⚠️ **En producción**, `JWT_SECRET` debe generarse con `openssl rand -hex 32` y gestionarse con un secret manager.
 
@@ -336,7 +368,7 @@ make test          # Correr tests con -race
 make lint          # Linter (requiere golangci-lint)
 make build         # Compilar ambos binarios en bin/
 make run-api       # go run ./cmd/api
-make run-worker    # go run ./cmd/worker
+make run-worker    # go run ./cmd/worker (relay + consumers)
 ```
 
 ---
@@ -360,28 +392,23 @@ make run-worker    # go run ./cmd/worker
 
 Convención de subjects: `<contexto>.<agregado>.<hecho>.<versión>`
 
-| Subject | Descripción |
+Subjects publicados hoy, por stream:
+
+| Stream | Subjects |
 |---|---|
-| `auth.tenant.created.v1` | Comercio registrado |
-| `auth.tenant.activated.v1` | Comercio activado |
-| `auth.tenant.suspended.v1` | Comercio suspendido |
-| `auth.user.registered.v1` | Usuario registrado |
-| `auth.apikey.issued.v1` | API key emitida |
-| `auth.apikey.revoked.v1` | API key revocada |
-| `auth.role.assigned.v1` | Rol asignado |
-| `ledger.account.created.v1` | Cuenta contable creada |
-| `ledger.entry.posted.v1` | Asiento contable registrado |
-| `ledger.entry.reversed.v1` | Asiento revertido |
-| `compliance.alert.raised.v1` | Alerta de AML generada |
-| `compliance.alert.resolved.v1` | Alerta dispuesta por un analista |
+| `AUTH` (`auth.>`) | `auth.tenant.{created,activated,suspended}.v1`, `auth.user.{registered,suspended}.v1`, `auth.apikey.{issued,revoked}.v1`, `auth.role.assigned.v1` |
+| `LEDGER` (`ledger.>`) | `ledger.account.created.v1`, `ledger.entry.{posted,reversed}.v1` |
+| `ONBOARDING` (`onboarding.>`) | `onboarding.application.{submitted,approved,rejected,more_info}.v1` |
+| `PAYMENT` (`payment.>`) | `payment.{captured,failed,refunded}.v1` |
+| `PAYOUT` (`payout.>`) | `payout.{initiated,confirmed,failed,unknown}.v1` |
+| `BILLING` (`billing.>`) | `billing.plan.{created,assigned,updated,deactivated}.v1` |
+| `WEBHOOK` (`webhook.>`) | `webhook.endpoint.{registered,deactivated}.v1`, `webhook.delivery.exhausted.v1` |
+| `RECONCILIATION` (`reconciliation.>`) | `reconciliation.run.completed.v1` |
+| `DISPUTE` (`dispute.>`) | `dispute.{opened,resolved}.v1` |
+| `COMPLIANCE` (`compliance.>`) | `compliance.alert.{raised,resolved}.v1` |
+| `NOTIFICATION` (`notification.>`) | *(stream creado; sin eventos publicados)* |
 
-**Streams JetStream:**
-
-```
-AUTH       → subjects: auth.>
-LEDGER     → subjects: ledger.>
-COMPLIANCE → subjects: compliance.>
-```
+Streams definidos en [`pkg/eventbus/stream.go`](pkg/eventbus/stream.go). Productores y consumidores de cada subject: ver el doc del contexto.
 
 ---
 
@@ -390,16 +417,18 @@ COMPLIANCE → subjects: compliance.>
 ```
 Cliente paga
     ↓
-[Payment Processing] captura contra PSP
+[Fraud & Risk] evalúa la operación (antes de capturar)
     ↓
-[Fraud & Risk] evalúa la operación
+[Billing & Fees] calcula la comisión del plan del tenant (in-process)
+    ↓
+[Payment Processing] captura contra PSP → payment.captured.v1
     ↓
 [Ledger] registra asiento:
     in_transit         CREDIT  $100
     merchant_balance   DEBIT   $ 97
     platform_fees      DEBIT   $  3
     ↓
-[Outbox → NATS] publica ledger.entry.posted.v1
+[Outbox → NATS] publica ledger.entry.posted.v1 (lo consumen Reporting y Audit)
     ↓
 [Payouts] calcula saldo disponible del comercio
     ↓

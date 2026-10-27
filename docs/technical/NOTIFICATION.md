@@ -28,8 +28,8 @@ bloquea ni reintenta (a diferencia de Webhooks, que sí tiene retry poller).
 
 | Puerto | Implementación cableada | Comentario |
 |---|---|---|
-| `EmailSender` (worker) | **`LogSender` siempre** | `cmd/worker/main.go` instancia `LogSender` sin mirar `SMTP_*`; en producción **no salen emails reales** por este camino. |
-| `EmailSender` (API) | `SMTPSender` si `cfg.SMTPHost != ""`, else `LogSender` | El use case de envío está cableado en `cmd/api/main.go` pero `_ = sendNotif`: **el API no envía**, solo sirve consultas/preferences. |
+| `EmailSender` (worker) | `SMTPSender` si `cfg.SMTPHost != ""`, else `LogSender` | `cmd/worker/main.go` es el único que envía: consume los eventos y ejecuta `SendNotification`. Sin `SMTP_HOST` (dev) los emails se loguean. |
+| API | — | `cmd/api/main.go` solo expone historial y preferencias; no instancia sender ni `SendNotification`. |
 | `UserContactReader` | `postgres.ContactReader` | Lee `users ⨝ memberships` (tablas del contexto Auth, misma BD): primer admin `status='active'` ordenado por `memberships.created_at ASC`. |
 | `NotificationRepository` / `PreferenceRepository` | `postgres.*` (pgx pool) | Ver §8. |
 | Consumers NATS | 4, `MaxDeliver: 3` | Pero el handler siempre retorna `nil` → **nunca hay redelivery efectivo** (§7.3). |
@@ -263,10 +263,8 @@ determina en memoria antes de persistir) y `UPSERT … ON CONFLICT` en preferenc
 
 Ordenadas por severidad. 🔴 bug funcional · 🟡 comportamiento cuestionable · ⚪ deuda/fase 4.
 
-1. 🔴 **Los emails nunca se envían en producción (worker).** `cmd/worker/main.go` fija
-   `notifEmailSender := NewLogSender(...)` ignorando la config SMTP; solo registra
-   "📧 [DEV] Email simulado". El `SMTPSender` cableado en el API es inalcanzable porque
-   `_ = sendNotif` (§1).
+1. ✅ **Resuelto — emails en producción.** El worker usa `SMTPSender` cuando `SMTP_HOST`
+   está configurado (§1).
 2. 🔴 **`payment.refunded.v1` renderiza `0.00`**: `buildTemplateData` lee `p.Amount` (JSON
    `amount`), pero `PaymentRefundedEvent` publica `refund_amount`. Corregir mapeando
    `refund_amount` (el test actual fija el comportamiento incorrecto, §11).
@@ -351,5 +349,5 @@ context/notification/
         └── postgres/repos.go            # pgNotificationRepository, pgPreferenceRepository, ContactReader
 ```
 
-Wiring: `cmd/api/main.go` (solo API de lectura/preferencias + sender SMTP condicional) y
-`cmd/worker/main.go` (consumidores NATS + LogSender fijo → ver bug §10.1).
+Wiring: `cmd/api/main.go` (solo API de lectura/preferencias) y
+`cmd/worker/main.go` (consumidores NATS + `SendNotification` + sender SMTP condicional).

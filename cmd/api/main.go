@@ -39,7 +39,6 @@ import (
 	ledgerpg "github.com/juantevez/cobros-platform/context/ledger/infrastructure/adapters/outbound/postgres"
 	notificationapp "github.com/juantevez/cobros-platform/context/notification/application"
 	notificationhttp "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/inbound/http"
-	notificationemail "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/email"
 	notificationpg "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/postgres"
 	onboardingapp "github.com/juantevez/cobros-platform/context/onboarding/application"
 	onboardingdomain "github.com/juantevez/cobros-platform/context/onboarding/domain"
@@ -328,24 +327,8 @@ func main() {
 
 	notifRepo := notificationpg.NewNotificationRepository(pool)
 	prefRepo := notificationpg.NewPreferenceRepository(pool)
-	contactReader := notificationpg.NewContactReader(pool)
-	// En producción: usar SMTPSender con config desde env vars.
-	// En desarrollo: LogSender loguea en stdout sin enviar.
-	var emailSender notificationapp.EmailSender
-	if cfg.SMTPHost != "" {
-		emailSender = notificationemail.NewSMTPSender(notificationemail.SMTPConfig{
-			Host:     cfg.SMTPHost,
-			Port:     cfg.SMTPPort,
-			Username: cfg.SMTPUsername,
-			Password: cfg.SMTPPassword,
-			From:     cfg.SMTPFrom,
-			UseTLS:   cfg.SMTPUseTLS,
-		})
-	} else {
-		emailSender = notificationemail.NewLogSender(logger.With("component", "email"))
-	}
-
-	sendNotif := notificationapp.NewSendNotificationUseCase(notifRepo, prefRepo, emailSender, contactReader, logger.With("component", "notification"))
+	// El envío de emails (SendNotification + SMTP) vive en cmd/worker, que
+	// consume los eventos; la API solo expone historial y preferencias.
 	listNotifs := notificationapp.NewListNotificationsUseCase(notifRepo)
 	getPrefs := notificationapp.NewGetPreferencesUseCase(prefRepo)
 	updatePref := notificationapp.NewUpdatePreferenceUseCase(prefRepo)
@@ -353,8 +336,6 @@ func main() {
 	notificationhttp.RegisterRoutes(protected, notificationhttp.NewNotificationHandler(
 		listNotifs, getPrefs, updatePref,
 	))
-
-	_ = sendNotif // usado en cmd/worker
 
 	// ── Disputes & Chargebacks ────────────────────────────────────────────────
 

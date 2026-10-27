@@ -242,7 +242,21 @@ func main() {
 	notifRepo    := notificationpg.NewNotificationRepository(pool)
 	notifPrefRepo := notificationpg.NewPreferenceRepository(pool)
 	contactReader := notificationpg.NewContactReader(pool)
-	notifEmailSender := notificationemail.NewLogSender(logger.With("component", "email"))
+	// Con SMTP_HOST configurado se envían emails reales; sin él (dev),
+	// LogSender los loguea en stdout.
+	var notifEmailSender notificationapp.EmailSender
+	if cfg.SMTPHost != "" {
+		notifEmailSender = notificationemail.NewSMTPSender(notificationemail.SMTPConfig{
+			Host:     cfg.SMTPHost,
+			Port:     cfg.SMTPPort,
+			Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword,
+			From:     cfg.SMTPFrom,
+			UseTLS:   cfg.SMTPUseTLS,
+		})
+	} else {
+		notifEmailSender = notificationemail.NewLogSender(logger.With("component", "email"))
+	}
 
 	sendNotif := notificationapp.NewSendNotificationUseCase(
 		notifRepo, notifPrefRepo, notifEmailSender, contactReader,
