@@ -1,7 +1,10 @@
 .PHONY: up down up-app down-app migrate migrate-down seed-dev test lint tidy build
 
 COMPOSE = docker compose -f deploy/docker/docker-compose.yml
-DB_URL  ?= postgres://cobros:cobros@localhost:5432/cobros?sslmode=disable
+# URL vista desde la red de Compose: las migraciones y el seed corren en
+# contenedores, sin requerir los binarios migrate/psql en el host.
+DB_URL  ?= postgres://cobros:cobros@postgres:5432/cobros?sslmode=disable
+MIGRATE  = $(COMPOSE) run --rm migrate -path=/migrations -database="$(DB_URL)"
 
 # ── Infraestructura local (Postgres + NATS) ──────────────────────────────────
 
@@ -22,17 +25,18 @@ down-app:
 # ── Migraciones (golang-migrate) ─────────────────────────────────────────────
 
 migrate:
-	migrate -path ./migrations -database "$(DB_URL)" up
+	$(MIGRATE) up
 
 migrate-down:
-	migrate -path ./migrations -database "$(DB_URL)" down 1
+	$(MIGRATE) down 1
 
 migrate-drop:
-	migrate -path ./migrations -database "$(DB_URL)" drop -f
+	$(MIGRATE) drop -f
 
 # Datos de ejemplo SOLO para desarrollo local (watchlist AML ficticia).
+# Corre psql dentro del contenedor de Postgres.
 seed-dev:
-	psql "$(DB_URL)" -v ON_ERROR_STOP=1 -f deploy/seed/compliance_watchlist.sql
+	$(COMPOSE) exec -T postgres psql -U cobros -d cobros -v ON_ERROR_STOP=1 < deploy/seed/compliance_watchlist.sql
 
 # ── Calidad de código ────────────────────────────────────────────────────────
 
