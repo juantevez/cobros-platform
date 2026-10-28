@@ -23,6 +23,7 @@ Payout orquesta el **desembolso** de fondos desde la plataforma hacia la cuenta 
 | `BankTransferAdapter` | `transfer/mock.Adapter` | Confirma siempre, salvo cuenta `REJECT` (rechazo explícito). El `IdempotencyKey` de la transferencia es `transfer_<payout_id>`; el mock lo ignora. **Nunca usar en producción.** |
 | `BalanceChecker` / `BalanceLocker` | `ledger.BalanceChecker` | Query directa a `account_balances` (cuenta `merchant_balance` del tenant) + `pg_advisory_xact_lock` por `(tenant, currency)`. |
 | `BankAccountProvider` | `onboarding.BankAccountProvider` | Query directa a `onboarding_bank_accounts` unida a solicitudes `approved`. ⚠️ No filtra `verified` ni moneda (§10.6). |
+| `PayoutGate` | `tenant.PayoutGate` | Lee `tenants.status` y `tenant_compliance_holds` (contexto Auth): exige tenant `active` sin hold de cumplimiento vigente. |
 | `EventPublisher` | `outbox.NewEventPublisher` | Publicación transaccional vía Outbox (ver LEDGER.MD §7). |
 | `TxManager` | `pkg/postgres` | `RunInTx` propaga la tx por el contexto; `ConnFromContext` hace que repo y publisher participen de la misma transacción. |
 
@@ -116,6 +117,7 @@ Archivo: [domain/errors.go](../../context/payout/domain/errors.go)
 | `ErrPayoutNotFound` | 404 |
 | `ErrInsufficientBalance`, `ErrNoBankAccount`, `ErrInvalidTransition` | 422 |
 | `ErrInvalidAmount`, `ErrInvalidCurrency`, `ErrIdempotencyKeyRequired` | 400 |
+| `ErrPayoutsNotAllowed` (tenant no activo, suspendido o en hold de cumplimiento) | 403, mensaje genérico `payouts are not available for this account` |
 | `ErrIdempotencyKeyConflict` (misma clave, otro monto/moneda), `ErrPayoutAlreadyExists` (carrera perdida contra el UNIQUE) | 409 |
 | Rechazo explícito del banco, errores de infra | 500 (sin filtrar detalle interno) |
 
@@ -184,7 +186,8 @@ Archivo: [initiate_payout.go](../../context/payout/application/initiate_payout.g
 
 | Paso | Acción | ¿En tx? | Si falla |
 |---|---|---|---|
-| 1 | Parsear tenant; exigir `IdempotencyKey` no vacía; moneda default `ARS` | — | 400/500, sin persistir |
+| 1 | Parsear tenant; exigir `IdempotencyKey` no vacía | — | 400/500, sin persistir |
+| 1b | `gate.EnsurePayoutsAllowed`: tenant `active` y sin hold de cumplimiento. Va antes del replay: un hold también bloquea reintentos. Moneda default `ARS` | — | 403 `ErrPayoutsNotAllowed`, sin persistir |
 | 2 | `bankProvider.GetBankAccount` (cuenta de solicitud `approved`) | — | 422/500, sin persistir |
 | 3a | `BalanceLocker.LockBalance` — `pg_advisory_xact_lock` keyed por `(tenant, currency)` | Sí | aborta la tx |
 | 3b | Replay: `FindByIdempotencyKey`; si existe y `MatchesRequest` → devolverlo (`Replayed: true`); si existe con otro monto/moneda → `ErrIdempotencyKeyConflict` | Sí | 409 |
@@ -315,6 +318,7 @@ Tabla `payouts` ([000007](../../migrations/000007_payout_init.up.sql) + [000015]
 - **Datos bancarios:** el número de cuenta vive encapsulado en `BankAccountInfo`; la API de lectura solo expone `MaskedAccountNumber()`. El snapshot en `payouts.bank_acct_num` queda **en claro** (necesario para reproducir la transferencia y auditar); no hay cifrado en reposo (§10.9).
 - **Autorización:** cualquier usuario autenticado del tenant (todos los roles) puede iniciar payouts — no hay permiso `payouts:create` ni guard por ruta (§10.8). Un desembolso es una operación sensible: debería requerir `admin` (y doble aprobación en el futuro).
 - **Aislamiento:** `Get` verifica el tenant del payout; `List` y `Initiate` toman el tenant del token.
+- **Estado del comercio y AML:** `PayoutGate` bloquea desembolsos de tenants no activos, suspendidos o en hold preventivo de cumplimiento (ver [COMPLIANCE.md](COMPLIANCE.md) §7.3). El mensaje no revela el motivo (anti tipping-off). Un payout iniciado antes del hold sigue su curso.
 - **Reserva contable:** el lock advisory por `(tenant, currency)` dentro de la misma tx que lee el saldo e inserta el payout impide sobregirar `merchant_balance` con requests concurrentes (TOCTOU cerrado, §10.4).
 - **Idempotencia de extremo a extremo:** clave de negocio (HTTP) → UNIQUE (PG) → `transfer_<payout_id>` (banco) → `ledger_entry_key` (asiento). Cuatro capas: retries del caller nunca duplican dinero.
 
@@ -368,7 +372,7 @@ context/payout/
 │   ├── events.go          # initiated / confirmed / failed / unknown
 │   └── errors.go
 ├── application/
-│   ├── ports.go           # PayoutRepository, BalanceChecker, BalanceLocker,
+│   ├── ports.go           # PayoutRepository, PayoutGate, BalanceChecker, BalanceLocker,
 │   │                      # BankAccountProvider, BankTransferAdapter, TxManager, EventPublisher
 │   ├── commands.go        # InitiatePayoutCmd/Result, PayoutView
 │   ├── initiate_payout.go # Caso de uso principal (lock + idempotencia + unknown)
@@ -380,6 +384,7 @@ context/payout/
         ├── postgres/payout_repo.go
         ├── transfer/mock/adapter.go
         ├── ledger/balance_checker.go        # saldo + pg_advisory_xact_lock
+        ├── tenant/gate.go                   # PayoutGate: tenant activo y sin hold AML
         └── onboarding/bank_account_provider.go
 ```
 

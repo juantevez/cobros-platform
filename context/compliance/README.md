@@ -60,10 +60,20 @@ Velocity y volumen cuentan sobre `aml_monitored_payments`, una proyección que
 `MonitorTransaction` alimenta desde `payment.captured.v1` (`TransactionLog`,
 idempotente por `payment_id`). Compliance no lee el esquema de Payment.
 
-## Enforcement
+## Revisión (la plataforma revisa a los comercios)
 
-Pasivo por diseño: se **registra** la alerta para que el admin del tenant la
-disponga (`cleared` = falso positivo, `confirmed` = verdadero positivo; queda
-`resolved_by`). El evento
-`compliance.alert.raised.v1` queda disponible en el stream `COMPLIANCE` para
-que, a futuro, otros contextos reaccionen (p. ej. auth suspendiendo el tenant).
+Las alertas las revisa el equipo de cumplimiento de la plataforma (rol
+`compliance_officer`, no asignable por un tenant), sobre alertas de cualquier
+comercio (RLS de operador). El comercio nunca ve ni dispone sus alertas.
+Four-eyes: las alertas `high` o `sanctions_match` quedan
+`pending_second_approval` tras la primera disposición y las cierra (o rechaza)
+un segundo analista distinto.
+
+## Enforcement: hold reversible
+
+Un match exacto (score 100) contra una lista de sanciones emite
+`compliance.sanction.matched.v1`; Auth pone al comercio en hold
+(`tenant_compliance_holds`) y los gates de Payment y Payout bloquean cobros y
+desembolsos. Al cerrar la alerta: `cleared` → `sanction.cleared.v1` levanta el
+hold; `confirmed` → `sanction.confirmed.v1` suspende al tenant con un motivo
+genérico (anti tipping-off). Ver [COMPLIANCE.md](../../docs/technical/COMPLIANCE.md) §7.3.
