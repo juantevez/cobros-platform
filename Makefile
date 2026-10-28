@@ -1,4 +1,4 @@
-.PHONY: up down up-app down-app migrate migrate-down test lint tidy build
+.PHONY: up down up-app down-app migrate migrate-down seed-dev test lint tidy build
 
 COMPOSE = docker compose -f deploy/docker/docker-compose.yml
 DB_URL  ?= postgres://cobros:cobros@localhost:5432/cobros?sslmode=disable
@@ -29,6 +29,10 @@ migrate-down:
 
 migrate-drop:
 	migrate -path ./migrations -database "$(DB_URL)" drop -f
+
+# Datos de ejemplo SOLO para desarrollo local (watchlist AML ficticia).
+seed-dev:
+	psql "$(DB_URL)" -v ON_ERROR_STOP=1 -f deploy/seed/compliance_watchlist.sql
 
 # ── Calidad de código ────────────────────────────────────────────────────────
 

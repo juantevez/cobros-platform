@@ -91,7 +91,7 @@ func TestAlert_Resolve(t *testing.T) {
 
 	t.Run("cleared from open", func(t *testing.T) {
 		a := newOpen()
-		if err := a.Resolve(StatusCleared, "falso positivo", resolveTime); err != nil {
+		if err := a.Resolve(StatusCleared, "falso positivo", "user-1", resolveTime); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if a.Status() != StatusCleared {
@@ -115,11 +115,14 @@ func TestAlert_Resolve(t *testing.T) {
 		if resolved.Status != "cleared" || resolved.AlertID != a.ID().String() {
 			t.Errorf("event mismatch: %+v", resolved)
 		}
+		if a.ResolvedBy() != "user-1" || resolved.ResolvedBy != "user-1" {
+			t.Errorf("resolvedBy = %q / event %q, want user-1", a.ResolvedBy(), resolved.ResolvedBy)
+		}
 	})
 
 	t.Run("confirmed from open", func(t *testing.T) {
 		a := newOpen()
-		if err := a.Resolve(StatusConfirmed, "verdadero", resolveTime); err != nil {
+		if err := a.Resolve(StatusConfirmed, "verdadero", "user-1", resolveTime); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if a.Status() != StatusConfirmed {
@@ -127,14 +130,24 @@ func TestAlert_Resolve(t *testing.T) {
 		}
 	})
 
+	t.Run("open is not a terminal disposition", func(t *testing.T) {
+		a := newOpen()
+		if err := a.Resolve(StatusOpen, "", "user-1", resolveTime); !errors.Is(err, ErrInvalidDisposition) {
+			t.Fatalf("expected ErrInvalidDisposition, got %v", err)
+		}
+		if a.Status() != StatusOpen || len(a.PullEvents()) != 0 {
+			t.Error("failed resolve must not mutate nor emit")
+		}
+	})
+
 	t.Run("cannot resolve twice", func(t *testing.T) {
 		a := newOpen()
-		if err := a.Resolve(StatusCleared, "", resolveTime); err != nil {
+		if err := a.Resolve(StatusCleared, "", "user-1", resolveTime); err != nil {
 			t.Fatalf("first resolve failed: %v", err)
 		}
 		a.PullEvents()
 
-		err := a.Resolve(StatusConfirmed, "", resolveTime)
+		err := a.Resolve(StatusConfirmed, "", "user-1", resolveTime)
 		if !errors.Is(err, ErrAlertNotOpen) {
 			t.Fatalf("expected ErrAlertNotOpen, got %v", err)
 		}
@@ -155,12 +168,12 @@ func TestReconstituteAlert(t *testing.T) {
 	id := NewAlertID()
 
 	a := ReconstituteAlert(id, tid, AlertTransactionVelocity, RiskMedium, StatusConfirmed,
-		"pay-9", 80, map[string]string{"rule": "velocity"}, "confirmado", now, &resolved)
+		"pay-9", 80, map[string]string{"rule": "velocity"}, "confirmado", "user-7", now, &resolved)
 
 	if a.ID() != id || a.Status() != StatusConfirmed || a.Type() != AlertTransactionVelocity {
 		t.Errorf("fields not restored: %+v", a)
 	}
-	if a.Note() != "confirmado" || a.Score() != 80 {
+	if a.Note() != "confirmado" || a.Score() != 80 || a.ResolvedBy() != "user-7" {
 		t.Errorf("note/score not restored")
 	}
 	if a.ResolvedAt() == nil || !a.ResolvedAt().Equal(resolved) {
@@ -177,7 +190,7 @@ func TestReconstituteAlert(t *testing.T) {
 func TestReconstituteAlert_nilDetails(t *testing.T) {
 	tid := testTenantID(t)
 	a := ReconstituteAlert(NewAlertID(), tid, AlertSanctionsMatch, RiskLow, StatusOpen,
-		"s", 10, nil, "", time.Now(), nil)
+		"s", 10, nil, "", "", time.Now(), nil)
 	if a.Details() == nil {
 		t.Error("details should default to empty map, not nil")
 	}

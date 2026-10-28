@@ -1,7 +1,8 @@
 # Compliance & AML — Documentación técnico-funcional
 
 > **Bounded Context:** `context/compliance`
-> **Migración:** [`000014_compliance_init`](../../migrations/000014_compliance_init.up.sql)
+> **Migraciones:** [`000014_compliance_init`](../../migrations/000014_compliance_init.up.sql),
+> [`000018_compliance_hardening`](../../migrations/000018_compliance_hardening.up.sql)
 > **Stream NATS:** `COMPLIANCE` (`compliance.>`)
 
 ---
@@ -26,10 +27,12 @@ El contexto es **escritura reactiva + consulta/gestión**:
   La alerta se *registra*; el evento `compliance.alert.raised.v1` queda disponible
   en el stream `COMPLIANCE` para que otros contextos reaccionen a futuro (p. ej.
   Auth suspendiendo el tenant). Hoy ningún contexto consume esos eventos.
-- Listas oficiales reales: la watchlist es una tabla propia sembrada por
-  migración con datos de ejemplo; no se integra con OFAC/EU/UN.
-- Fuzzy matching / similitud fonética: el match es **containment** exacto sobre
-  nombres normalizados (§8.2).
+- Listas oficiales reales: la watchlist es una tabla propia cargada por API
+  (`platform_support`); no se integra con OFAC/EU/UN. La semilla de ejemplo es
+  solo para desarrollo (`make seed-dev`).
+- Fuzzy matching / similitud fonética: el match es **por tokens completos**
+  sobre nombres normalizados sin acentos ni puntuación (§8.2); no tolera errores
+  de tipeo ni transliteraciones.
 
 ---
 
@@ -40,9 +43,10 @@ El contexto es **escritura reactiva + consulta/gestión**:
 | **Alerta** (`Alert`) | Agregado raíz. Señal de riesgo detectada por una regla. Nace `open`; un analista la dispone. |
 | **Watchlist** (`WatchlistEntry`) | Entrada de la lista de vigilancia **global** de la plataforma (sanciones o PEP). |
 | **Screening** | Comparar la razón social de un onboarding contra la watchlist. Match → alerta `sanctions_match`. |
-| **Monitoreo transaccional** | Evaluar un pago capturado contra las reglas de umbral y velocity. |
-| **Subject** | Lo que disparó la alerta: `legal_name` (screening) o `payment_id` (monitoreo). Parte de la clave de idempotencia. |
+| **Monitoreo transaccional** | Evaluar un pago capturado contra las reglas de umbral, velocity y volumen. |
+| **Subject** | Lo que disparó la alerta: `legal_name` (screening), `payment_id` (umbral) o el bucket de ventana (`velocity:<inicio>`, `volume:<moneda>:<inicio>`). Parte de la clave de idempotencia. |
 | **Score** | Puntaje 0..100 de confianza/severidad; mapea a `RiskLevel` (≥90 high, ≥60 medium, resto low). |
+| **Proyección de pagos** | `aml_monitored_payments`: copia propia de cada `payment.captured.v1`, sobre la que cuentan las reglas de ventana. |
 | **Disposition** | Decisión del analista sobre una alerta abierta: `cleared` (falso positivo) o `confirmed` (verdadero positivo). |
 
 ---
@@ -57,12 +61,12 @@ sequenceDiagram
     participant UC as ScreenApplication / MonitorTransaction
     participant DB as PostgreSQL + Outbox
     participant N as NATS (COMPLIANCE)
-    actor A as Analista (JWT tenant)
+    actor A as Admin del tenant (JWT)
     participant API as cmd/api · ComplianceHandler
 
     SRC->>W: onboarding.application.submitted.v1
     W->>UC: ScreenApplication(legal_name)
-    UC->>DB: SELECT aml_watchlist (containment)
+    UC->>DB: SELECT aml_watchlist (tokens, vigentes)
     alt match
         UC->>DB: RunInTx { INSERT aml_alerts + outbox raised.v1 }
         DB-->>N: relay → compliance.alert.raised.v1
@@ -70,14 +74,15 @@ sequenceDiagram
 
     SRC->>W: payment.captured.v1
     W->>UC: MonitorTransaction(amount, payment_id)
-    UC->>DB: SELECT COUNT(payments) (velocity, lectura cruzada)
+    UC->>DB: INSERT aml_monitored_payments (idempotente)
+    UC->>DB: COUNT / SUM aml_monitored_payments (ventana)
     loop por cada regla disparada
         UC->>DB: RunInTx { INSERT aml_alerts + outbox raised.v1 }
     end
 
     A->>API: GET /compliance/alerts · GET /compliance/alerts/:id
     A->>API: POST /compliance/alerts/:id/resolve {disposition, note}
-    API->>DB: RunInTx { UPDATE aml_alerts + outbox resolved.v1 }
+    API->>DB: RunInTx { SELECT + UPDATE … WHERE status='open' + outbox resolved.v1 }
     DB-->>N: relay → compliance.alert.resolved.v1
 ```
 
@@ -93,20 +98,22 @@ Archivo: [domain/alert.go](../../context/compliance/domain/alert.go)
 |---|---|---|
 | `id` | `AlertID` (UUID) | Generado por el caso de uso (`domain.NewAlertID()`). |
 | `tenantID` | `TenantID` (UUID) | Del evento origen (worker) o del JWT (resolver). |
-| `alertType` | `AlertType` | `sanctions_match` \| `transaction_threshold` \| `transaction_velocity`. |
+| `alertType` | `AlertType` | `sanctions_match` \| `transaction_threshold` \| `transaction_velocity` \| `transaction_volume`. |
 | `riskLevel` | `RiskLevel` | `low` \| `medium` \| `high`. |
 | `status` | `AlertStatus` | `open` \| `cleared` \| `confirmed`. |
-| `subject` | `string` | `legal_name` o `payment_id` que disparó la alerta. Clave de idempotencia junto a `(tenant, tipo)`. |
+| `subject` | `string` | `legal_name`, `payment_id` o bucket de ventana (§5.2). Clave de idempotencia junto a `(tenant, tipo)`. |
 | `score` | `int` | 0..100. |
 | `details` | `map[string]string` | Contexto (lista matched, monto, ventana, etc.). Se persiste como JSONB. |
 | `note` | `string` | Nota del analista al disponer (no tiene setter separado: viaja en `Resolve`). |
+| `resolvedBy` | `string` | Actor autenticado que dispuso (userID del JWT, vía `postgres.ActorFromContext`). |
 | `createdAt` / `resolvedAt` | `time.Time` / `*time.Time` | `resolvedAt` se setea solo al resolver. |
 
 API del agregado:
 
 - `NewAlert(...)` → crea en `open` y **registra** `AlertRaisedEvent`.
-- `Resolve(status, note, now)` → única mutación posible; exige `open`;
-  **registra** `AlertResolvedEvent`.
+- `Resolve(status, note, resolvedBy, now)` → única mutación posible; exige
+  `open` y un estado terminal (`cleared`/`confirmed`); **registra**
+  `AlertResolvedEvent`.
 - `ReconstituteAlert(...)` → reconstrucción desde DB sin eventos.
 - `PullEvents()` → drena los eventos pendientes (los casos de uso los publican
   al Outbox dentro de la misma transacción).
@@ -138,8 +145,8 @@ devuelve `ErrAlertNotOpen` → **409**.
 2. Una alerta solo puede disponerse desde `open`.
 3. `ParseDisposition` acepta únicamente `cleared` o `confirmed`.
 4. `score` se calcula por regla (no lo fija el cliente): screening = score del
-   mejor match (hoy 90); threshold = escala por ratio monto/umbral (§5.2);
-   velocity = fijo 90.
+   mejor match (100/90/80, §8.2); threshold y volumen = escala por ratio
+   monto/umbral (§5.2); velocity = fijo 90.
 
 ### 4.4 Value Objects y helpers
 
@@ -149,10 +156,12 @@ Archivo: [domain/vo.go](../../context/compliance/domain/vo.go),
 | Elemento | Regla |
 |---|---|
 | `AlertID` / `TenantID` | UUID string; `ParseAlertID` / `ParseTenantID` validan formato. |
-| `AlertType` | `sanctions_match`, `transaction_threshold`, `transaction_velocity` (hay `CHECK` en DB). |
+| `AlertType` | `sanctions_match`, `transaction_threshold`, `transaction_velocity`, `transaction_volume` (hay `CHECK` en DB). |
 | `RiskLevel` | `low`, `medium`, `high`. |
-| `AlertStatus` | `open`, `cleared`, `confirmed`. |
-| `NormalizeName(s)` | `strings.ToLower(strings.Join(strings.Fields(s), " "))` → minúsculas + espacios colapsados. Se usa al sembrar la watchlist y al evaluar. Idempotente. |
+| `AlertStatus` | `open`, `cleared`, `confirmed`. `ParseStatusFilter` valida el filtro de listado (`""` = sin filtro). |
+| `NormalizeName(s)` | NFD + descarta diacríticos, minúsculas, todo lo que no sea letra/dígito → espacio, espacios colapsados (`"Pérez-Gómez, S.A."` → `"perez gomez s a"`). Se usa al cargar la watchlist y al evaluar. Idempotente. La migración 000018 replica la regla en SQL. |
+| `MatchScore(entry, name)` | Por tokens completos: igualdad → 100, secuencia contigua → 90, todos los tokens en otro orden/intercalados → 80, si falta alguno → 0. |
+| `NewWatchlistEntry(...)` | Valida `list_type ∈ {sanctions, pep}` y que el nombre conserve tokens tras normalizar; recorta espacios y pasa `country` a mayúsculas. |
 | `RiskFromScore(score)` | `≥90 → high`, `≥60 → medium`, resto `low`. |
 | `Match` | `{Entry WatchlistEntry, Score int}` — resultado del screening. |
 
@@ -166,7 +175,11 @@ Archivo: [domain/errors.go](../../context/compliance/domain/errors.go)
 | `ErrDuplicateAlert` | Viola `(tenant, tipo, subject)` | n/a — tratado como **no-op** (idempotencia) |
 | `ErrAlertNotOpen` | Re-resolver una alerta ya dispuesta | 409 |
 | `ErrInvalidDisposition` | Disposición ≠ `cleared`/`confirmed` | 400 |
-| Cualquier otro (incl. errores no tipados de parseo de IDs) | — | 400 en Get/Resolve, 500 en List |
+| `ErrInvalidTenantID` / `ErrInvalidAlertID` | ID no UUID (en `vo.go`) | 400 |
+| `ErrInvalidStatusFilter` | `?status=` ≠ `open`/`cleared`/`confirmed` | 400 |
+| `ErrInvalidListType` / `ErrInvalidWatchlistName` | Alta de watchlist inválida | 400 |
+| `ErrWatchlistEntryNotFound` | Baja de entrada inexistente o ya dada de baja | 404 |
+| Cualquier otro | — | 500 (`"internal server error"`, sin detalle interno) |
 
 ---
 
@@ -177,15 +190,16 @@ Paquetes: [application/](../../context/compliance/application/)
 | Caso de uso | Archivo | Actor/trigger | Resultado | Evento |
 |---|---|---|---|---|
 | `ScreenApplicationUseCase` | `screen_application.go` | JetStream (`onboarding.application.submitted.v1`) | Si hay match: 1 alerta `sanctions_match` (mejor match) | `raised.v1` |
-| `MonitorTransactionUseCase` | `monitor_transaction.go` | JetStream (`payment.captured.v1`) | Hasta 2 alertas independientes (`transaction_threshold`, `transaction_velocity`) | `raised.v1` × N |
+| `MonitorTransactionUseCase` | `monitor_transaction.go` | JetStream (`payment.captured.v1`) | Registra el pago en la proyección y levanta hasta 3 alertas independientes (`transaction_threshold`, `transaction_velocity`, `transaction_volume`) | `raised.v1` × N |
 | `ResolveAlertUseCase` | `resolve_alert.go` | HTTP (analista) | `cleared`/`confirmed` + nota | `resolved.v1` |
 | `ListAlertsUseCase` | `queries.go` | HTTP | `[]AlertView` (limit default 50, máx 200) | — |
 | `GetAlertUseCase` | `queries.go` | HTTP | `AlertView` (verifica pertenencia al tenant) | — |
-| `AddWatchlistEntryUseCase` | `queries.go` | HTTP | Insert en `aml_watchlist` (global) | — |
+| `AddWatchlistEntryUseCase` | `queries.go` | HTTP (`platform_support`) | Valida y crea entrada en `aml_watchlist` (global); retorna la vista | — |
+| `RemoveWatchlistEntryUseCase` | `queries.go` | HTTP (`platform_support`) | Baja lógica (`removed_at`) | — |
 | `ListWatchlistUseCase` | `queries.go` | HTTP | `[]WatchlistEntryView` (limit default 100, máx 500) | — |
 
 Puertos ([application/ports.go](../../context/compliance/application/ports.go)):
-`AlertRepository`, `WatchlistRepository`, `TransactionReader`, `TxManager`,
+`AlertRepository`, `WatchlistRepository`, `TransactionLog`, `TxManager`,
 `EventPublisher`, `Clock`.
 
 ### 5.1 Screening (`ScreenApplication`)
@@ -193,7 +207,7 @@ Puertos ([application/ports.go](../../context/compliance/application/ports.go)):
 ```
 1. ParseTenantID(cmd.TenantID)                       → error si no es UUID
 2. LegalName == ""                                   → no-op (nil)
-3. watchlist.Screen(NormalizeName(LegalName))        → []Match
+3. watchlist.Screen(NormalizeName(LegalName))        → []Match (MatchScore > 0)
 4. Sin matches                                       → no-op (nil)
 5. best = max score entre matches
 6. NewAlert(sanctions_match, RiskFromScore(best), subject=LegalName,
@@ -209,28 +223,46 @@ Una sola alerta por aplicación aunque haya múltiples coincidencias.
 Reglas configurables vía `MonitoringRules` (inyectado desde `cmd/worker` con
 `DefaultMonitoringRules()`):
 
-| Regla | Condición | Alerta | Riesgo | Score |
-|---|---|---|---|---|
-| Umbral | `Amount ≥ ThresholdAmount` (default `1_000_000` centavos = $10.000) | `transaction_threshold` | `medium` | `riskScoreForAmount`: `60 + (amount/threshold)*10`, tope 100; umbral ≤ 0 → 80 |
-| Velocity | `CountCapturedSince(now − VelocityWindow) ≥ VelocityCount` (default 10 pagos / 10 min) | `transaction_velocity` | `high` | 90 fijo |
+Antes de evaluar, el pago se registra en `aml_monitored_payments`
+(`TransactionLog.Record`, `ON CONFLICT (payment_id) DO NOTHING`) con
+`captured_at = clock.Now()`. Las reglas de ventana cuentan sobre esa proyección.
+
+| Regla | Condición | Alerta | Subject | Riesgo | Score |
+|---|---|---|---|---|---|
+| Umbral | `Amount ≥ ThresholdAmount` (default `1_000_000` centavos = $10.000) | `transaction_threshold` | `payment_id` | `medium` | `riskScoreForAmount`: `60 + (amount/threshold)*10`, tope 100; umbral ≤ 0 → 80 |
+| Velocity | `CountSince(now − VelocityWindow) ≥ VelocityCount` (default 10 pagos / 10 min, todas las monedas) | `transaction_velocity` | `velocity:<bucket>` | `high` | 90 fijo |
+| Volumen | `SumAmountSince(moneda del pago, now − VelocityWindow) ≥ VolumeAmount` (default `5_000_000` = $50.000; `0` desactiva) | `transaction_volume` | `volume:<moneda>:<bucket>` | `high` | `riskScoreForAmount(total, VolumeAmount)` |
+
+`<bucket>` = `now.Truncate(VelocityWindow)` en RFC3339 (ventanas fijas). Como el
+subject es el bucket y no el pago, la unicidad `(tenant, tipo, subject)` deja
+**una sola alerta por tenant y ventana** para velocity/volumen: los pagos
+siguientes del mismo pico chocan con la constraint y son no-op. Una ráfaga que
+cruza el borde de dos buckets puede generar dos alertas. `VelocityWindow ≤ 0`
+desactiva ambas reglas de ventana.
 
 Detalles persistidos: threshold → `{payment_id, amount, currency, threshold,
-payment_method}`; velocity → `{payment_id, count, window, threshold}`.
-Subject en ambas: `payment_id`. Ambas reglas pueden dispararse en el mismo pago
-(dos alertas distintas).
-
-> La alerta de velocity se genera **por pago**, no una vez por ventana: tras el
-> décimo captura, cada pago adicional crea su propia alerta (subject distinto).
+payment_method}`; velocity → `{payment_id, count, window, window_start,
+threshold}`; volumen → `{payment_id, total_amount, currency, window,
+window_start, threshold}` (`payment_id` = el pago que cruzó el umbral). Las
+tres reglas pueden dispararse en el mismo pago.
 
 ### 5.3 Resolución (`ResolveAlert`)
 
 ```
 1. ParseTenantID / ParseAlertID / ParseDisposition     → 400 si inválidos
-2. repo.FindByID(alertID)                              → fuera de tx
-3. alert.TenantID() != tenantID                        → ErrAlertNotFound (404)
-4. alert.Resolve(status, note, clock.Now())            → ErrAlertNotOpen (409)
-5. txManager.RunInTx { repo.Update + publisher.Publish(resolved.v1) }
+2. txManager.RunInTx {
+3.   repo.FindByID(alertID)
+4.   alert.TenantID() != tenantID                      → ErrAlertNotFound (404)
+5.   alert.Resolve(status, note, resolvedBy, now)      → ErrAlertNotOpen (409)
+6.   repo.Update  (… WHERE id=$1 AND status='open')    → 0 filas ⇒ ErrAlertNotOpen (409)
+7.   publisher.Publish(resolved.v1)
+   }
 ```
+
+Concurrencia: el `UPDATE` condicional es el control optimista. Si dos
+resoluciones compiten, la segunda no afecta filas, el repo retorna
+`ErrAlertNotOpen`, la tx hace rollback y **no** se publica un segundo
+`resolved.v1`.
 
 ### 5.4 Patrón transaccional e idempotencia
 
@@ -262,19 +294,21 @@ Cableado: [cmd/api/main.go](../../cmd/api/main.go) (sección *Compliance & AML*)
 
 Todas las rutas cuelgan de `/api/v1/compliance` bajo `JWTMiddleware`; el
 `tenant_id` se toma del token (`postgres.TenantIDFromContext`), nunca del body.
+Cada ruta exige además un guard de rol (`RouteGuards`, inyectados desde
+`cmd/api`; `RegisterRoutes` entra en pánico si falta alguno). Sin el rol → `403`.
 
-| Método | Ruta | Descripción | Éxito |
-|---|---|---|---|
-| `GET` | `/compliance/alerts?status=&limit=` | Alertas del tenant (recientes primero) | `200 {alerts, count}` |
-| `GET` | `/compliance/alerts/:alertID` | Detalle de una alerta | `200 AlertView` |
-| `POST` | `/compliance/alerts/:alertID/resolve` | Disponer la alerta | `204` |
-| `GET` | `/compliance/watchlist?limit=` | Lista global de vigilancia | `200 {watchlist, count}` |
-| `POST` | `/compliance/watchlist` | Agregar entrada global | `201` (sin body) |
+| Método | Ruta | Descripción | Rol | Éxito |
+|---|---|---|---|---|
+| `GET` | `/compliance/alerts?status=&limit=` | Alertas del tenant (recientes primero) | `admin`, `platform_support` | `200 {alerts, count}` |
+| `GET` | `/compliance/alerts/:alertID` | Detalle de una alerta | `admin`, `platform_support` | `200 AlertView` |
+| `POST` | `/compliance/alerts/:alertID/resolve` | Disponer la alerta | `admin` | `204` |
+| `GET` | `/compliance/watchlist?limit=` | Lista global de vigilancia (vigentes) | `platform_support` | `200 {watchlist, count}` |
+| `POST` | `/compliance/watchlist` | Agregar entrada global | `platform_support` | `201 WatchlistEntryView` |
+| `DELETE` | `/compliance/watchlist/:entryID` | Dar de baja una entrada | `platform_support` | `204` |
 
 Parámetros de query: `limit` de `alerts` default 50 (≤0 o >200 → 50); el de
-`watchlist` default 100 (≤0 o >500 → 100). `status` filtra por igualdad exacta
-(`open`/`cleared`/`confirmed`); cualquier otro valor simplemente no devuelve
-filas.
+`watchlist` default 100 (≤0 o >500 → 100). `status` acepta solo
+`open`/`cleared`/`confirmed` (vacío = todos); otro valor → `400`.
 
 ### 6.1 Resolver alerta — `POST /compliance/alerts/:alertID/resolve`
 
@@ -284,9 +318,11 @@ filas.
 
 | Escenario | Respuesta |
 |---|---|
-| OK | `204` |
+| OK | `204` (persiste `resolved_by` = userID del token) |
 | Body JSON inválido | `400 {"error":"invalid request body"}` |
-| `disposition` inválida / ID no UUID | `400 {"error": "<err>"}` |
+| `disposition` inválida | `400 {"error": "compliance: invalid disposition"}` |
+| ID no UUID | `400 {"error":"invalid tenant or alert id"}` |
+| Rol distinto de `admin` | `403` |
 | Alerta inexistente o de otro tenant | `404 {"error":"alert not found"}` |
 | Ya resuelta | `409 {"error":"alert already resolved"}` |
 
@@ -315,11 +351,16 @@ filas.
 { "full_name": "Vladimir Petrov", "list_type": "sanctions", "country": "RU", "source": "OFAC" }
 ```
 
-Requeridos: `full_name`, `list_type`. Sin validación de dominio sobre
-`list_type`/`country`/`source` (el `CHECK` de DB solo admite `sanctions|pep`).
+Requeridos: `full_name`, `list_type`. `NewWatchlistEntry` valida
+`list_type ∈ {sanctions, pep}` y que `full_name` tenga letras/dígitos (→ `400`
+con el error de dominio); un error de persistencia → `500` sin detalle. La
+respuesta `201` incluye la entrada creada (`id`, para darla de baja).
 
-> ⚠️ **Gestión global sin control de rol**: estos endpoints están solo detrás
-> del JWT genérico (§9).
+### 6.4 Baja — `DELETE /compliance/watchlist/:entryID`
+
+Soft delete (`removed_at = now`): la entrada deja de participar del screening y
+del listado, pero la fila se conserva para que las alertas pasadas sigan siendo
+trazables. Inexistente, ya dada de baja o ID no UUID → `404`.
 
 ---
 
@@ -335,7 +376,7 @@ Se publican vía Outbox y el relay de `cmd/worker` los envía al stream
 | Subject | Cuándo | Payload |
 |---|---|---|
 | `compliance.alert.raised.v1` | Se crea una alerta (screening o monitoreo) | `alert_id`, `tenant_id`, `alert_type`, `risk_level`, `subject`, `score` |
-| `compliance.alert.resolved.v1` | Un analista dispone una alerta | `alert_id`, `tenant_id`, `status` (`cleared`\|`confirmed`) |
+| `compliance.alert.resolved.v1` | Un analista dispone una alerta | `alert_id`, `tenant_id`, `status` (`cleared`\|`confirmed`), `resolved_by` |
 
 `OccurredAt()` del evento usa `time.Now().UTC()` interno de `newBase` (no el
 `Clock` inyectado).
@@ -352,7 +393,10 @@ goroutines durables (`Durable = Name`, `MaxDeliver: 5`):
 
 Manejo de errores en [inbound/nats/event_consumer.go](../../context/compliance/infrastructure/adapters/inbound/nats/event_consumer.go):
 payload malformado o sin `tenant_id` → **ack silencioso** (retorna `nil`);
-error del caso de uso → log + **nak** (reintento hasta MaxDeliver).
+error del caso de uso → log + **nak** (reintento hasta MaxDeliver). Antes de
+invocar el caso de uso, el consumer inyecta el `tenant_id` del evento en el
+contexto (`postgres.WithTenantID`), así `RunInTx` fija `app.current_tenant` y
+las escrituras pasan RLS aunque el rol de conexión no tenga `BYPASSRLS`.
 
 ### 7.2 Consumidores de los eventos de Compliance
 
@@ -365,7 +409,8 @@ pasivo por diseño.
 
 ## 8. Persistencia
 
-Archivo: [migrations/000014_compliance_init.up.sql](../../migrations/000014_compliance_init.up.sql)
+Archivos: [000014_compliance_init.up.sql](../../migrations/000014_compliance_init.up.sql),
+[000018_compliance_hardening.up.sql](../../migrations/000018_compliance_hardening.up.sql)
 
 ### 8.1 Tablas
 
@@ -379,66 +424,91 @@ erDiagram
         text country "default ''"
         text source "OFAC/EU/UN, default ''"
         timestamptz added_at
+        timestamptz removed_at "nullable, baja lógica"
     }
     aml_alerts {
         uuid id PK
         uuid tenant_id "UK parcial (tenant,type,subject)"
-        text alert_type "CHECK 3 tipos"
+        text alert_type "CHECK 4 tipos"
         text risk_level "CHECK low|medium|high"
         text status "CHECK open|cleared|confirmed, default open"
         text subject
         int score "default 0"
         jsonb details "default '{}'"
         text note "nullable"
+        text resolved_by "nullable"
         timestamptz created_at
         timestamptz resolved_at "nullable"
+    }
+    aml_monitored_payments {
+        text payment_id PK
+        uuid tenant_id
+        bigint amount
+        text currency
+        timestamptz captured_at
     }
 ```
 
 Índices: `idx_aml_watchlist_normalized (normalized_name)`,
+`idx_aml_watchlist_tokens` (GIN sobre `string_to_array(normalized_name, ' ')`,
+parcial `WHERE removed_at IS NULL`),
 `idx_aml_alerts_tenant (tenant_id, created_at DESC)`,
-`idx_aml_alerts_status (tenant_id, status)`.
+`idx_aml_alerts_status (tenant_id, status)`,
+`idx_aml_monitored_payments_window (tenant_id, captured_at)`.
 
-RLS: **solo `aml_alerts`** (`ENABLE ROW LEVEL SECURITY` + policy por
-`current_setting('app.current_tenant', true)::uuid`). `aml_watchlist` es
-global, sin RLS. La migración además **siembra 4 entradas de ejemplo**
-(Vladimir Petrov, Ivan Sokolov, Kim Jong Trading Co, Global Shell Holdings).
+RLS: `aml_alerts` y `aml_monitored_payments`, con policy
+`tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid`
+(el `NULLIF` evita el `22P02` cuando la conexión del pool conserva `''` tras
+una tx previa). `aml_watchlist` es global, sin RLS.
+
+Semilla: 000014 insertó 4 entradas ficticias (Vladimir Petrov, Ivan Sokolov,
+Kim Jong Trading Co, Global Shell Holdings); 000018 las **da de baja**
+(`removed_at`) para que no participen del screening en producción. En
+desarrollo local se cargan con `make seed-dev`
+([deploy/seed/compliance_watchlist.sql](../../deploy/seed/compliance_watchlist.sql),
+idempotente).
 
 ### 8.2 Queries clave
 
 | Puerto | Query | Notas |
 |---|---|---|
 | `AlertRepository.Save` | `INSERT INTO aml_alerts …` (11 columnas explícitas) | Usa la conexión del ctx (tx dentro de `RunInTx`). `note` vacío → NULL. `23505` → `ErrDuplicateAlert`. |
-| `AlertRepository.Update` | `UPDATE aml_alerts SET status, note, resolved_at WHERE id=$1` | Solo toca los campos de la disposición. |
-| `AlertRepository.FindByID` | `SELECT … WHERE id=$1` | `pgx.ErrNoRows` → `ErrAlertNotFound`. |
-| `AlertRepository.ListByTenant` | `WHERE tenant_id=$1 [AND status=$2] ORDER BY created_at DESC LIMIT $n` | Corre **sobre el pool directo** (fuera de tx). |
-| `WatchlistRepository.Screen` | `SELECT … FROM aml_watchlist WHERE position(normalized_name IN $1) > 0` | **Containment**: la entrada está contenida en el nombre evaluado. Todo match → score 90. |
-| `WatchlistRepository.Add/List` | `INSERT …` / `SELECT … ORDER BY full_name LIMIT $1` | Pool directo, sin tenant. |
-| `TransactionReader.CountCapturedSince` | `SELECT COUNT(*) FROM payments WHERE tenant_id=$1 AND status='captured' AND captured_at >= $2` | **Lectura cruzada** a la tabla de Payment (misma BD), patrón compartido con reconciliation/notification. Acopla Compliance al esquema `payments`. |
+| `AlertRepository.Update` | `UPDATE aml_alerts SET status, note, resolved_at, resolved_by WHERE id=$1 AND status='open'` | Concurrencia optimista: 0 filas → `ErrAlertNotOpen`. |
+| `AlertRepository.FindByID` | `SELECT … WHERE id=$1` | `pgx.ErrNoRows` → `ErrAlertNotFound`. Si el ctx trae tenant, corre con `app.current_tenant` fijado (`RunWithAppTenant`). |
+| `AlertRepository.ListByTenant` | `WHERE tenant_id=$1 [AND status=$2] ORDER BY created_at DESC LIMIT $n` | `RunWithAppTenant`: tx efímera con `app.current_tenant` = tenant listado. |
+| `WatchlistRepository.Screen` | `… WHERE removed_at IS NULL AND string_to_array(normalized_name,' ') <@ string_to_array($1,' ')` | Prefiltro por **conjunto de tokens** (GIN); el score lo asigna `domain.MatchScore`. |
+| `WatchlistRepository.Add/Remove/List` | `INSERT …` / `UPDATE … SET removed_at WHERE id=$1 AND removed_at IS NULL` / `SELECT … WHERE removed_at IS NULL ORDER BY full_name LIMIT $1` | Pool directo, sin tenant. `Remove` con 0 filas → `ErrWatchlistEntryNotFound`. |
+| `TransactionLog.Record` | `INSERT INTO aml_monitored_payments … ON CONFLICT (payment_id) DO NOTHING` | Dentro de `RunInTx` (tenant del evento). |
+| `TransactionLog.CountSince` / `SumAmountSince` | `SELECT COUNT(*)` / `COALESCE(SUM(amount),0) FROM aml_monitored_payments WHERE tenant_id=$1 [AND currency=$2] AND captured_at >= $n` | Proyección propia: Compliance ya no lee la tabla `payments`. |
 
-Consecuencias del containment: la entrada `"vladimir petrov"` coincide con el
-comercio `"Vladimir Petrov Holdings S.A."` (normalizado), pero **no** con
-`"Vladimir Ivanovich Petrov"` (nombre medio interrumpe la cadena) ni con
-variantes ortográficas.
+Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
+
+| Nombre evaluado | Score |
+|---|---|
+| `Vladimir Petrov` | 100 (exacto) |
+| `Vladimir Petrov Holdings S.A.` | 90 (secuencia contigua) |
+| `Petrov, Vladimir` / `Vladimir Ivanovich Petrov` | 80 (tokens reordenados/intercalados → `medium`) |
+| `Vladímir Petróv` | 100 (acentos normalizados) |
+| `Vladimir Petrovsky` | sin match (token distinto) |
 
 ---
 
 ## 9. Seguridad y multi-tenancy
 
 - **Alertas**: tenant-scoped. `ListByTenant` filtra por `tenant_id` explícito
-  (del JWT); `GetAlert`/`ResolveAlert` buscan por `alert_id` y comparan
-  `alert.TenantID()` devolviendo 404 ante mismatch (no se filtra por RLS en la
-  lectura, que corre fuera de tx).
-- **Escrituras** (`Save`/`Update`) corren dentro de `RunInTx`, que setea
-  `app.current_tenant` → RLS activo sobre `aml_alerts`.
-- **Watchlist**: deliberadamente global (sin `tenant_id`, sin RLS). Su gestión
-  HTTP (`GET/POST /compliance/watchlist`) **no exige rol de plataforma**, a
-  diferencia de otros módulos que usan `RequireRole(RolePlatformSupport)`.
-  Cualquier usuario autenticado puede agregar entradas que afectarán el
-  screening de todos los comercios (ver §10.1).
-- **Resolución de alertas**: tampoco exige rol; cualquier miembro autenticado
-  del tenant puede disponer sus propias alertas (el MVP no modela el rol
-  "analista de cumplimiento").
+  (del JWT) **y** fija `app.current_tenant`; `GetAlert`/`ResolveAlert` buscan
+  por `alert_id` con el tenant del JWT como variable RLS y además comparan
+  `alert.TenantID()` devolviendo 404 ante mismatch.
+- **Escrituras** (`Save`/`Update`/`Record`) corren dentro de `RunInTx`, que
+  setea `app.current_tenant` (del JWT en la API, del evento en el worker) →
+  RLS activo sobre `aml_alerts` y `aml_monitored_payments`.
+- **Roles**: ver/listar alertas requiere `admin` o `platform_support`;
+  disponerlas, `admin` del tenant. La disposición queda firmada
+  (`resolved_by` en la fila y en `resolved.v1`).
+- **Watchlist**: deliberadamente global (sin `tenant_id`, sin RLS). Su lectura
+  y gestión (`GET/POST/DELETE /compliance/watchlist`) exigen
+  `RequireRole(RolePlatformSupport)`: un tenant no puede ver ni alterar la
+  lista contra la que se lo evalúa.
 
 ---
 
@@ -446,17 +516,12 @@ variantes ortográficas.
 
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
-| 1 | Watchlist editable sin control de rol | `POST /compliance/watchlist` solo requiere JWT; no hay guard `platform_support`. Permite inyectar entradas globales desde cualquier tenant. | **Alto** |
-| 2 | Resolución sin rol dedicado | Cualquier usuario del tenant puede marcar `cleared` una alerta (falso positivo) sin segregación de funciones. | Medio |
-| 3 | Matching limitado a containment | Sin fuzzy/fonético; variaciones ("Petrov Vladimir", acentos, abreviaturas) pasan de largo. Falsos positivos posibles por substrings casuales. | Medio |
-| 4 | Sin enforcement automático | Nadie consume `compliance.alert.raised.v1` (webhook/notification/auth). El evento vive en el stream pero no dispara acciones. | Funcional (por diseño MVP) |
-| 5 | Velocity por pago, no por ventana | Tras el umbral, cada pago captura genera una alerta nueva (subject = payment_id). Puede producir ráfagas de alertas en picos legítimos. | Bajo/Medio |
-| 6 | Sin métricas monetarias en velocity | La regla cuenta operaciones; no considera montos acumulados en la ventana. | Funcional |
-| 7 | Sin concurrencia optimista en resolve | `FindByID` fuera de tx + `UPDATE` sin versión: dos resoluciones simultáneas publican dos `resolved.v1` (last write wins en estado final). | Bajo |
-| 8 | Errores no tipados → códigos irregulares | Parseo de `tenant_id` fallido en `ListAlerts` responde 500 (y lista con tenant vacío → 0 filas); `ErrNoRows` no mapeado en otros repos respondería 400 con detalle interno. Con JWT válido no ocurre en práctica. | Bajo |
-| 9 | Lectura cruzada acoplada | `TransactionReader` depende del esquema `payments` (`status='captured'`, `captured_at`). Cambios en Payment rompen velocity. | Arquitectura |
-| 10 | Sin expiración/rechazo de entradas | `aml_watchlist` no tiene `removed_at`/versionado; borrar requiere SQL directo (no hay endpoint DELETE). | Funcional |
-| 11 | Semilla de ejemplo en producción | La migración inserta nombres ficticios; conviene separar la carga real de listas (OFAC/EU/UN) en un proceso aparte. | Operativo |
+| 1 | Sin enforcement automático | Nadie consume `compliance.alert.raised.v1` (webhook/notification/auth). Notificar o reaccionar requiere cuidado: avisar al propio comercio de un match de sanciones puede constituir *tipping-off*. | Funcional (por diseño MVP) |
+| 2 | Sin rol dedicado de cumplimiento | La disposición la hace el `admin` del tenant (queda `resolved_by`), pero no hay rol "oficial de cumplimiento" ni doble control (*four-eyes*) para `cleared`. `platform_support` solo ve alertas de su propio tenant (el lookup compara con el tenant del JWT). | Medio |
+| 3 | Sin fuzzy/fonético | El matching por tokens cubre orden, acentos y puntuación, pero no errores de tipeo, transliteraciones ("Petrov"/"Petroff") ni abreviaturas. La réplica SQL de `NormalizeName` en 000018 solo cubre acentos latinos comunes. | Medio |
+| 4 | Ventanas fijas | Velocity/volumen se deduplican por bucket fijo (`Truncate`); un pico que cruza el borde genera dos alertas. `captured_at` de la proyección es la hora de procesamiento, no la del evento original. | Bajo |
+| 5 | Proyección sin retención | `aml_monitored_payments` crece sin purga; solo se consulta la última ventana. | Operativo |
+| 6 | Carga de listas oficiales | No hay proceso de importación OFAC/EU/UN; la watchlist se carga entrada por entrada por API. | Operativo |
 
 ---
 
@@ -468,13 +533,14 @@ variantes ortográficas.
 | Aplicación | `application/screen_application_test.go`, `monitor_transaction_test.go`, `resolve_alert_test.go`, `queries_test.go` (+ `mocks_test.go`) | Unitarios con puertos en memoria/fake: cubre match único/mejor score, reglas de umbral/velocity, idempotencia `ErrDuplicateAlert`, límites de paginación, mappers. |
 | HTTP inbound | `inbound/http/handler_test.go` | Handlers Gin con `httptest` y fakes de puertos; incluye el mapeo de errores a códigos. |
 | NATS inbound | `inbound/nats/event_consumer_test.go` | Configs de consumers (stream/filtro/MaxDeliver) y handlers con payloads válidos/malformados y errores nak/ack. |
-| Postgres outbound | `outbound/postgres/*_test.go` | **pgxmock** (`github.com/pashagolub/pgxmock/v4`): SQL esperado por operación, scan de alertas, traducción de `23505` → `ErrDuplicateAlert`, containment de `Screen`, `CountCapturedSince`. |
+| Postgres outbound | `outbound/postgres/*_test.go` | **pgxmock** (`github.com/pashagolub/pgxmock/v4`): SQL esperado por operación, tx efímera de RLS (`set_config`), scan de alertas, `23505` → `ErrDuplicateAlert`, `UPDATE` condicional → `ErrAlertNotOpen`, screening por tokens, baja lógica, proyección `TransactionLog`. |
 
 ```bash
 go test ./context/compliance/...
 ```
 
-No hay tests de integración contra PostgreSQL real en este BC (todo mock).
+No hay tests de integración contra PostgreSQL real en este BC (todo mock). La
+migración 000018 se validó up → down → up contra PostgreSQL 16.
 
 ---
 
@@ -484,29 +550,29 @@ No hay tests de integración contra PostgreSQL real en este BC (todo mock).
 context/compliance/
 ├── domain/
 │   ├── alert.go          # Agregado Alert + FSM + PullEvents
-│   ├── vo.go             # IDs, AlertType, RiskLevel, AlertStatus, ParseDisposition
-│   ├── watchlist.go      # WatchlistEntry, Match, NormalizeName, RiskFromScore
+│   ├── vo.go             # IDs, AlertType, RiskLevel, AlertStatus, ParseDisposition, ParseStatusFilter
+│   ├── watchlist.go      # WatchlistEntry, NewWatchlistEntry, Match, NormalizeName, MatchScore, RiskFromScore
 │   ├── events.go         # AlertRaisedEvent, AlertResolvedEvent
-│   └── errors.go         # 4 errores sentinela
+│   └── errors.go         # errores sentinela
 ├── application/
-│   ├── ports.go          # TxManager, AlertRepository, WatchlistRepository, TransactionReader, EventPublisher, Clock
-│   ├── commands.go       # ScreenApplicationCmd, MonitorTransactionCmd, ResolveAlertCmd, AddWatchlistEntryCmd
-│   ├── queries.go        # ListAlerts, GetAlert, Add/ListWatchlist + AlertView/WatchlistEntryView + mapper
+│   ├── ports.go          # TxManager, AlertRepository, WatchlistRepository, TransactionLog, EventPublisher, Clock
+│   ├── commands.go       # ScreenApplicationCmd, MonitorTransactionCmd, ResolveAlertCmd, Add/RemoveWatchlistEntryCmd
+│   ├── queries.go        # ListAlerts, GetAlert, Add/Remove/ListWatchlist + AlertView/WatchlistEntryView + mappers
 │   ├── screen_application.go
 │   ├── monitor_transaction.go  # MonitoringRules + DefaultMonitoringRules + riskScoreForAmount
 │   ├── resolve_alert.go
 │   └── raise.go          # helper tx: Save + Publish, idempotente ante ErrDuplicateAlert
 └── infrastructure/adapters/
     ├── inbound/
-    │   ├── http/handler.go            # ComplianceHandler + RegisterRoutes (5 rutas)
+    │   ├── http/handler.go            # ComplianceHandler + RouteGuards + RegisterRoutes (6 rutas)
     │   └── nats/event_consumer.go     # consumers ONBOARDING + PAYMENT
     └── outbound/postgres/
         ├── alert_repo.go              # AlertRepository (RLS-aware en tx)
-        ├── watchlist_repo.go          # WatchlistRepository (global)
-        └── transaction_reader.go      # lectura cruzada de payments (velocity)
+        ├── watchlist_repo.go          # WatchlistRepository (global, screening por tokens, baja lógica)
+        └── transaction_log.go         # proyección aml_monitored_payments (velocity/volumen)
 ```
 
-Cableado: [cmd/api/main.go](../../cmd/api/main.go) (consulta/gestión) y
+Cableado: [cmd/api/main.go](../../cmd/api/main.go) (consulta/gestión + `RouteGuards`) y
 [cmd/worker/main.go](../../cmd/worker/main.go) (generación: consumers +
 `DefaultMonitoringRules()`). El publisher es el genérico
 `outbox.NewEventPublisher[compliancedomain.Event]`; el reloj inyectado es

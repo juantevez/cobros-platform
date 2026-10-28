@@ -15,6 +15,9 @@ import (
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
+// rlsTenantKey es la variable de sesión que leen las políticas RLS de aml_alerts.
+const rlsTenantKey = "app.current_tenant"
+
 type AlertRepository struct{ pool pkgpostgres.Conn }
 
 func NewAlertRepository(pool pkgpostgres.Conn) *AlertRepository {
@@ -53,9 +56,10 @@ func (r *AlertRepository) Save(ctx context.Context, a *domain.Alert) error {
 func (r *AlertRepository) Update(ctx context.Context, a *domain.Alert) error {
 	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
 	tag, err := conn.Exec(ctx, `
-		UPDATE aml_alerts SET status=$2, note=$3, resolved_at=$4
+		UPDATE aml_alerts SET status=$2, note=$3, resolved_at=$4, resolved_by=$5
 		WHERE id=$1 AND status='open'`,
 		a.ID().String(), a.Status().String(), nullStr(a.Note()), a.ResolvedAt(),
+		nullStr(a.ResolvedBy()),
 	)
 	if err != nil {
 		return fmt.Errorf("compliance repo: update alert: %w", err)
@@ -68,44 +72,61 @@ func (r *AlertRepository) Update(ctx context.Context, a *domain.Alert) error {
 
 const alertBaseSelect = `
 	SELECT id, tenant_id, alert_type, risk_level, status, subject, score,
-	       details, COALESCE(note,''), created_at, resolved_at
+	       details, COALESCE(note,''), COALESCE(resolved_by,''), created_at, resolved_at
 	FROM aml_alerts`
 
+// FindByID busca por ID. Si el contexto trae tenant (JWT), lo fija como
+// variable RLS para que la lectura funcione aunque corra fuera de una tx.
 func (r *AlertRepository) FindByID(ctx context.Context, id domain.AlertID) (*domain.Alert, error) {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, alertBaseSelect+" WHERE id=$1", id.String())
-	a, err := scanAlert(row)
+	if tenantID, ok := pkgpostgres.TenantIDFromContext(ctx); ok {
+		ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, tenantID)
+	}
+	var a *domain.Alert
+	err := pkgpostgres.RunWithAppTenant(ctx, r.pool, func(ctx context.Context) error {
+		conn := pkgpostgres.ConnFromContext(ctx, r.pool)
+		var err error
+		a, err = scanAlert(conn.QueryRow(ctx, alertBaseSelect+" WHERE id=$1", id.String()))
+		return err
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrAlertNotFound
 	}
-	return a, err
+	if err != nil {
+		return nil, fmt.Errorf("compliance repo: find alert: %w", err)
+	}
+	return a, nil
 }
 
-func (r *AlertRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter string, limit int) ([]*domain.Alert, error) {
+// ListByTenant fija app.current_tenant al tenant listado: el aislamiento no
+// depende solo del WHERE tenant_id explícito.
+func (r *AlertRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter domain.AlertStatus, limit int) ([]*domain.Alert, error) {
 	args := []any{tenantID.String()}
 	q := alertBaseSelect + " WHERE tenant_id=$1"
 	if statusFilter != "" {
-		args = append(args, statusFilter)
+		args = append(args, statusFilter.String())
 		q += fmt.Sprintf(" AND status=$%d", len(args))
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
 
-	rows, err := r.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("compliance repo: list alerts: %w", err)
-	}
-	defer rows.Close()
-
 	var alerts []*domain.Alert
-	for rows.Next() {
-		a, err := scanAlert(rows)
+	ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, tenantID.String())
+	err := pkgpostgres.RunWithAppTenant(ctx, r.pool, func(ctx context.Context) error {
+		rows, err := pkgpostgres.ConnFromContext(ctx, r.pool).Query(ctx, q, args...)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("compliance repo: list alerts: %w", err)
 		}
-		alerts = append(alerts, a)
-	}
-	return alerts, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			a, err := scanAlert(rows)
+			if err != nil {
+				return err
+			}
+			alerts = append(alerts, a)
+		}
+		return rows.Err()
+	})
+	return alerts, err
 }
 
 // scanner abstrae pgx.Row y pgx.Rows para reusar el scan.
@@ -115,14 +136,15 @@ type scanner interface {
 
 func scanAlert(s scanner) (*domain.Alert, error) {
 	var (
-		idStr, tenantIDStr, alertType, riskLevel, status, subject, note string
-		score                                                           int
-		detailsRaw                                                      []byte
-		createdAt                                                       time.Time
-		resolvedAt                                                      *time.Time
+		idStr, tenantIDStr, alertType, riskLevel, status, subject string
+		note, resolvedBy                                          string
+		score                                                     int
+		detailsRaw                                                []byte
+		createdAt                                                 time.Time
+		resolvedAt                                                *time.Time
 	)
 	if err := s.Scan(&idStr, &tenantIDStr, &alertType, &riskLevel, &status,
-		&subject, &score, &detailsRaw, &note, &createdAt, &resolvedAt); err != nil {
+		&subject, &score, &detailsRaw, &note, &resolvedBy, &createdAt, &resolvedAt); err != nil {
 		return nil, err
 	}
 	details := map[string]string{}
@@ -132,7 +154,7 @@ func scanAlert(s scanner) (*domain.Alert, error) {
 	return domain.ReconstituteAlert(
 		domain.AlertID(idStr), domain.TenantID(tenantIDStr),
 		domain.AlertType(alertType), domain.RiskLevel(riskLevel),
-		domain.AlertStatus(status), subject, score, details, note,
+		domain.AlertStatus(status), subject, score, details, note, resolvedBy,
 		createdAt.UTC(), resolvedAt,
 	), nil
 }

@@ -110,3 +110,17 @@ func TestParseDisposition(t *testing.T) {
 		}
 	})
 }
+
+func TestParseStatusFilter(t *testing.T) {
+	for _, ok := range []string{"", "open", "cleared", "confirmed"} {
+		got, err := ParseStatusFilter(ok)
+		if err != nil || string(got) != ok {
+			t.Errorf("ParseStatusFilter(%q) = %q, %v", ok, got, err)
+		}
+	}
+	for _, bad := range []string{"OPEN", "resolved", "x"} {
+		if _, err := ParseStatusFilter(bad); !errors.Is(err, ErrInvalidStatusFilter) {
+			t.Errorf("ParseStatusFilter(%q) err = %v, want ErrInvalidStatusFilter", bad, err)
+		}
+	}
+}

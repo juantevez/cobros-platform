@@ -27,6 +27,7 @@ type fakeAlertRepo struct {
 	listed    []*domain.Alert
 	listErr   error
 	updateErr error
+	updated   []*domain.Alert
 }
 
 func newAlertRepo() *fakeAlertRepo {
@@ -35,6 +36,7 @@ func newAlertRepo() *fakeAlertRepo {
 
 func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error { return nil }
 func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert) error {
+	r.updated = append(r.updated, a)
 	return r.updateErr
 }
 func (r *fakeAlertRepo) FindByID(ctx context.Context, id domain.AlertID) (*domain.Alert, error) {
@@ -44,15 +46,17 @@ func (r *fakeAlertRepo) FindByID(ctx context.Context, id domain.AlertID) (*domai
 	}
 	return a, nil
 }
-func (r *fakeAlertRepo) ListByTenant(ctx context.Context, t domain.TenantID, s string, l int) ([]*domain.Alert, error) {
+func (r *fakeAlertRepo) ListByTenant(ctx context.Context, t domain.TenantID, s domain.AlertStatus, l int) ([]*domain.Alert, error) {
 	return r.listed, r.listErr
 }
 
 type fakeWatchlist struct {
-	entries []domain.WatchlistEntry
-	listErr error
-	addErr  error
-	added   []domain.WatchlistEntry
+	entries   []domain.WatchlistEntry
+	listErr   error
+	addErr    error
+	removeErr error
+	added     []domain.WatchlistEntry
+	removed   []string
 }
 
 func (w *fakeWatchlist) Screen(ctx context.Context, n string) ([]domain.Match, error) {
@@ -63,6 +67,13 @@ func (w *fakeWatchlist) Add(ctx context.Context, e domain.WatchlistEntry, n stri
 		return w.addErr
 	}
 	w.added = append(w.added, e)
+	return nil
+}
+func (w *fakeWatchlist) Remove(ctx context.Context, id string, at time.Time) error {
+	if w.removeErr != nil {
+		return w.removeErr
+	}
+	w.removed = append(w.removed, id)
 	return nil
 }
 func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.WatchlistEntry, error) {
@@ -87,6 +98,7 @@ func newHandler(r *fakeAlertRepo, w *fakeWatchlist) *ComplianceHandler {
 		application.NewGetAlertUseCase(r),
 		application.NewResolveAlertUseCase(r, fakeTx{}, fakePublisher{}, fixedClock{}),
 		application.NewAddWatchlistEntryUseCase(w, fixedClock{}),
+		application.NewRemoveWatchlistEntryUseCase(w, fixedClock{}),
 		application.NewListWatchlistUseCase(w),
 	)
 }
@@ -103,7 +115,8 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 	}
 	req := httptest.NewRequest(method, target, reader)
 	if tenantID != "" {
-		req = req.WithContext(postgres.WithTenantID(req.Context(), tenantID))
+		ctx := postgres.WithTenantID(req.Context(), tenantID)
+		req = req.WithContext(postgres.WithActor(ctx, "user-42"))
 	}
 	c.Request = req
 	c.Params = params
@@ -145,6 +158,22 @@ func TestListAlerts(t *testing.T) {
 		}
 		if body.Count != 1 || len(body.Alerts) != 1 {
 			t.Errorf("count/alerts mismatch: %+v", body)
+		}
+	})
+
+	t.Run("invalid status filter yields 400", func(t *testing.T) {
+		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).ListAlerts, http.MethodGet,
+			"/compliance/alerts?status=bogus", "", tid.String(), nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("missing tenant yields 400, not 500", func(t *testing.T) {
+		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).ListAlerts, http.MethodGet,
+			"/compliance/alerts", "", "", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
 		}
 	})
 
@@ -210,6 +239,9 @@ func TestResolveAlert(t *testing.T) {
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204", rec.Code)
 		}
+		if len(r.updated) != 1 || r.updated[0].ResolvedBy() != "user-42" {
+			t.Errorf("resolved_by should come from the authenticated actor, got %+v", r.updated)
+		}
 	})
 
 	t.Run("invalid body yields 400", func(t *testing.T) {
@@ -235,7 +267,7 @@ func TestResolveAlert(t *testing.T) {
 	t.Run("already resolved yields 409", func(t *testing.T) {
 		r := newAlertRepo()
 		a := seedAlert(r, tid)
-		_ = a.Resolve(domain.StatusConfirmed, "", time.Now())
+		_ = a.Resolve(domain.StatusConfirmed, "", "user-1", time.Now())
 		a.PullEvents()
 		rec := doRequest(newHandler(r, &fakeWatchlist{}).ResolveAlert, http.MethodPost,
 			"/x", `{"disposition":"cleared"}`, tid.String(),
@@ -295,7 +327,19 @@ func TestAddWatchlistEntry(t *testing.T) {
 			t.Fatalf("status = %d, want 201", rec.Code)
 		}
 		if len(w.added) != 1 {
-			t.Errorf("expected 1 entry added, got %d", len(w.added))
+			t.Fatalf("expected 1 entry added, got %d", len(w.added))
+		}
+		var view application.WatchlistEntryView
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil || view.ID != w.added[0].ID {
+			t.Errorf("expected created entry in body, got %s (%v)", rec.Body.String(), err)
+		}
+	})
+
+	t.Run("invalid list_type yields 400", func(t *testing.T) {
+		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).AddWatchlistEntry, http.MethodPost,
+			"/compliance/watchlist", `{"full_name":"x","list_type":"terrorist"}`, "", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
 		}
 	})
 
@@ -315,27 +359,113 @@ func TestAddWatchlistEntry(t *testing.T) {
 		}
 	})
 
-	t.Run("use case error yields 400", func(t *testing.T) {
-		w := &fakeWatchlist{addErr: errors.New("boom")}
+	t.Run("repo error yields 500 without leaking details", func(t *testing.T) {
+		w := &fakeWatchlist{addErr: errors.New("pq: secret internal detail")}
 		rec := doRequest(newHandler(newAlertRepo(), w).AddWatchlistEntry, http.MethodPost,
 			"/compliance/watchlist", `{"full_name":"x","list_type":"pep"}`, "", nil)
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", rec.Code)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "secret") {
+			t.Errorf("internal error leaked: %s", rec.Body.String())
+		}
+	})
+}
+
+func TestRemoveWatchlistEntry(t *testing.T) {
+	t.Run("removes and returns 204", func(t *testing.T) {
+		w := &fakeWatchlist{}
+		id := uuid.NewString()
+		rec := doRequest(newHandler(newAlertRepo(), w).RemoveWatchlistEntry, http.MethodDelete,
+			"/x", "", "", gin.Params{{Key: "entryID", Value: id}})
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", rec.Code)
+		}
+		if len(w.removed) != 1 || w.removed[0] != id {
+			t.Errorf("removed = %v", w.removed)
+		}
+	})
+
+	t.Run("not found yields 404", func(t *testing.T) {
+		w := &fakeWatchlist{removeErr: domain.ErrWatchlistEntryNotFound}
+		rec := doRequest(newHandler(newAlertRepo(), w).RemoveWatchlistEntry, http.MethodDelete,
+			"/x", "", "", gin.Params{{Key: "entryID", Value: uuid.NewString()}})
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+	})
+
+	t.Run("invalid id yields 404", func(t *testing.T) {
+		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).RemoveWatchlistEntry, http.MethodDelete,
+			"/x", "", "", gin.Params{{Key: "entryID", Value: "bad"}})
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+	})
+
+	t.Run("repo error yields 500", func(t *testing.T) {
+		w := &fakeWatchlist{removeErr: errors.New("boom")}
+		rec := doRequest(newHandler(newAlertRepo(), w).RemoveWatchlistEntry, http.MethodDelete,
+			"/x", "", "", gin.Params{{Key: "entryID", Value: uuid.NewString()}})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
 		}
 	})
 }
 
 // ── RegisterRoutes ────────────────────────────────────────────────────────────
 
+func allow(c *gin.Context) { c.Next() }
+func deny(c *gin.Context)  { c.AbortWithStatus(http.StatusForbidden) }
+
 func TestRegisterRoutes(t *testing.T) {
 	w := &fakeWatchlist{entries: []domain.WatchlistEntry{{ID: "1", FullName: "A", ListType: "pep"}}}
-	r := gin.New()
-	RegisterRoutes(r.Group("/api/v1"), newHandler(newAlertRepo(), w))
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/compliance/watchlist", nil)
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/v1/compliance/watchlist status = %d, want 200", rec.Code)
-	}
+	t.Run("routes are wired behind their guards", func(t *testing.T) {
+		r := gin.New()
+		RegisterRoutes(r.Group("/api/v1"), newHandler(newAlertRepo(), w), RouteGuards{
+			ReadAlerts: allow, ResolveAlert: allow, ReadWatchlist: allow, ManageWatchlist: allow,
+		})
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/compliance/watchlist", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/compliance/watchlist status = %d, want 200", rec.Code)
+		}
+	})
+
+	t.Run("each route enforces its guard", func(t *testing.T) {
+		r := gin.New()
+		RegisterRoutes(r.Group("/api/v1"), newHandler(newAlertRepo(), w), RouteGuards{
+			ReadAlerts: deny, ResolveAlert: deny, ReadWatchlist: deny, ManageWatchlist: deny,
+		})
+		routes := []struct{ method, path, body string }{
+			{http.MethodGet, "/api/v1/compliance/alerts", ""},
+			{http.MethodGet, "/api/v1/compliance/alerts/" + uuid.NewString(), ""},
+			{http.MethodPost, "/api/v1/compliance/alerts/" + uuid.NewString() + "/resolve", `{"disposition":"cleared"}`},
+			{http.MethodGet, "/api/v1/compliance/watchlist", ""},
+			{http.MethodPost, "/api/v1/compliance/watchlist", `{"full_name":"x","list_type":"pep"}`},
+			{http.MethodDelete, "/api/v1/compliance/watchlist/" + uuid.NewString(), ""},
+		}
+		for _, rt := range routes {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(rt.method, rt.path, strings.NewReader(rt.body)))
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s %s status = %d, want 403", rt.method, rt.path, rec.Code)
+			}
+		}
+		if len(w.added) != 0 || len(w.removed) != 0 {
+			t.Error("guarded handlers must not run")
+		}
+	})
+
+	t.Run("missing guard panics", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic for missing guard")
+			}
+		}()
+		RegisterRoutes(gin.New().Group("/api/v1"), newHandler(newAlertRepo(), w), RouteGuards{
+			ReadAlerts: allow, ResolveAlert: allow, ReadWatchlist: allow,
+		})
+	})
 }

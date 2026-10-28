@@ -32,19 +32,20 @@ func (uc *ResolveAlertUseCase) Execute(ctx context.Context, cmd ResolveAlertCmd)
 		return err
 	}
 
-	alert, err := uc.repo.FindByID(ctx, alertID)
-	if err != nil {
-		return err
-	}
-	if alert.TenantID() != tenantID {
-		return domain.ErrAlertNotFound
-	}
-
-	if err := alert.Resolve(status, cmd.Note, uc.clock.Now()); err != nil {
-		return err
-	}
-
+	// La lectura y el UPDATE condicional (WHERE status='open') van en la misma
+	// tx: si dos analistas resuelven a la vez, el segundo UPDATE no afecta filas,
+	// el repo retorna ErrAlertNotOpen y no se publica un segundo resolved.v1.
 	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		alert, err := uc.repo.FindByID(ctx, alertID)
+		if err != nil {
+			return err
+		}
+		if alert.TenantID() != tenantID {
+			return domain.ErrAlertNotFound
+		}
+		if err := alert.Resolve(status, cmd.Note, cmd.ResolvedBy, uc.clock.Now()); err != nil {
+			return err
+		}
 		if err := uc.repo.Update(ctx, alert); err != nil {
 			return err
 		}

@@ -18,6 +18,7 @@ type ComplianceHandler struct {
 	getAlert      *application.GetAlertUseCase
 	resolveAlert  *application.ResolveAlertUseCase
 	addEntry      *application.AddWatchlistEntryUseCase
+	removeEntry   *application.RemoveWatchlistEntryUseCase
 	listWatchlist *application.ListWatchlistUseCase
 }
 
@@ -26,11 +27,12 @@ func NewComplianceHandler(
 	getAlert *application.GetAlertUseCase,
 	resolveAlert *application.ResolveAlertUseCase,
 	addEntry *application.AddWatchlistEntryUseCase,
+	removeEntry *application.RemoveWatchlistEntryUseCase,
 	listWatchlist *application.ListWatchlistUseCase,
 ) *ComplianceHandler {
 	return &ComplianceHandler{
 		listAlerts: listAlerts, getAlert: getAlert, resolveAlert: resolveAlert,
-		addEntry: addEntry, listWatchlist: listWatchlist,
+		addEntry: addEntry, removeEntry: removeEntry, listWatchlist: listWatchlist,
 	}
 }
 
@@ -47,7 +49,14 @@ func (h *ComplianceHandler) ListAlerts(c *gin.Context) {
 		Limit:        limit,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		switch {
+		case errors.Is(err, domain.ErrInvalidTenantID):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant id"})
+		case errors.Is(err, domain.ErrInvalidStatusFilter):
+			c.JSON(http.StatusBadRequest, gin.H{"error": domain.ErrInvalidStatusFilter.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"alerts": views, "count": len(views)})
@@ -96,6 +105,7 @@ func (h *ComplianceHandler) ResolveAlert(c *gin.Context) {
 		AlertID:     c.Param("alertID"),
 		Disposition: req.Disposition,
 		Note:        req.Note,
+		ResolvedBy:  postgres.ActorFromContext(c.Request.Context()),
 	})
 	if err != nil {
 		switch {
@@ -103,8 +113,10 @@ func (h *ComplianceHandler) ResolveAlert(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "alert not found"})
 		case errors.Is(err, domain.ErrAlertNotOpen):
 			c.JSON(http.StatusConflict, gin.H{"error": "alert already resolved"})
-		case errors.Is(err, domain.ErrInvalidTenantID), errors.Is(err, domain.ErrInvalidAlertID), errors.Is(err, domain.ErrInvalidDisposition):
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, domain.ErrInvalidTenantID), errors.Is(err, domain.ErrInvalidAlertID):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant or alert id"})
+		case errors.Is(err, domain.ErrInvalidDisposition):
+			c.JSON(http.StatusBadRequest, gin.H{"error": domain.ErrInvalidDisposition.Error()})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		}
@@ -127,6 +139,7 @@ func (h *ComplianceHandler) ListWatchlist(c *gin.Context) {
 }
 
 // AddWatchlistEntry agrega una entrada a la watchlist global.
+// Retorna la entrada creada (su id permite darla de baja con DELETE).
 //
 //	POST /api/v1/compliance/watchlist
 func (h *ComplianceHandler) AddWatchlistEntry(c *gin.Context) {
@@ -140,24 +153,70 @@ func (h *ComplianceHandler) AddWatchlistEntry(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "full_name and list_type are required"})
 		return
 	}
-	if err := h.addEntry.Execute(c.Request.Context(), application.AddWatchlistEntryCmd{
+	view, err := h.addEntry.Execute(c.Request.Context(), application.AddWatchlistEntryCmd{
 		FullName: req.FullName, ListType: req.ListType,
 		Country: req.Country, Source: req.Source,
-	}); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvalidListType), errors.Is(err, domain.ErrInvalidWatchlistName):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		}
 		return
 	}
-	c.Status(http.StatusCreated)
+	c.JSON(http.StatusCreated, view)
+}
+
+// RemoveWatchlistEntry da de baja (soft delete) una entrada de la watchlist.
+//
+//	DELETE /api/v1/compliance/watchlist/:entryID
+func (h *ComplianceHandler) RemoveWatchlistEntry(c *gin.Context) {
+	err := h.removeEntry.Execute(c.Request.Context(), application.RemoveWatchlistEntryCmd{
+		EntryID: c.Param("entryID"),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrWatchlistEntryNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "watchlist entry not found"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		}
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// ── Autorización por ruta ─────────────────────────────────────────────────────
+
+// RouteGuards autoriza cada operación de Compliance. Se inyectan desde el
+// composition root (cmd/api) para no acoplar este contexto con Auth; en
+// producción son RequireRole(...).
+type RouteGuards struct {
+	ReadAlerts      gin.HandlerFunc // GET /alerts, /alerts/:id        (admin del tenant)
+	ResolveAlert    gin.HandlerFunc // POST /alerts/:id/resolve        (admin del tenant)
+	ReadWatchlist   gin.HandlerFunc // GET /watchlist                  (platform_support)
+	ManageWatchlist gin.HandlerFunc // POST/DELETE /watchlist          (platform_support)
 }
 
 // RegisterRoutes registra las rutas de Compliance en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *ComplianceHandler) {
+// El grupo debe autenticar (JWT); los guards autorizan por rol. Todos son
+// obligatorios: gin saltea los handlers nil, así que un guard olvidado dejaría
+// la ruta abierta a cualquier usuario autenticado.
+func RegisterRoutes(rg *gin.RouterGroup, h *ComplianceHandler, guards RouteGuards) {
+	if guards.ReadAlerts == nil || guards.ResolveAlert == nil ||
+		guards.ReadWatchlist == nil || guards.ManageWatchlist == nil {
+		panic("compliance: RegisterRoutes requires all RouteGuards (ReadAlerts, ResolveAlert, ReadWatchlist, ManageWatchlist)")
+	}
+
 	comp := rg.Group("/compliance")
 	{
-		comp.GET("/alerts", h.ListAlerts)
-		comp.GET("/alerts/:alertID", h.GetAlert)
-		comp.POST("/alerts/:alertID/resolve", h.ResolveAlert)
-		comp.GET("/watchlist", h.ListWatchlist)
-		comp.POST("/watchlist", h.AddWatchlistEntry)
+		comp.GET("/alerts", guards.ReadAlerts, h.ListAlerts)
+		comp.GET("/alerts/:alertID", guards.ReadAlerts, h.GetAlert)
+		comp.POST("/alerts/:alertID/resolve", guards.ResolveAlert, h.ResolveAlert)
+		comp.GET("/watchlist", guards.ReadWatchlist, h.ListWatchlist)
+		comp.POST("/watchlist", guards.ManageWatchlist, h.AddWatchlistEntry)
+		comp.DELETE("/watchlist/:entryID", guards.ManageWatchlist, h.RemoveWatchlistEntry)
 	}
 }

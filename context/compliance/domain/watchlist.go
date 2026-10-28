@@ -1,6 +1,17 @@
 package domain
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
+)
+
+// Tipos de lista admitidos (mismo dominio que el CHECK de aml_watchlist).
+const (
+	ListTypeSanctions = "sanctions"
+	ListTypePEP       = "pep"
+)
 
 // WatchlistEntry es una entrada de la lista de vigilancia global (sanciones/PEP).
 type WatchlistEntry struct {
@@ -11,6 +22,25 @@ type WatchlistEntry struct {
 	Source   string // OFAC, EU, UN, ...
 }
 
+// NewWatchlistEntry valida y construye una entrada. El nombre debe conservar
+// al menos un token tras normalizar (si no, nunca podría matchear) y el tipo
+// de lista debe ser sanctions|pep.
+func NewWatchlistEntry(id, fullName, listType, country, source string) (WatchlistEntry, error) {
+	if NormalizeName(fullName) == "" {
+		return WatchlistEntry{}, ErrInvalidWatchlistName
+	}
+	if listType != ListTypeSanctions && listType != ListTypePEP {
+		return WatchlistEntry{}, ErrInvalidListType
+	}
+	return WatchlistEntry{
+		ID:       id,
+		FullName: strings.TrimSpace(fullName),
+		ListType: listType,
+		Country:  strings.ToUpper(strings.TrimSpace(country)),
+		Source:   strings.TrimSpace(source),
+	}, nil
+}
+
 // Match es el resultado de un screening: una entrada de la watchlist que
 // coincide con el nombre evaluado, con un puntaje de confianza.
 type Match struct {
@@ -19,10 +49,58 @@ type Match struct {
 }
 
 // NormalizeName lleva un nombre a su forma canónica para comparar:
-// minúsculas, sin espacios de más. Se usa tanto al sembrar la watchlist
-// como al evaluar un nombre entrante.
+// sin acentos/diacríticos, minúsculas, puntuación reemplazada por espacio y
+// espacios colapsados ("Pérez-Gómez, S.A." → "perez gomez s a"). Se usa tanto
+// al cargar la watchlist como al evaluar un nombre entrante. Idempotente.
+//
+// La migración 000018 replica esta regla en SQL para re-normalizar las filas
+// existentes; si cambia, hay que re-normalizar aml_watchlist.normalized_name.
 func NormalizeName(name string) string {
-	return strings.ToLower(strings.Join(strings.Fields(name), " "))
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range norm.NFD.String(name) {
+		switch {
+		case unicode.Is(unicode.Mn, r):
+			// marca diacrítica separada por NFD → se descarta
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(unicode.ToLower(r))
+		default:
+			b.WriteRune(' ')
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// Puntajes del screening por calidad de coincidencia.
+const (
+	ScoreExactMatch   = 100 // el nombre evaluado es exactamente la entrada
+	ScoreOrderedMatch = 90  // la entrada aparece como secuencia contigua de tokens
+	ScoreTokenMatch   = 80  // todos los tokens de la entrada aparecen, en otro orden
+)
+
+// MatchScore compara una entrada normalizada contra un nombre normalizado
+// por tokens completos (no por substrings): "ivan sokolov" no coincide con
+// "ivan sokolovsky". Retorna 0 si no hay coincidencia.
+func MatchScore(entryNorm, nameNorm string) int {
+	if entryNorm == "" || nameNorm == "" {
+		return 0
+	}
+	if entryNorm == nameNorm {
+		return ScoreExactMatch
+	}
+	if strings.Contains(" "+nameNorm+" ", " "+entryNorm+" ") {
+		return ScoreOrderedMatch
+	}
+	tokens := make(map[string]struct{})
+	for _, t := range strings.Fields(nameNorm) {
+		tokens[t] = struct{}{}
+	}
+	for _, t := range strings.Fields(entryNorm) {
+		if _, ok := tokens[t]; !ok {
+			return 0
+		}
+	}
+	return ScoreTokenMatch
 }
 
 // RiskFromScore mapea un puntaje de match a un nivel de riesgo.

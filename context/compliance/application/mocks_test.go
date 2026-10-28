@@ -70,8 +70,8 @@ func (r *fakeAlertRepo) FindByID(ctx context.Context, id domain.AlertID) (*domai
 	return a, nil
 }
 
-func (r *fakeAlertRepo) ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter string, limit int) ([]*domain.Alert, error) {
-	r.gotStatusFilter = statusFilter
+func (r *fakeAlertRepo) ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter domain.AlertStatus, limit int) ([]*domain.Alert, error) {
+	r.gotStatusFilter = string(statusFilter)
 	r.gotLimit = limit
 	if r.listErr != nil {
 		return nil, r.listErr
@@ -85,8 +85,10 @@ type fakeWatchlist struct {
 	screenErr error
 	addErr    error
 	listErr   error
+	removeErr error
 
 	added         []domain.WatchlistEntry
+	removed       []string
 	gotNormAdd    string
 	gotNormScreen string
 }
@@ -108,6 +110,14 @@ func (w *fakeWatchlist) Add(ctx context.Context, entry domain.WatchlistEntry, no
 	return nil
 }
 
+func (w *fakeWatchlist) Remove(ctx context.Context, id string, removedAt time.Time) error {
+	if w.removeErr != nil {
+		return w.removeErr
+	}
+	w.removed = append(w.removed, id)
+	return nil
+}
+
 func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.WatchlistEntry, error) {
 	if w.listErr != nil {
 		return nil, w.listErr
@@ -115,19 +125,42 @@ func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.Watchlist
 	return w.entries, nil
 }
 
-type fakeTxReader struct {
-	count int
-	err   error
+type fakeTxLog struct {
+	count     int
+	sum       int64
+	recordErr error
+	countErr  error
+	sumErr    error
 
-	gotSince time.Time
+	recorded    []MonitoredPayment
+	gotSince    time.Time
+	gotCurrency string
+	sumCalls    int
 }
 
-func (r *fakeTxReader) CountCapturedSince(ctx context.Context, tenantID string, since time.Time) (int, error) {
-	r.gotSince = since
-	if r.err != nil {
-		return 0, r.err
+func (l *fakeTxLog) Record(ctx context.Context, p MonitoredPayment) error {
+	if l.recordErr != nil {
+		return l.recordErr
 	}
-	return r.count, nil
+	l.recorded = append(l.recorded, p)
+	return nil
+}
+
+func (l *fakeTxLog) CountSince(ctx context.Context, tenantID string, since time.Time) (int, error) {
+	l.gotSince = since
+	if l.countErr != nil {
+		return 0, l.countErr
+	}
+	return l.count, nil
+}
+
+func (l *fakeTxLog) SumAmountSince(ctx context.Context, tenantID, currency string, since time.Time) (int64, error) {
+	l.sumCalls++
+	l.gotCurrency = currency
+	if l.sumErr != nil {
+		return 0, l.sumErr
+	}
+	return l.sum, nil
 }
 
 type fakePublisher struct {

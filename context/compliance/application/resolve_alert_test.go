@@ -36,9 +36,13 @@ func TestResolveAlertUseCase_Execute(t *testing.T) {
 			AlertID:     a.ID().String(),
 			Disposition: "cleared",
 			Note:        "falso positivo",
+			ResolvedBy:  "user-1",
 		}
 		if err := uc.Execute(context.Background(), cmd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if r.updated[0].ResolvedBy() != "user-1" {
+			t.Errorf("resolvedBy = %q, want user-1", r.updated[0].ResolvedBy())
 		}
 		if len(r.updated) != 1 {
 			t.Fatalf("expected 1 update, got %d", len(r.updated))
@@ -103,7 +107,7 @@ func TestResolveAlertUseCase_Execute(t *testing.T) {
 		tid, _ := domain.ParseTenantID(validTenant())
 		r := newAlertRepo()
 		a := seedOpenAlert(r, tid)
-		_ = a.Resolve(domain.StatusConfirmed, "", testNow)
+		_ = a.Resolve(domain.StatusConfirmed, "", "user-1", testNow)
 		a.PullEvents()
 		uc := newUC(r, &fakePublisher{})
 
@@ -120,6 +124,22 @@ func TestResolveAlertUseCase_Execute(t *testing.T) {
 		cmd := ResolveAlertCmd{TenantID: validTenant(), AlertID: uuid.NewString(), Disposition: "cleared"}
 		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
+		}
+	})
+
+	t.Run("concurrent resolution (conditional update) publishes nothing", func(t *testing.T) {
+		tid, _ := domain.ParseTenantID(validTenant())
+		r := newAlertRepo()
+		a := seedOpenAlert(r, tid)
+		r.updateErr = domain.ErrAlertNotOpen // otro analista ganó la carrera
+		p := &fakePublisher{}
+		uc := newUC(r, p)
+		cmd := ResolveAlertCmd{TenantID: tid.String(), AlertID: a.ID().String(), Disposition: "confirmed"}
+		if err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrAlertNotOpen) {
+			t.Fatalf("expected ErrAlertNotOpen, got %v", err)
+		}
+		if len(p.published) != 0 {
+			t.Errorf("expected no published events, got %d", len(p.published))
 		}
 	})
 

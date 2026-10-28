@@ -342,13 +342,13 @@ func main() {
 	compliancePub  := outbox.NewEventPublisher[compliancedomain.Event](outboxStore)
 	complianceAlerts := compliancepg.NewAlertRepository(pool)
 	complianceWatch  := compliancepg.NewWatchlistRepository(pool)
-	complianceTxRead := compliancepg.NewTransactionReader(pool)
+	complianceTxLog  := compliancepg.NewTransactionLog(pool)
 
 	screenApp := complianceapp.NewScreenApplicationUseCase(
 		complianceAlerts, complianceWatch, txMgr, compliancePub, realClock{},
 	)
 	monitorTx := complianceapp.NewMonitorTransactionUseCase(
-		complianceAlerts, complianceTxRead, txMgr, compliancePub, realClock{},
+		complianceAlerts, complianceTxLog, txMgr, compliancePub, realClock{},
 		complianceapp.DefaultMonitoringRules(),
 	)
 	complianceConsumer := compliancenats.NewEventConsumer(

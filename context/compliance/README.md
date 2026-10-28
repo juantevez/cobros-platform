@@ -29,9 +29,10 @@ NATS JetStream
 
 | Regla | Disparador | Alerta |
 |---|---|---|
-| Screening | `legal_name` ∈ `aml_watchlist` (containment normalizado) | `sanctions_match` |
+| Screening | Todos los tokens de una entrada vigente de `aml_watchlist` presentes en el `legal_name` normalizado | `sanctions_match` |
 | Umbral | `amount ≥ ThresholdAmount` (default $10.000) | `transaction_threshold` |
-| Velocity | ≥ `VelocityCount` pagos capturados en `VelocityWindow` (default 10 / 10min) | `transaction_velocity` |
+| Velocity | ≥ `VelocityCount` pagos capturados en `VelocityWindow` (default 10 / 10min) — una alerta por ventana | `transaction_velocity` |
+| Volumen | ≥ `VolumeAmount` acumulado por moneda en `VelocityWindow` (default $50.000) — una alerta por ventana y moneda | `transaction_volume` |
 
 Los umbrales viven en `application.MonitoringRules` (`DefaultMonitoringRules()`),
 inyectados en `MonitorTransactionUseCase` desde `cmd/worker`.
@@ -46,19 +47,23 @@ lo trata como no-op (sin publicar de nuevo).
 ## Watchlist
 
 `aml_watchlist` es una lista **global** (no multi-tenant, sin RLS): se hace
-screening de todos los comercios contra ella. Se siembra por migración y se
-gestiona por `GET/POST /api/v1/compliance/watchlist`. El match usa containment
-sobre el nombre normalizado (`NormalizeName`: minúsculas + espacios colapsados).
+screening de todos los comercios contra ella. Se gestiona solo con rol
+`platform_support` por `GET/POST/DELETE /api/v1/compliance/watchlist` (el DELETE
+es baja lógica, `removed_at`). La semilla de ejemplo es solo para desarrollo
+(`make seed-dev`). El match es por tokens completos sobre el nombre normalizado
+(`NormalizeName`: sin acentos ni puntuación, minúsculas, espacios colapsados) y
+se puntúa con `MatchScore` (exacto 100, contiguo 90, reordenado 80).
 
-## Velocity: lectura cruzada
+## Reglas de ventana: proyección propia
 
-La regla de velocity cuenta pagos capturados leyendo la tabla `payments`
-directamente (`TransactionReader`, misma BD) — patrón de lectura cruzada ya
-usado por reconciliation/notification.
+Velocity y volumen cuentan sobre `aml_monitored_payments`, una proyección que
+`MonitorTransaction` alimenta desde `payment.captured.v1` (`TransactionLog`,
+idempotente por `payment_id`). Compliance no lee el esquema de Payment.
 
 ## Enforcement
 
-Pasivo por diseño: se **registra** la alerta para que un analista la disponga
-(`cleared` = falso positivo, `confirmed` = verdadero positivo). El evento
+Pasivo por diseño: se **registra** la alerta para que el admin del tenant la
+disponga (`cleared` = falso positivo, `confirmed` = verdadero positivo; queda
+`resolved_by`). El evento
 `compliance.alert.raised.v1` queda disponible en el stream `COMPLIANCE` para
 que, a futuro, otros contextos reaccionen (p. ej. auth suspendiendo el tenant).

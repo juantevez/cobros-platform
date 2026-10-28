@@ -372,11 +372,19 @@ func main() {
 	getAlert := complianceapp.NewGetAlertUseCase(alertRepo)
 	resolveAlert := complianceapp.NewResolveAlertUseCase(alertRepo, txManager, compliancePub, clock)
 	addWatchEntry := complianceapp.NewAddWatchlistEntryUseCase(watchlistRepo, clock)
+	removeWatchEntry := complianceapp.NewRemoveWatchlistEntryUseCase(watchlistRepo, clock)
 	listWatchlist := complianceapp.NewListWatchlistUseCase(watchlistRepo)
 
+	// Alertas: las revisa/dispone el admin del tenant (queda registrado quién,
+	// resolved_by). Watchlist: global a la plataforma → solo platform_support.
 	compliancehttp.RegisterRoutes(protected, compliancehttp.NewComplianceHandler(
-		listAlerts, getAlert, resolveAlert, addWatchEntry, listWatchlist,
-	))
+		listAlerts, getAlert, resolveAlert, addWatchEntry, removeWatchEntry, listWatchlist,
+	), compliancehttp.RouteGuards{
+		ReadAlerts:      authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+		ResolveAlert:    authttp.RequireRole(authdomain.RoleAdmin),
+		ReadWatchlist:   authttp.RequireRole(authdomain.RolePlatformSupport),
+		ManageWatchlist: authttp.RequireRole(authdomain.RolePlatformSupport),
+	})
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 

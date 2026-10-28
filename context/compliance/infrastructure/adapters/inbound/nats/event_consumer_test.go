@@ -13,6 +13,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/compliance/application"
 	"github.com/juantevez/cobros-platform/context/compliance/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -28,6 +29,7 @@ func (w *fakeWatchlist) Screen(ctx context.Context, normalizedName string) ([]do
 func (w *fakeWatchlist) Add(ctx context.Context, e domain.WatchlistEntry, n string, at time.Time) error {
 	return nil
 }
+func (w *fakeWatchlist) Remove(ctx context.Context, id string, at time.Time) error { return nil }
 func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.WatchlistEntry, error) {
 	return nil, nil
 }
@@ -35,9 +37,12 @@ func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.Watchlist
 type fakeAlertRepo struct {
 	saved   []*domain.Alert
 	saveErr error
+
+	ctxTenant string // tenant visto en el ctx del Save (RLS en RunInTx)
 }
 
 func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error {
+	r.ctxTenant, _ = postgres.TenantIDFromContext(ctx)
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -48,17 +53,21 @@ func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert) error { ret
 func (r *fakeAlertRepo) FindByID(ctx context.Context, id domain.AlertID) (*domain.Alert, error) {
 	return nil, domain.ErrAlertNotFound
 }
-func (r *fakeAlertRepo) ListByTenant(ctx context.Context, t domain.TenantID, s string, l int) ([]*domain.Alert, error) {
+func (r *fakeAlertRepo) ListByTenant(ctx context.Context, t domain.TenantID, s domain.AlertStatus, l int) ([]*domain.Alert, error) {
 	return nil, nil
 }
 
-type fakeTxReader struct {
+type fakeTxLog struct {
 	count int
 	err   error
 }
 
-func (r *fakeTxReader) CountCapturedSince(ctx context.Context, tenantID string, since time.Time) (int, error) {
-	return r.count, r.err
+func (l *fakeTxLog) Record(ctx context.Context, p application.MonitoredPayment) error { return nil }
+func (l *fakeTxLog) CountSince(ctx context.Context, tenantID string, since time.Time) (int, error) {
+	return l.count, l.err
+}
+func (l *fakeTxLog) SumAmountSince(ctx context.Context, tenantID, currency string, since time.Time) (int64, error) {
+	return 0, l.err
 }
 
 type fakeTx struct{}
@@ -88,7 +97,7 @@ func (c *fakeConsumer) Start(ctx context.Context, cfg eventbus.ConsumerConfig, h
 	return nil
 }
 
-func newConsumer(w *fakeWatchlist, r *fakeAlertRepo, tr *fakeTxReader) (*EventConsumer, *fakeConsumer) {
+func newConsumer(w *fakeWatchlist, r *fakeAlertRepo, tr *fakeTxLog) (*EventConsumer, *fakeConsumer) {
 	fc := &fakeConsumer{}
 	pub := &fakePublisher{}
 	screen := application.NewScreenApplicationUseCase(r, w, fakeTx{}, pub, fixedClock{})
@@ -101,7 +110,7 @@ func newConsumer(w *fakeWatchlist, r *fakeAlertRepo, tr *fakeTxReader) (*EventCo
 
 func TestStartConsumers(t *testing.T) {
 	t.Run("onboarding config", func(t *testing.T) {
-		c, fc := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxReader{})
+		c, fc := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxLog{})
 		if err := c.StartOnboardingConsumer(context.Background()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -114,7 +123,7 @@ func TestStartConsumers(t *testing.T) {
 	})
 
 	t.Run("payment config", func(t *testing.T) {
-		c, fc := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxReader{})
+		c, fc := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxLog{})
 		if err := c.StartPaymentConsumer(context.Background()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -138,7 +147,7 @@ func TestHandleOnboarding(t *testing.T) {
 			Score: 95,
 		}}}
 		r := &fakeAlertRepo{}
-		c, _ := newConsumer(w, r, &fakeTxReader{})
+		c, _ := newConsumer(w, r, &fakeTxLog{})
 		msg := &eventbus.Message{
 			Subject: "onboarding.application.submitted.v1",
 			Payload: []byte(`{"application_id":"app-1","tenant_id":"` + tid + `","legal_name":"Osama Bin Laden"}`),
@@ -152,7 +161,7 @@ func TestHandleOnboarding(t *testing.T) {
 	})
 
 	t.Run("malformed payload is acked", func(t *testing.T) {
-		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxReader{})
+		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxLog{})
 		msg := &eventbus.Message{Subject: "x", Payload: []byte(`{bad`)}
 		if err := c.handleOnboarding(context.Background(), msg); err != nil {
 			t.Fatalf("malformed payload should be acked, got %v", err)
@@ -160,7 +169,7 @@ func TestHandleOnboarding(t *testing.T) {
 	})
 
 	t.Run("missing tenant is acked", func(t *testing.T) {
-		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxReader{})
+		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxLog{})
 		msg := &eventbus.Message{Payload: []byte(`{"legal_name":"x"}`)}
 		if err := c.handleOnboarding(context.Background(), msg); err != nil {
 			t.Fatalf("missing tenant should be acked, got %v", err)
@@ -169,7 +178,7 @@ func TestHandleOnboarding(t *testing.T) {
 
 	t.Run("screening error triggers nak", func(t *testing.T) {
 		w := &fakeWatchlist{err: errors.New("boom")}
-		c, _ := newConsumer(w, &fakeAlertRepo{}, &fakeTxReader{})
+		c, _ := newConsumer(w, &fakeAlertRepo{}, &fakeTxLog{})
 		msg := &eventbus.Message{
 			Payload: []byte(`{"tenant_id":"` + tid + `","legal_name":"x"}`),
 		}
@@ -186,7 +195,7 @@ func TestHandlePayment(t *testing.T) {
 
 	t.Run("large amount raises threshold alert", func(t *testing.T) {
 		r := &fakeAlertRepo{}
-		c, _ := newConsumer(&fakeWatchlist{}, r, &fakeTxReader{count: 0})
+		c, _ := newConsumer(&fakeWatchlist{}, r, &fakeTxLog{count: 0})
 		msg := &eventbus.Message{
 			Subject: "payment.captured.v1",
 			Payload: []byte(`{"payment_id":"pay-1","tenant_id":"` + tid + `","amount":5000000,"currency":"ARS","payment_method":"card"}`),
@@ -197,10 +206,13 @@ func TestHandlePayment(t *testing.T) {
 		if len(r.saved) != 1 {
 			t.Errorf("expected 1 alert, got %d", len(r.saved))
 		}
+		if r.ctxTenant != tid {
+			t.Errorf("tenant in ctx = %q, want %q (RLS)", r.ctxTenant, tid)
+		}
 	})
 
 	t.Run("malformed payload is acked", func(t *testing.T) {
-		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxReader{})
+		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxLog{})
 		msg := &eventbus.Message{Payload: []byte(`{bad`)}
 		if err := c.handlePayment(context.Background(), msg); err != nil {
 			t.Fatalf("malformed payload should be acked, got %v", err)
@@ -208,7 +220,7 @@ func TestHandlePayment(t *testing.T) {
 	})
 
 	t.Run("missing tenant is acked", func(t *testing.T) {
-		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxReader{})
+		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, &fakeTxLog{})
 		msg := &eventbus.Message{Payload: []byte(`{"payment_id":"p","amount":1}`)}
 		if err := c.handlePayment(context.Background(), msg); err != nil {
 			t.Fatalf("missing tenant should be acked, got %v", err)
@@ -216,7 +228,7 @@ func TestHandlePayment(t *testing.T) {
 	})
 
 	t.Run("monitoring error triggers nak", func(t *testing.T) {
-		tr := &fakeTxReader{err: errors.New("boom")}
+		tr := &fakeTxLog{err: errors.New("boom")}
 		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, tr)
 		msg := &eventbus.Message{
 			Payload: []byte(`{"payment_id":"p","tenant_id":"` + tid + `","amount":1}`),

@@ -13,4 +13,10 @@ var (
 	ErrInvalidDisposition = errors.New("compliance: invalid disposition")
 	// ErrInvalidListType indica un tipo de lista de vigilancia inválido.
 	ErrInvalidListType = errors.New("compliance: invalid list type, must be sanctions or pep")
+	// ErrInvalidWatchlistName indica un nombre vacío (o sin letras/dígitos) en la watchlist.
+	ErrInvalidWatchlistName = errors.New("compliance: watchlist full_name must contain letters or digits")
+	// ErrWatchlistEntryNotFound indica que la entrada no existe o ya fue dada de baja.
+	ErrWatchlistEntryNotFound = errors.New("compliance: watchlist entry not found")
+	// ErrInvalidStatusFilter indica un filtro de estado desconocido al listar alertas.
+	ErrInvalidStatusFilter = errors.New("compliance: invalid status filter (use open|cleared|confirmed)")
 )

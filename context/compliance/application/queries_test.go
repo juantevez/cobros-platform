@@ -54,6 +54,25 @@ func TestListAlertsUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid status filter rejected before hitting the repo", func(t *testing.T) {
+		r := newAlertRepo()
+		uc := NewListAlertsUseCase(r)
+		_, err := uc.Execute(context.Background(), ListAlertsQuery{TenantID: tid.String(), StatusFilter: "bogus"})
+		if !errors.Is(err, domain.ErrInvalidStatusFilter) {
+			t.Fatalf("expected ErrInvalidStatusFilter, got %v", err)
+		}
+		if r.gotLimit != 0 {
+			t.Error("repo should not be called")
+		}
+	})
+
+	t.Run("invalid tenant is a typed error", func(t *testing.T) {
+		uc := NewListAlertsUseCase(newAlertRepo())
+		if _, err := uc.Execute(context.Background(), ListAlertsQuery{TenantID: ""}); !errors.Is(err, domain.ErrInvalidTenantID) {
+			t.Fatalf("expected ErrInvalidTenantID, got %v", err)
+		}
+	})
+
 	t.Run("repo error propagated", func(t *testing.T) {
 		r := newAlertRepo()
 		r.listErr = errBoom
@@ -117,8 +136,9 @@ func TestAddWatchlistEntryUseCase_Execute(t *testing.T) {
 	t.Run("adds normalized entry", func(t *testing.T) {
 		w := &fakeWatchlist{}
 		uc := NewAddWatchlistEntryUseCase(w, newClock())
-		cmd := AddWatchlistEntryCmd{FullName: "  Juan   Perez ", ListType: "pep", Country: "AR", Source: "local"}
-		if err := uc.Execute(context.Background(), cmd); err != nil {
+		cmd := AddWatchlistEntryCmd{FullName: "  Juan   Pérez ", ListType: "pep", Country: "ar", Source: "local"}
+		view, err := uc.Execute(context.Background(), cmd)
+		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(w.added) != 1 {
@@ -127,19 +147,67 @@ func TestAddWatchlistEntryUseCase_Execute(t *testing.T) {
 		if w.gotNormAdd != "juan perez" {
 			t.Errorf("normalized name = %q", w.gotNormAdd)
 		}
-		if w.added[0].ListType != "pep" || w.added[0].FullName != "  Juan   Perez " {
+		if w.added[0].ListType != "pep" || w.added[0].FullName != "Juan   Pérez" || w.added[0].Country != "AR" {
 			t.Errorf("entry mismatch: %+v", w.added[0])
 		}
 		if _, err := uuid.Parse(w.added[0].ID); err != nil {
 			t.Errorf("entry ID not a uuid: %q", w.added[0].ID)
+		}
+		if view.ID != w.added[0].ID || view.FullName != "Juan   Pérez" {
+			t.Errorf("view mismatch: %+v", view)
+		}
+	})
+
+	t.Run("invalid list type rejected", func(t *testing.T) {
+		w := &fakeWatchlist{}
+		uc := NewAddWatchlistEntryUseCase(w, newClock())
+		_, err := uc.Execute(context.Background(), AddWatchlistEntryCmd{FullName: "x", ListType: "other"})
+		if !errors.Is(err, domain.ErrInvalidListType) {
+			t.Fatalf("expected ErrInvalidListType, got %v", err)
+		}
+		if len(w.added) != 0 {
+			t.Error("nothing should be persisted")
 		}
 	})
 
 	t.Run("add error propagated", func(t *testing.T) {
 		w := &fakeWatchlist{addErr: errBoom}
 		uc := NewAddWatchlistEntryUseCase(w, newClock())
-		if err := uc.Execute(context.Background(), AddWatchlistEntryCmd{FullName: "x"}); !errors.Is(err, errBoom) {
+		if _, err := uc.Execute(context.Background(), AddWatchlistEntryCmd{FullName: "x", ListType: "pep"}); !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
+		}
+	})
+}
+
+func TestRemoveWatchlistEntryUseCase_Execute(t *testing.T) {
+	t.Run("removes entry", func(t *testing.T) {
+		w := &fakeWatchlist{}
+		uc := NewRemoveWatchlistEntryUseCase(w, newClock())
+		id := uuid.NewString()
+		if err := uc.Execute(context.Background(), RemoveWatchlistEntryCmd{EntryID: id}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(w.removed) != 1 || w.removed[0] != id {
+			t.Errorf("removed = %v", w.removed)
+		}
+	})
+
+	t.Run("non-uuid id is not found", func(t *testing.T) {
+		w := &fakeWatchlist{}
+		uc := NewRemoveWatchlistEntryUseCase(w, newClock())
+		if err := uc.Execute(context.Background(), RemoveWatchlistEntryCmd{EntryID: "bad"}); !errors.Is(err, domain.ErrWatchlistEntryNotFound) {
+			t.Fatalf("expected ErrWatchlistEntryNotFound, got %v", err)
+		}
+		if len(w.removed) != 0 {
+			t.Error("repo should not be called")
+		}
+	})
+
+	t.Run("repo error propagated", func(t *testing.T) {
+		w := &fakeWatchlist{removeErr: domain.ErrWatchlistEntryNotFound}
+		uc := NewRemoveWatchlistEntryUseCase(w, newClock())
+		if err := uc.Execute(context.Background(), RemoveWatchlistEntryCmd{EntryID: uuid.NewString()}); !errors.Is(err, domain.ErrWatchlistEntryNotFound) {
+			t.Fatalf("expected ErrWatchlistEntryNotFound, got %v", err)
 		}
 	})
 }
@@ -188,7 +256,7 @@ func TestToAlertView(t *testing.T) {
 
 	t.Run("resolved alert formats resolvedAt", func(t *testing.T) {
 		a := domain.ReconstituteAlert(domain.NewAlertID(), tid, domain.AlertSanctionsMatch, domain.RiskHigh,
-			domain.StatusConfirmed, "s", 95, nil, "note", testNow, &resolved)
+			domain.StatusConfirmed, "s", 95, nil, "note", "user-1", testNow, &resolved)
 		v := toAlertView(a)
 		if v.ResolvedAt == nil {
 			t.Fatal("expected non-nil resolvedAt")
@@ -196,8 +264,8 @@ func TestToAlertView(t *testing.T) {
 		if *v.ResolvedAt != resolved.Format(time.RFC3339) {
 			t.Errorf("resolvedAt = %q", *v.ResolvedAt)
 		}
-		if v.Note != "note" {
-			t.Errorf("note = %q", v.Note)
+		if v.Note != "note" || v.ResolvedBy != "user-1" {
+			t.Errorf("note/resolvedBy = %q / %q", v.Note, v.ResolvedBy)
 		}
 	})
 }

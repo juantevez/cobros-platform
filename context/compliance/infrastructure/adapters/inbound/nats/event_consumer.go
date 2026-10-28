@@ -7,6 +7,7 @@ import (
 
 	"github.com/juantevez/cobros-platform/context/compliance/application"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // EventConsumer dispara las capacidades de AML a partir de eventos de dominio:
@@ -61,6 +62,9 @@ func (c *EventConsumer) handleOnboarding(ctx context.Context, msg *eventbus.Mess
 	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.TenantID == "" {
 		return nil // payload malformado o sin tenant → ack
 	}
+	// Tenant en el contexto: RunInTx fija app.current_tenant y las escrituras
+	// sobre aml_alerts pasan RLS aunque el rol de conexión no lo bypasee.
+	ctx = postgres.WithTenantID(ctx, p.TenantID)
 	if err := c.screen.Execute(ctx, application.ScreenApplicationCmd{
 		TenantID:      p.TenantID,
 		ApplicationID: p.ApplicationID,
@@ -78,6 +82,7 @@ func (c *EventConsumer) handlePayment(ctx context.Context, msg *eventbus.Message
 	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.TenantID == "" {
 		return nil
 	}
+	ctx = postgres.WithTenantID(ctx, p.TenantID)
 	if err := c.monitor.Execute(ctx, application.MonitorTransactionCmd{
 		TenantID:      p.TenantID,
 		PaymentID:     p.PaymentID,

@@ -24,6 +24,7 @@ type ResolveAlertCmd struct {
 	AlertID     string
 	Disposition string // "cleared" | "confirmed"
 	Note        string
+	ResolvedBy  string // actor autenticado (userID) que dispone
 }
 
 // AddWatchlistEntryCmd agrega una entrada a la watchlist global (admin).
@@ -32,6 +33,11 @@ type AddWatchlistEntryCmd struct {
 	ListType string
 	Country  string
 	Source   string
+}
+
+// RemoveWatchlistEntryCmd da de baja una entrada de la watchlist global (admin).
+type RemoveWatchlistEntryCmd struct {
+	EntryID string
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────────
@@ -59,6 +65,7 @@ type AlertView struct {
 	Score      int               `json:"score"`
 	Details    map[string]string `json:"details,omitempty"`
 	Note       string            `json:"note,omitempty"`
+	ResolvedBy string            `json:"resolved_by,omitempty"`
 	CreatedAt  string            `json:"created_at"`
 	ResolvedAt *string           `json:"resolved_at,omitempty"`
 }

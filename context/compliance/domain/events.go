@@ -45,9 +45,10 @@ func (e AlertRaisedEvent) EventType() string { return "compliance.alert.raised.v
 // AlertResolvedEvent se emite cuando un analista dispone una alerta.
 type AlertResolvedEvent struct {
 	baseEvent
-	AlertID  string `json:"alert_id"`
-	TenantID string `json:"tenant_id"`
-	Status   string `json:"status"` // "cleared" | "confirmed"
+	AlertID    string `json:"alert_id"`
+	TenantID   string `json:"tenant_id"`
+	Status     string `json:"status"` // "cleared" | "confirmed"
+	ResolvedBy string `json:"resolved_by"`
 }
 
 func (e AlertResolvedEvent) EventType() string { return "compliance.alert.resolved.v1" }

@@ -46,6 +46,7 @@ const (
 	AlertSanctionsMatch       AlertType = "sanctions_match"
 	AlertTransactionThreshold AlertType = "transaction_threshold"
 	AlertTransactionVelocity  AlertType = "transaction_velocity"
+	AlertTransactionVolume    AlertType = "transaction_volume"
 )
 
 func (t AlertType) String() string { return string(t) }
@@ -73,6 +74,15 @@ const (
 )
 
 func (s AlertStatus) String() string { return string(s) }
+
+// ParseStatusFilter valida el filtro de estado de un listado. Vacío = sin filtro.
+func ParseStatusFilter(s string) (AlertStatus, error) {
+	switch AlertStatus(s) {
+	case "", StatusOpen, StatusCleared, StatusConfirmed:
+		return AlertStatus(s), nil
+	}
+	return "", fmt.Errorf("%w: %q", ErrInvalidStatusFilter, s)
+}
 
 // ParseDisposition mapea la disposición de un analista a un estado terminal.
 func ParseDisposition(s string) (AlertStatus, error) {

@@ -23,6 +23,7 @@ type Alert struct {
 	score      int               // 0..100
 	details    map[string]string // contexto adicional (regla, monto, lista, etc.)
 	note       string            // nota del analista al disponer
+	resolvedBy string            // actor (userID) que dispuso la alerta
 	createdAt  time.Time
 	resolvedAt *time.Time
 
@@ -67,18 +68,24 @@ func NewAlert(
 }
 
 // Resolve dispone la alerta (cleared|confirmed). Solo desde Open.
-func (a *Alert) Resolve(status AlertStatus, note string, now time.Time) error {
+// resolvedBy identifica al analista (trazabilidad de la disposición).
+func (a *Alert) Resolve(status AlertStatus, note, resolvedBy string, now time.Time) error {
 	if a.status != StatusOpen {
 		return ErrAlertNotOpen
 	}
+	if status != StatusCleared && status != StatusConfirmed {
+		return ErrInvalidDisposition
+	}
 	a.status = status
 	a.note = note
+	a.resolvedBy = resolvedBy
 	a.resolvedAt = &now
 	a.record(AlertResolvedEvent{
-		baseEvent: newBase(a.tenantID.String()),
-		AlertID:   a.id.String(),
-		TenantID:  a.tenantID.String(),
-		Status:    status.String(),
+		baseEvent:  newBase(a.tenantID.String()),
+		AlertID:    a.id.String(),
+		TenantID:   a.tenantID.String(),
+		Status:     status.String(),
+		ResolvedBy: resolvedBy,
 	})
 	return nil
 }
@@ -94,6 +101,7 @@ func ReconstituteAlert(
 	score int,
 	details map[string]string,
 	note string,
+	resolvedBy string,
 	createdAt time.Time,
 	resolvedAt *time.Time,
 ) *Alert {
@@ -110,22 +118,24 @@ func ReconstituteAlert(
 		score:      score,
 		details:    details,
 		note:       note,
+		resolvedBy: resolvedBy,
 		createdAt:  createdAt,
 		resolvedAt: resolvedAt,
 	}
 }
 
-func (a *Alert) ID() AlertID              { return a.id }
-func (a *Alert) TenantID() TenantID       { return a.tenantID }
-func (a *Alert) Type() AlertType          { return a.alertType }
-func (a *Alert) RiskLevel() RiskLevel     { return a.riskLevel }
-func (a *Alert) Status() AlertStatus      { return a.status }
-func (a *Alert) Subject() string          { return a.subject }
-func (a *Alert) Score() int               { return a.score }
+func (a *Alert) ID() AlertID                { return a.id }
+func (a *Alert) TenantID() TenantID         { return a.tenantID }
+func (a *Alert) Type() AlertType            { return a.alertType }
+func (a *Alert) RiskLevel() RiskLevel       { return a.riskLevel }
+func (a *Alert) Status() AlertStatus        { return a.status }
+func (a *Alert) Subject() string            { return a.subject }
+func (a *Alert) Score() int                 { return a.score }
 func (a *Alert) Details() map[string]string { return a.details }
-func (a *Alert) Note() string             { return a.note }
-func (a *Alert) CreatedAt() time.Time     { return a.createdAt }
-func (a *Alert) ResolvedAt() *time.Time   { return a.resolvedAt }
+func (a *Alert) Note() string               { return a.note }
+func (a *Alert) ResolvedBy() string         { return a.resolvedBy }
+func (a *Alert) CreatedAt() time.Time       { return a.createdAt }
+func (a *Alert) ResolvedAt() *time.Time     { return a.resolvedAt }
 
 func (a *Alert) PullEvents() []Event {
 	evs := a.events

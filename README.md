@@ -254,27 +254,31 @@ Screening contra listas de vigilancia y monitoreo transaccional. Consume eventos
 | Elemento | Descripción |
 |---|---|
 | Agregados | `Alert` (open → cleared \| confirmed) |
-| Value Objects | `AlertType` (sanctions_match, transaction_threshold, transaction_velocity), `RiskLevel`, `AlertStatus` |
+| Value Objects | `AlertType` (sanctions_match, transaction_threshold, transaction_velocity, transaction_volume), `RiskLevel`, `AlertStatus` |
 | Entidades | `WatchlistEntry` (lista global sanciones/PEP) |
-| Casos de uso | `ScreenApplication`, `MonitorTransaction`, `ResolveAlert`, `ListAlerts`, `GetAlert`, `AddWatchlistEntry`, `ListWatchlist` |
+| Casos de uso | `ScreenApplication`, `MonitorTransaction`, `ResolveAlert`, `ListAlerts`, `GetAlert`, `AddWatchlistEntry`, `RemoveWatchlistEntry`, `ListWatchlist` |
 | Eventos | `AlertRaised`, `AlertResolved` |
 
 **Reglas del MVP:**
 
-- **Screening** — al recibir `onboarding.application.submitted.v1`, compara el `legal_name` contra `aml_watchlist` (containment normalizado). Match → alerta `sanctions_match`.
+- **Screening** — al recibir `onboarding.application.submitted.v1`, compara el `legal_name` contra `aml_watchlist` (tokens completos, sin acentos ni puntuación). Match → alerta `sanctions_match`.
 - **Umbral** — `payment.captured.v1` con `amount ≥ 10.000,00` → alerta `transaction_threshold`.
-- **Velocity** — ≥ 10 pagos capturados del tenant en 10 min → alerta `transaction_velocity`.
+- **Velocity** — ≥ 10 pagos capturados del tenant en 10 min → alerta `transaction_velocity` (una por ventana).
+- **Volumen** — ≥ 50.000,00 acumulados por moneda en la ventana → alerta `transaction_volume` (una por ventana y moneda).
+
+Las reglas de ventana cuentan sobre una proyección propia (`aml_monitored_payments`), no sobre la tabla `payments`.
 
 **Idempotencia:** unicidad `(tenant_id, alert_type, subject)` — una re-entrega de evento no duplica alertas.
 
 **Endpoints:**
 
 ```
-GET  /api/v1/compliance/alerts?status=&limit=          Listar alertas          [JWT]
-GET  /api/v1/compliance/alerts/:alertID                Ver alerta              [JWT]
-POST /api/v1/compliance/alerts/:alertID/resolve        Disponer (cleared|confirmed) [JWT]
-GET  /api/v1/compliance/watchlist                      Listar watchlist        [JWT]
-POST /api/v1/compliance/watchlist                      Agregar entrada         [JWT]
+GET    /api/v1/compliance/alerts?status=&limit=        Listar alertas          [JWT + admin|platform_support]
+GET    /api/v1/compliance/alerts/:alertID              Ver alerta              [JWT + admin|platform_support]
+POST   /api/v1/compliance/alerts/:alertID/resolve      Disponer (cleared|confirmed) [JWT + admin]
+GET    /api/v1/compliance/watchlist                    Listar watchlist        [JWT + platform_support]
+POST   /api/v1/compliance/watchlist                    Agregar entrada         [JWT + platform_support]
+DELETE /api/v1/compliance/watchlist/:entryID           Dar de baja entrada     [JWT + platform_support]
 ```
 
 ---

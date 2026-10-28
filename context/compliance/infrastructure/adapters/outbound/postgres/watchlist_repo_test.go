@@ -13,6 +13,8 @@ import (
 
 var watchlistCols = []string{"id", "full_name", "list_type", "country", "source"}
 
+var screenCols = append(append([]string{}, watchlistCols...), "normalized_name")
+
 func TestWatchlistRepository_Screen(t *testing.T) {
 	t.Run("empty name short-circuits without query", func(t *testing.T) {
 		mock := newMock(t)
@@ -29,13 +31,15 @@ func TestWatchlistRepository_Screen(t *testing.T) {
 		}
 	})
 
-	t.Run("returns matches with score 90", func(t *testing.T) {
+	t.Run("token prefilter on active entries, scored by domain", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewWatchlistRepository(mock)
-		rows := pgxmock.NewRows(watchlistCols).
-			AddRow("1", "Vladimir Petrov", "sanctions", "RU", "OFAC").
-			AddRow("2", "Ivan Ivanov", "pep", "RU", "EU")
-		mock.ExpectQuery("FROM aml_watchlist").WithArgs("vladimir petrov holdings").WillReturnRows(rows)
+		rows := pgxmock.NewRows(screenCols).
+			AddRow("1", "Vladimir Petrov", "sanctions", "RU", "OFAC", "vladimir petrov").
+			AddRow("2", "Petrov Vladimir", "pep", "RU", "EU", "petrov vladimir").
+			AddRow("3", "Ghost", "pep", "", "", "ghost") // no matchea: el dominio lo descarta
+		mock.ExpectQuery(`FROM aml_watchlist\s+WHERE removed_at IS NULL\s+AND string_to_array\(normalized_name, ' '\) <@ string_to_array\(\$1, ' '\)`).
+			WithArgs("vladimir petrov holdings").WillReturnRows(rows)
 
 		matches, err := repo.Screen(context.Background(), "vladimir petrov holdings")
 		if err != nil {
@@ -44,8 +48,11 @@ func TestWatchlistRepository_Screen(t *testing.T) {
 		if len(matches) != 2 {
 			t.Fatalf("expected 2 matches, got %d", len(matches))
 		}
-		if matches[0].Score != 90 || matches[0].Entry.FullName != "Vladimir Petrov" {
+		if matches[0].Score != domain.ScoreOrderedMatch || matches[0].Entry.FullName != "Vladimir Petrov" {
 			t.Errorf("unexpected match: %+v", matches[0])
+		}
+		if matches[1].Score != domain.ScoreTokenMatch {
+			t.Errorf("reordered entry score = %d, want %d", matches[1].Score, domain.ScoreTokenMatch)
 		}
 	})
 
@@ -100,6 +107,42 @@ func TestWatchlistRepository_Add(t *testing.T) {
 	})
 }
 
+func TestWatchlistRepository_Remove(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	t.Run("soft deletes active entry", func(t *testing.T) {
+		mock := newMock(t)
+		repo := NewWatchlistRepository(mock)
+		mock.ExpectExec("UPDATE aml_watchlist SET removed_at=\\$2\\s+WHERE id=\\$1 AND removed_at IS NULL").
+			WithArgs("wl-1", now).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		if err := repo.Remove(context.Background(), "wl-1", now); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("missing or already removed maps to ErrWatchlistEntryNotFound", func(t *testing.T) {
+		mock := newMock(t)
+		repo := NewWatchlistRepository(mock)
+		mock.ExpectExec("UPDATE aml_watchlist").WithArgs("wl-1", now).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		if err := repo.Remove(context.Background(), "wl-1", now); !errors.Is(err, domain.ErrWatchlistEntryNotFound) {
+			t.Fatalf("expected ErrWatchlistEntryNotFound, got %v", err)
+		}
+	})
+
+	t.Run("db error propagated", func(t *testing.T) {
+		mock := newMock(t)
+		repo := NewWatchlistRepository(mock)
+		mock.ExpectExec("UPDATE aml_watchlist").WillReturnError(errors.New("boom"))
+		if err := repo.Remove(context.Background(), "wl-1", now); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
 func TestWatchlistRepository_List(t *testing.T) {
 	t.Run("returns entries", func(t *testing.T) {
 		mock := newMock(t)
@@ -107,7 +150,7 @@ func TestWatchlistRepository_List(t *testing.T) {
 		rows := pgxmock.NewRows(watchlistCols).
 			AddRow("1", "Alice", "sanctions", "US", "OFAC").
 			AddRow("2", "Bob", "pep", "UK", "EU")
-		mock.ExpectQuery("FROM aml_watchlist ORDER BY full_name LIMIT \\$1").WithArgs(100).WillReturnRows(rows)
+		mock.ExpectQuery("FROM aml_watchlist WHERE removed_at IS NULL\\s+ORDER BY full_name LIMIT \\$1").WithArgs(100).WillReturnRows(rows)
 
 		out, err := repo.List(context.Background(), 100)
 		if err != nil {
