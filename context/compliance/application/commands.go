@@ -18,13 +18,21 @@ type MonitorTransactionCmd struct {
 	PaymentMethod string
 }
 
-// ResolveAlertCmd dispone una alerta (revisión manual).
+// ResolveAlertCmd es la disposición del primer analista de cumplimiento.
+// En alertas four-eyes queda como propuesta (pending_second_approval).
 type ResolveAlertCmd struct {
-	TenantID    string
 	AlertID     string
 	Disposition string // "cleared" | "confirmed"
 	Note        string
-	ResolvedBy  string // actor autenticado (userID) que dispone
+	Analyst     string // actor autenticado (userID) que dispone
+}
+
+// ReviewProposalCmd es la segunda intervención four-eyes: aprobar o rechazar
+// la propuesta del primer analista.
+type ReviewProposalCmd struct {
+	AlertID string
+	Note    string
+	Analyst string // debe ser distinto de quien propuso
 }
 
 // AddWatchlistEntryCmd agrega una entrada a la watchlist global (admin).
@@ -42,15 +50,16 @@ type RemoveWatchlistEntryCmd struct {
 
 // ── Queries ───────────────────────────────────────────────────────────────────
 
+// ListAlertsQuery lista alertas de toda la plataforma (revisión por
+// cumplimiento); TenantID opcional acota a un comercio.
 type ListAlertsQuery struct {
-	TenantID     string
-	StatusFilter string // "" | "open" | "cleared" | "confirmed"
+	TenantID     string // "" = todos los comercios
+	StatusFilter string // "" | "open" | "pending_second_approval" | "cleared" | "confirmed"
 	Limit        int
 }
 
 type GetAlertQuery struct {
-	TenantID string
-	AlertID  string
+	AlertID string
 }
 
 // ── Views ─────────────────────────────────────────────────────────────────────
@@ -68,6 +77,13 @@ type AlertView struct {
 	ResolvedBy string            `json:"resolved_by,omitempty"`
 	CreatedAt  string            `json:"created_at"`
 	ResolvedAt *string           `json:"resolved_at,omitempty"`
+
+	// Four-eyes
+	RequiresSecondApproval bool    `json:"requires_second_approval"`
+	ProposedStatus         string  `json:"proposed_status,omitempty"`
+	ProposedBy             string  `json:"proposed_by,omitempty"`
+	ProposedAt             *string `json:"proposed_at,omitempty"`
+	ApprovalNote           string  `json:"approval_note,omitempty"`
 }
 
 type WatchlistEntryView struct {

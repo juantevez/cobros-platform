@@ -17,9 +17,19 @@ type AlertRepository interface {
 	// Save inserta una alerta. Si viola la unicidad (tenant, tipo, subject)
 	// retorna domain.ErrDuplicateAlert (para idempotencia ante re-entregas).
 	Save(ctx context.Context, a *domain.Alert) error
-	Update(ctx context.Context, a *domain.Alert) error
+	// Update persiste la transición con concurrencia optimista: solo aplica si
+	// la fila sigue en `from`. Si otra revisión ya la movió retorna
+	// domain.ErrAlertNotOpen.
+	Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error
 	FindByID(ctx context.Context, id domain.AlertID) (*domain.Alert, error)
-	ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter domain.AlertStatus, limit int) ([]*domain.Alert, error)
+	// List lista alertas de la plataforma (cross-tenant) según el filtro.
+	List(ctx context.Context, filter AlertFilter, limit int) ([]*domain.Alert, error)
+}
+
+// AlertFilter acota un listado de alertas. Campos vacíos = sin filtro.
+type AlertFilter struct {
+	TenantID domain.TenantID
+	Status   domain.AlertStatus
 }
 
 // WatchlistRepository consulta y gestiona la lista de vigilancia global.

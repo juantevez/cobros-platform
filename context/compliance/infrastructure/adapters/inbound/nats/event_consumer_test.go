@@ -49,11 +49,13 @@ func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error {
 	r.saved = append(r.saved, a)
 	return nil
 }
-func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert) error { return nil }
+func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error {
+	return nil
+}
 func (r *fakeAlertRepo) FindByID(ctx context.Context, id domain.AlertID) (*domain.Alert, error) {
 	return nil, domain.ErrAlertNotFound
 }
-func (r *fakeAlertRepo) ListByTenant(ctx context.Context, t domain.TenantID, s domain.AlertStatus, l int) ([]*domain.Alert, error) {
+func (r *fakeAlertRepo) List(ctx context.Context, f application.AlertFilter, l int) ([]*domain.Alert, error) {
 	return nil, nil
 }
 

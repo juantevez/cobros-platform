@@ -9,6 +9,14 @@ var (
 	ErrDuplicateAlert = errors.New("compliance: duplicate alert")
 	// ErrAlertNotOpen indica que la alerta ya fue resuelta y no puede re-resolverse.
 	ErrAlertNotOpen = errors.New("compliance: alert is not open")
+	// ErrAlertPendingApproval indica que la alerta espera la segunda aprobación
+	// (four-eyes): se aprueba o rechaza, no se vuelve a resolver.
+	ErrAlertPendingApproval = errors.New("compliance: alert is pending second approval")
+	// ErrAlertNotPendingApproval indica que no hay propuesta que aprobar o rechazar.
+	ErrAlertNotPendingApproval = errors.New("compliance: alert has no proposal pending approval")
+	// ErrSameAnalyst indica que la segunda intervención four-eyes la intenta el
+	// mismo analista que propuso la disposición.
+	ErrSameAnalyst = errors.New("compliance: second approval must come from a different analyst")
 	// ErrInvalidDisposition indica una disposición de revisión inválida.
 	ErrInvalidDisposition = errors.New("compliance: invalid disposition")
 	// ErrInvalidListType indica un tipo de lista de vigilancia inválido.
@@ -18,5 +26,5 @@ var (
 	// ErrWatchlistEntryNotFound indica que la entrada no existe o ya fue dada de baja.
 	ErrWatchlistEntryNotFound = errors.New("compliance: watchlist entry not found")
 	// ErrInvalidStatusFilter indica un filtro de estado desconocido al listar alertas.
-	ErrInvalidStatusFilter = errors.New("compliance: invalid status filter (use open|cleared|confirmed)")
+	ErrInvalidStatusFilter = errors.New("compliance: invalid status filter (use open|pending_second_approval|cleared|confirmed)")
 )

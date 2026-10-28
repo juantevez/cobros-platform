@@ -58,6 +58,24 @@ func TestScreenApplicationUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	t.Run("exact sanctions match publishes sanction.matched for the hold", func(t *testing.T) {
+		w := &fakeWatchlist{matches: []domain.Match{
+			matchOf("Osama Bin Laden", "pep", "SA", "EU", domain.ScoreExactMatch),
+			matchOf("Osama Bin Laden", "sanctions", "SA", "OFAC", domain.ScoreExactMatch), // empate: gana sanciones
+		}}
+		r := newAlertRepo()
+		p := &fakePublisher{}
+		if err := newUC(w, r, p).Execute(context.Background(), baseCmd()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := r.saved[0].Details()["list_type"]; got != "sanctions" {
+			t.Errorf("tie should prefer sanctions list, got %q", got)
+		}
+		if len(p.published) != 2 || p.published[1].EventType() != "compliance.sanction.matched.v1" {
+			t.Fatalf("expected raised + sanction.matched, got %d events", len(p.published))
+		}
+	})
+
 	t.Run("screening normalizes the legal name", func(t *testing.T) {
 		w := &fakeWatchlist{}
 		uc := newUC(w, newAlertRepo(), &fakePublisher{})

@@ -100,13 +100,16 @@ const (
 	RoleReadOnly Role = "read_only"
 	// RolePlatformSupport es un rol interno del operador de la plataforma.
 	RolePlatformSupport Role = "platform_support"
+	// RoleComplianceOfficer es un rol interno de la plataforma: analista de
+	// cumplimiento que revisa alertas AML de todos los comercios (four-eyes).
+	RoleComplianceOfficer Role = "compliance_officer"
 )
 
 // ParseRole convierte un string a Role validado.
 func ParseRole(s string) (Role, error) {
 	r := Role(s)
 	switch r {
-	case RoleAdmin, RoleOperator, RoleAccountant, RoleReadOnly, RolePlatformSupport:
+	case RoleAdmin, RoleOperator, RoleAccountant, RoleReadOnly, RolePlatformSupport, RoleComplianceOfficer:
 		return r, nil
 	}
 	return "", fmt.Errorf("%w: %q", ErrInvalidRole, s)
@@ -117,10 +120,14 @@ func (r Role) String() string { return string(r) }
 // IsTenantAssignable indica si el rol puede otorgarse desde los flujos del tenant
 // (alta de usuario, asignación de rol).
 //
-// platform_support no lo es: habilita operaciones sobre cualquier tenant
-// (activar, suspender), así que si un admin pudiera otorgarlo escalaría
-// privilegios fuera de su comercio. Esos usuarios se provisionan por fuera de la API.
-func (r Role) IsTenantAssignable() bool { return r != RolePlatformSupport }
+// Los roles de plataforma no lo son: platform_support habilita operaciones
+// sobre cualquier tenant (activar, suspender) y compliance_officer revisa las
+// alertas AML de todos los comercios, así que si un admin pudiera otorgarlos
+// escalaría privilegios fuera de su comercio (o revisaría sus propias
+// alertas). Esos usuarios se provisionan por fuera de la API.
+func (r Role) IsTenantAssignable() bool {
+	return r != RolePlatformSupport && r != RoleComplianceOfficer
+}
 
 // ── Environment ───────────────────────────────────────────────────────────────
 

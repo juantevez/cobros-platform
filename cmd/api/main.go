@@ -362,28 +362,33 @@ func main() {
 	reportinghttp.RegisterRoutes(protected, reportinghttp.NewReportingHandler(getReports))
 
 	// ── Compliance & AML ──────────────────────────────────────────────────────
-	// Lado de consulta/gestión (alertas + watchlist). La generación de alertas
-	// (screening + monitoreo) ocurre en cmd/worker.
+	// Revisión de alertas (four-eyes) y gestión de la watchlist: uso interno de
+	// la plataforma, cross-tenant. La generación de alertas (screening +
+	// monitoreo) ocurre en cmd/worker; el enforcement (hold/suspensión), en el
+	// consumer de Auth.
 
 	alertRepo := compliancepg.NewAlertRepository(pool)
 	watchlistRepo := compliancepg.NewWatchlistRepository(pool)
 
-	listAlerts := complianceapp.NewListAlertsUseCase(alertRepo)
-	getAlert := complianceapp.NewGetAlertUseCase(alertRepo)
-	resolveAlert := complianceapp.NewResolveAlertUseCase(alertRepo, txManager, compliancePub, clock)
-	addWatchEntry := complianceapp.NewAddWatchlistEntryUseCase(watchlistRepo, clock)
-	removeWatchEntry := complianceapp.NewRemoveWatchlistEntryUseCase(watchlistRepo, clock)
-	listWatchlist := complianceapp.NewListWatchlistUseCase(watchlistRepo)
-
-	// Alertas: las revisa/dispone el admin del tenant (queda registrado quién,
-	// resolved_by). Watchlist: global a la plataforma → solo platform_support.
 	compliancehttp.RegisterRoutes(protected, compliancehttp.NewComplianceHandler(
-		listAlerts, getAlert, resolveAlert, addWatchEntry, removeWatchEntry, listWatchlist,
+		compliancehttp.AlertUseCases{
+			List:           complianceapp.NewListAlertsUseCase(alertRepo),
+			Get:            complianceapp.NewGetAlertUseCase(alertRepo),
+			Resolve:        complianceapp.NewResolveAlertUseCase(alertRepo, txManager, compliancePub, clock),
+			Approve:        complianceapp.NewApproveAlertProposalUseCase(alertRepo, txManager, compliancePub, clock),
+			RejectProposal: complianceapp.NewRejectAlertProposalUseCase(alertRepo, txManager, compliancePub, clock),
+		},
+		compliancehttp.WatchlistUseCases{
+			Add:    complianceapp.NewAddWatchlistEntryUseCase(watchlistRepo, clock),
+			Remove: complianceapp.NewRemoveWatchlistEntryUseCase(watchlistRepo, clock),
+			List:   complianceapp.NewListWatchlistUseCase(watchlistRepo),
+		},
 	), compliancehttp.RouteGuards{
-		ReadAlerts:      authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
-		ResolveAlert:    authttp.RequireRole(authdomain.RoleAdmin),
-		ReadWatchlist:   authttp.RequireRole(authdomain.RolePlatformSupport),
-		ManageWatchlist: authttp.RequireRole(authdomain.RolePlatformSupport),
+		// La plataforma revisa a los comercios: ningún rol de tenant accede.
+		ReadAlerts:      authttp.RequireRole(authdomain.RoleComplianceOfficer, authdomain.RolePlatformSupport),
+		ReviewAlerts:    authttp.RequireRole(authdomain.RoleComplianceOfficer),
+		ReadWatchlist:   authttp.RequireRole(authdomain.RoleComplianceOfficer, authdomain.RolePlatformSupport),
+		ManageWatchlist: authttp.RequireRole(authdomain.RoleComplianceOfficer, authdomain.RolePlatformSupport),
 	})
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────

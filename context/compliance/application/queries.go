@@ -18,9 +18,13 @@ func NewListAlertsUseCase(repo AlertRepository) *ListAlertsUseCase {
 }
 
 func (uc *ListAlertsUseCase) Execute(ctx context.Context, q ListAlertsQuery) ([]AlertView, error) {
-	tenantID, err := domain.ParseTenantID(q.TenantID)
-	if err != nil {
-		return nil, err
+	var filter AlertFilter
+	if q.TenantID != "" {
+		tenantID, err := domain.ParseTenantID(q.TenantID)
+		if err != nil {
+			return nil, err
+		}
+		filter.TenantID = tenantID
 	}
 	status, err := domain.ParseStatusFilter(q.StatusFilter)
 	if err != nil {
@@ -30,7 +34,8 @@ func (uc *ListAlertsUseCase) Execute(ctx context.Context, q ListAlertsQuery) ([]
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	alerts, err := uc.repo.ListByTenant(ctx, tenantID, status, limit)
+	filter.Status = status
+	alerts, err := uc.repo.List(ctx, filter, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -50,10 +55,6 @@ func NewGetAlertUseCase(repo AlertRepository) *GetAlertUseCase {
 }
 
 func (uc *GetAlertUseCase) Execute(ctx context.Context, q GetAlertQuery) (AlertView, error) {
-	tenantID, err := domain.ParseTenantID(q.TenantID)
-	if err != nil {
-		return AlertView{}, err
-	}
 	alertID, err := domain.ParseAlertID(q.AlertID)
 	if err != nil {
 		return AlertView{}, err
@@ -61,9 +62,6 @@ func (uc *GetAlertUseCase) Execute(ctx context.Context, q GetAlertQuery) (AlertV
 	alert, err := uc.repo.FindByID(ctx, alertID)
 	if err != nil {
 		return AlertView{}, err
-	}
-	if alert.TenantID() != tenantID {
-		return AlertView{}, domain.ErrAlertNotFound
 	}
 	return toAlertView(alert), nil
 }
@@ -138,12 +136,15 @@ func toWatchlistEntryView(e domain.WatchlistEntry) WatchlistEntryView {
 	}
 }
 
-func toAlertView(a *domain.Alert) AlertView {
-	var resolvedAt *string
-	if a.ResolvedAt() != nil {
-		s := a.ResolvedAt().Format(time.RFC3339)
-		resolvedAt = &s
+func formatTime(t *time.Time) *string {
+	if t == nil {
+		return nil
 	}
+	s := t.Format(time.RFC3339)
+	return &s
+}
+
+func toAlertView(a *domain.Alert) AlertView {
 	return AlertView{
 		ID:         a.ID().String(),
 		TenantID:   a.TenantID().String(),
@@ -156,6 +157,12 @@ func toAlertView(a *domain.Alert) AlertView {
 		Note:       a.Note(),
 		ResolvedBy: a.ResolvedBy(),
 		CreatedAt:  a.CreatedAt().Format(time.RFC3339),
-		ResolvedAt: resolvedAt,
+		ResolvedAt: formatTime(a.ResolvedAt()),
+
+		RequiresSecondApproval: a.RequiresSecondApproval(),
+		ProposedStatus:         a.ProposedStatus().String(),
+		ProposedBy:             a.ProposedBy(),
+		ProposedAt:             formatTime(a.ProposedAt()),
+		ApprovalNote:           a.ApprovalNote(),
 	}
 }

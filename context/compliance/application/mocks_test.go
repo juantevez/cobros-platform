@@ -35,7 +35,9 @@ type fakeAlertRepo struct {
 	listErr   error
 
 	gotStatusFilter string
+	gotTenantFilter string
 	gotLimit        int
+	gotFrom         domain.AlertStatus
 }
 
 func newAlertRepo() *fakeAlertRepo {
@@ -51,7 +53,8 @@ func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error {
 	return nil
 }
 
-func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert) error {
+func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error {
+	r.gotFrom = from
 	if r.updateErr != nil {
 		return r.updateErr
 	}
@@ -70,8 +73,9 @@ func (r *fakeAlertRepo) FindByID(ctx context.Context, id domain.AlertID) (*domai
 	return a, nil
 }
 
-func (r *fakeAlertRepo) ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter domain.AlertStatus, limit int) ([]*domain.Alert, error) {
-	r.gotStatusFilter = string(statusFilter)
+func (r *fakeAlertRepo) List(ctx context.Context, filter AlertFilter, limit int) ([]*domain.Alert, error) {
+	r.gotStatusFilter = string(filter.Status)
+	r.gotTenantFilter = filter.TenantID.String()
 	r.gotLimit = limit
 	if r.listErr != nil {
 		return nil, r.listErr
