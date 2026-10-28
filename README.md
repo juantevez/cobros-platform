@@ -249,15 +249,15 @@ GET  /api/v1/reports/balances                            Saldo neto por tipo de 
 
 ### ✅ Compliance & AML
 
-Screening contra listas de vigilancia y monitoreo transaccional. Consume eventos de otros contextos y genera **alertas** para revisión manual (sin enforcement automático).
+Screening contra listas de vigilancia y monitoreo transaccional. Consume eventos de otros contextos y genera **alertas** que revisa el equipo de cumplimiento de la plataforma (`compliance_officer`, con four-eyes en alertas de riesgo alto o de screening). Un match exacto en lista de sanciones pone al comercio en **hold preventivo reversible** (sin cobros ni payouts) hasta que cumplimiento lo descarta o lo confirma (suspensión).
 
 | Elemento | Descripción |
 |---|---|
-| Agregados | `Alert` (open → cleared \| confirmed) |
+| Agregados | `Alert` (open → cleared \| confirmed, o open → pending_second_approval → cleared \| confirmed) |
 | Value Objects | `AlertType` (sanctions_match, transaction_threshold, transaction_velocity, transaction_volume), `RiskLevel`, `AlertStatus` |
 | Entidades | `WatchlistEntry` (lista global sanciones/PEP) |
-| Casos de uso | `ScreenApplication`, `MonitorTransaction`, `ResolveAlert`, `ListAlerts`, `GetAlert`, `AddWatchlistEntry`, `RemoveWatchlistEntry`, `ListWatchlist` |
-| Eventos | `AlertRaised`, `AlertResolved` |
+| Casos de uso | `ScreenApplication`, `MonitorTransaction`, `ResolveAlert`, `ApproveAlertProposal`, `RejectAlertProposal`, `ListAlerts`, `GetAlert`, `AddWatchlistEntry`, `RemoveWatchlistEntry`, `ListWatchlist` |
+| Eventos | `AlertRaised`, `AlertReviewProposed`, `AlertProposalRejected`, `AlertResolved`, `SanctionMatched`, `SanctionCleared`, `SanctionConfirmed` |
 
 **Reglas del MVP:**
 
@@ -273,12 +273,14 @@ Las reglas de ventana cuentan sobre una proyección propia (`aml_monitored_payme
 **Endpoints:**
 
 ```
-GET    /api/v1/compliance/alerts?status=&limit=        Listar alertas          [JWT + admin|platform_support]
-GET    /api/v1/compliance/alerts/:alertID              Ver alerta              [JWT + admin|platform_support]
-POST   /api/v1/compliance/alerts/:alertID/resolve      Disponer (cleared|confirmed) [JWT + admin]
-GET    /api/v1/compliance/watchlist                    Listar watchlist        [JWT + platform_support]
-POST   /api/v1/compliance/watchlist                    Agregar entrada         [JWT + platform_support]
-DELETE /api/v1/compliance/watchlist/:entryID           Dar de baja entrada     [JWT + platform_support]
+GET    /api/v1/compliance/alerts?tenant_id=&status=&limit=  Bandeja (todos los comercios) [JWT + compliance_officer|platform_support]
+GET    /api/v1/compliance/alerts/:alertID              Ver alerta              [JWT + compliance_officer|platform_support]
+POST   /api/v1/compliance/alerts/:alertID/resolve      Disponer o proponer     [JWT + compliance_officer]
+POST   /api/v1/compliance/alerts/:alertID/approve      Segunda aprobación      [JWT + compliance_officer ≠ proponente]
+POST   /api/v1/compliance/alerts/:alertID/reject       Rechazar propuesta      [JWT + compliance_officer ≠ proponente]
+GET    /api/v1/compliance/watchlist                    Listar watchlist        [JWT + compliance_officer|platform_support]
+POST   /api/v1/compliance/watchlist                    Agregar entrada         [JWT + compliance_officer|platform_support]
+DELETE /api/v1/compliance/watchlist/:entryID           Dar de baja entrada     [JWT + compliance_officer|platform_support]
 ```
 
 ---
@@ -409,7 +411,7 @@ Subjects publicados hoy, por stream:
 | `WEBHOOK` (`webhook.>`) | `webhook.endpoint.{registered,deactivated}.v1`, `webhook.delivery.exhausted.v1` |
 | `RECONCILIATION` (`reconciliation.>`) | `reconciliation.run.completed.v1` |
 | `DISPUTE` (`dispute.>`) | `dispute.{opened,resolved}.v1` |
-| `COMPLIANCE` (`compliance.>`) | `compliance.alert.{raised,resolved}.v1` |
+| `COMPLIANCE` (`compliance.>`) | `compliance.alert.{raised,review_proposed,proposal_rejected,resolved}.v1`, `compliance.sanction.{matched,cleared,confirmed}.v1` (internos, los consume Auth) |
 | `NOTIFICATION` (`notification.>`) | *(stream creado; sin eventos publicados)* |
 
 Streams definidos en [`pkg/eventbus/stream.go`](pkg/eventbus/stream.go). Productores y consumidores de cada subject: ver el doc del contexto.

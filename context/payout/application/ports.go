@@ -45,6 +45,12 @@ type BankAccountProvider interface {
 	GetBankAccount(ctx context.Context, tenantID domain.TenantID) (domain.BankAccountInfo, error)
 }
 
+// PayoutGate verifica que el comercio pueda desembolsar: tenant activo y sin
+// hold preventivo de cumplimiento. Retorna domain.ErrPayoutsNotAllowed si no.
+type PayoutGate interface {
+	EnsurePayoutsAllowed(ctx context.Context, tenantID domain.TenantID) error
+}
+
 // BankTransferAdapter abstrae la ejecución de transferencias bancarias.
 // En Fase 3: implementación Mock.
 // En Fase 4: se conecta con el banco real, MP Transfers, o Prex.

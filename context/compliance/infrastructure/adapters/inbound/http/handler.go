@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -12,46 +13,60 @@ import (
 	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
-// ComplianceHandler expone las alertas de AML y la gestión de la watchlist.
+// ComplianceHandler expone la revisión de alertas AML y la gestión de la
+// watchlist. Todo es de uso interno de la plataforma: el equipo de
+// cumplimiento revisa alertas de cualquier comercio y el comercio nunca ve ni
+// dispone sus propias alertas (anti tipping-off).
 type ComplianceHandler struct {
-	listAlerts    *application.ListAlertsUseCase
-	getAlert      *application.GetAlertUseCase
-	resolveAlert  *application.ResolveAlertUseCase
-	addEntry      *application.AddWatchlistEntryUseCase
-	removeEntry   *application.RemoveWatchlistEntryUseCase
-	listWatchlist *application.ListWatchlistUseCase
+	listAlerts     *application.ListAlertsUseCase
+	getAlert       *application.GetAlertUseCase
+	resolveAlert   *application.ResolveAlertUseCase
+	approveAlert   *application.ApproveAlertProposalUseCase
+	rejectProposal *application.RejectAlertProposalUseCase
+	addEntry       *application.AddWatchlistEntryUseCase
+	removeEntry    *application.RemoveWatchlistEntryUseCase
+	listWatchlist  *application.ListWatchlistUseCase
 }
 
-func NewComplianceHandler(
-	listAlerts *application.ListAlertsUseCase,
-	getAlert *application.GetAlertUseCase,
-	resolveAlert *application.ResolveAlertUseCase,
-	addEntry *application.AddWatchlistEntryUseCase,
-	removeEntry *application.RemoveWatchlistEntryUseCase,
-	listWatchlist *application.ListWatchlistUseCase,
-) *ComplianceHandler {
+// AlertUseCases agrupa los casos de uso de consulta y revisión de alertas.
+type AlertUseCases struct {
+	List           *application.ListAlertsUseCase
+	Get            *application.GetAlertUseCase
+	Resolve        *application.ResolveAlertUseCase
+	Approve        *application.ApproveAlertProposalUseCase
+	RejectProposal *application.RejectAlertProposalUseCase
+}
+
+// WatchlistUseCases agrupa los casos de uso de gestión de la watchlist.
+type WatchlistUseCases struct {
+	Add    *application.AddWatchlistEntryUseCase
+	Remove *application.RemoveWatchlistEntryUseCase
+	List   *application.ListWatchlistUseCase
+}
+
+func NewComplianceHandler(alerts AlertUseCases, watchlist WatchlistUseCases) *ComplianceHandler {
 	return &ComplianceHandler{
-		listAlerts: listAlerts, getAlert: getAlert, resolveAlert: resolveAlert,
-		addEntry: addEntry, removeEntry: removeEntry, listWatchlist: listWatchlist,
+		listAlerts: alerts.List, getAlert: alerts.Get, resolveAlert: alerts.Resolve,
+		approveAlert: alerts.Approve, rejectProposal: alerts.RejectProposal,
+		addEntry: watchlist.Add, removeEntry: watchlist.Remove, listWatchlist: watchlist.List,
 	}
 }
 
-// ListAlerts retorna las alertas del tenant.
+// ListAlerts lista alertas de toda la plataforma (recientes primero).
 //
-//	GET /api/v1/compliance/alerts?status=open&limit=50
+//	GET /api/v1/compliance/alerts?tenant_id=&status=pending_second_approval&limit=50
 func (h *ComplianceHandler) ListAlerts(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 
 	views, err := h.listAlerts.Execute(c.Request.Context(), application.ListAlertsQuery{
-		TenantID:     tenantID,
+		TenantID:     c.Query("tenant_id"),
 		StatusFilter: c.Query("status"),
 		Limit:        limit,
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidTenantID):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant id"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant_id"})
 		case errors.Is(err, domain.ErrInvalidStatusFilter):
 			c.JSON(http.StatusBadRequest, gin.H{"error": domain.ErrInvalidStatusFilter.Error()})
 		default:
@@ -66,31 +81,22 @@ func (h *ComplianceHandler) ListAlerts(c *gin.Context) {
 //
 //	GET /api/v1/compliance/alerts/:alertID
 func (h *ComplianceHandler) GetAlert(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
 	view, err := h.getAlert.Execute(c.Request.Context(), application.GetAlertQuery{
-		TenantID: tenantID,
-		AlertID:  c.Param("alertID"),
+		AlertID: c.Param("alertID"),
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, domain.ErrAlertNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "alert not found"})
-		case errors.Is(err, domain.ErrInvalidTenantID), errors.Is(err, domain.ErrInvalidAlertID):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant or alert id"})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		}
+		writeReviewError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, view)
 }
 
-// ResolveAlert dispone una alerta (cleared|confirmed).
+// ResolveAlert es la disposición del primer analista (cleared|confirmed).
+// En alertas four-eyes queda pending_second_approval; si no, se cierra. En
+// ambos casos responde 200 con la alerta resultante.
 //
 //	POST /api/v1/compliance/alerts/:alertID/resolve
 func (h *ComplianceHandler) ResolveAlert(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
-
 	var req struct {
 		Disposition string `json:"disposition"`
 		Note        string `json:"note"`
@@ -99,30 +105,83 @@ func (h *ComplianceHandler) ResolveAlert(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-
 	err := h.resolveAlert.Execute(c.Request.Context(), application.ResolveAlertCmd{
-		TenantID:    tenantID,
 		AlertID:     c.Param("alertID"),
 		Disposition: req.Disposition,
 		Note:        req.Note,
-		ResolvedBy:  postgres.ActorFromContext(c.Request.Context()),
+		Analyst:     postgres.ActorFromContext(c.Request.Context()),
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, domain.ErrAlertNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "alert not found"})
-		case errors.Is(err, domain.ErrAlertNotOpen):
-			c.JSON(http.StatusConflict, gin.H{"error": "alert already resolved"})
-		case errors.Is(err, domain.ErrInvalidTenantID), errors.Is(err, domain.ErrInvalidAlertID):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant or alert id"})
-		case errors.Is(err, domain.ErrInvalidDisposition):
-			c.JSON(http.StatusBadRequest, gin.H{"error": domain.ErrInvalidDisposition.Error()})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		}
+		writeReviewError(c, err)
 		return
 	}
-	c.Status(http.StatusNoContent)
+	h.respondWithAlert(c)
+}
+
+// ApproveAlert es la segunda aprobación four-eyes (otro analista).
+//
+//	POST /api/v1/compliance/alerts/:alertID/approve
+func (h *ComplianceHandler) ApproveAlert(c *gin.Context) {
+	h.reviewProposal(c, h.approveAlert.Execute)
+}
+
+// RejectAlertProposal rechaza la propuesta; la alerta vuelve a open.
+//
+//	POST /api/v1/compliance/alerts/:alertID/reject
+func (h *ComplianceHandler) RejectAlertProposal(c *gin.Context) {
+	h.reviewProposal(c, h.rejectProposal.Execute)
+}
+
+func (h *ComplianceHandler) reviewProposal(c *gin.Context, exec func(ctx context.Context, cmd application.ReviewProposalCmd) error) {
+	var req struct {
+		Note string `json:"note"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+	}
+	err := exec(c.Request.Context(), application.ReviewProposalCmd{
+		AlertID: c.Param("alertID"),
+		Note:    req.Note,
+		Analyst: postgres.ActorFromContext(c.Request.Context()),
+	})
+	if err != nil {
+		writeReviewError(c, err)
+		return
+	}
+	h.respondWithAlert(c)
+}
+
+// respondWithAlert devuelve la alerta tras la transición, para que el
+// analista vea si quedó cerrada o pendiente de segunda aprobación.
+func (h *ComplianceHandler) respondWithAlert(c *gin.Context) {
+	view, err := h.getAlert.Execute(c.Request.Context(), application.GetAlertQuery{AlertID: c.Param("alertID")})
+	if err != nil {
+		writeReviewError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, view)
+}
+
+func writeReviewError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, domain.ErrAlertNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "alert not found"})
+	case errors.Is(err, domain.ErrAlertNotOpen):
+		c.JSON(http.StatusConflict, gin.H{"error": "alert already resolved"})
+	case errors.Is(err, domain.ErrAlertPendingApproval), errors.Is(err, domain.ErrAlertNotPendingApproval):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrSameAnalyst):
+		c.JSON(http.StatusForbidden, gin.H{"error": domain.ErrSameAnalyst.Error()})
+	case errors.Is(err, domain.ErrInvalidAlertID):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid alert id"})
+	case errors.Is(err, domain.ErrInvalidDisposition):
+		c.JSON(http.StatusBadRequest, gin.H{"error": domain.ErrInvalidDisposition.Error()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+	}
 }
 
 // ListWatchlist retorna la lista de vigilancia global.
@@ -192,12 +251,20 @@ func (h *ComplianceHandler) RemoveWatchlistEntry(c *gin.Context) {
 
 // RouteGuards autoriza cada operación de Compliance. Se inyectan desde el
 // composition root (cmd/api) para no acoplar este contexto con Auth; en
-// producción son RequireRole(...).
+// producción son RequireRole(...) con roles de plataforma.
 type RouteGuards struct {
-	ReadAlerts      gin.HandlerFunc // GET /alerts, /alerts/:id        (admin del tenant)
-	ResolveAlert    gin.HandlerFunc // POST /alerts/:id/resolve        (admin del tenant)
-	ReadWatchlist   gin.HandlerFunc // GET /watchlist                  (platform_support)
-	ManageWatchlist gin.HandlerFunc // POST/DELETE /watchlist          (platform_support)
+	ReadAlerts      gin.HandlerFunc // GET /alerts, /alerts/:id              (compliance_officer, platform_support)
+	ReviewAlerts    gin.HandlerFunc // POST /alerts/:id/{resolve,approve,reject} (compliance_officer)
+	ReadWatchlist   gin.HandlerFunc // GET /watchlist                        (compliance_officer, platform_support)
+	ManageWatchlist gin.HandlerFunc // POST/DELETE /watchlist                (compliance_officer, platform_support)
+}
+
+// platformOperator marca la request como acción de operador de plataforma:
+// habilita la política RLS cross-tenant de aml_alerts. Va siempre DESPUÉS del
+// guard de rol, para que nunca se fije sin autorización.
+func platformOperator(c *gin.Context) {
+	c.Request = c.Request.WithContext(postgres.WithPlatformOperator(c.Request.Context()))
+	c.Next()
 }
 
 // RegisterRoutes registra las rutas de Compliance en el grupo protegido.
@@ -205,16 +272,18 @@ type RouteGuards struct {
 // obligatorios: gin saltea los handlers nil, así que un guard olvidado dejaría
 // la ruta abierta a cualquier usuario autenticado.
 func RegisterRoutes(rg *gin.RouterGroup, h *ComplianceHandler, guards RouteGuards) {
-	if guards.ReadAlerts == nil || guards.ResolveAlert == nil ||
+	if guards.ReadAlerts == nil || guards.ReviewAlerts == nil ||
 		guards.ReadWatchlist == nil || guards.ManageWatchlist == nil {
-		panic("compliance: RegisterRoutes requires all RouteGuards (ReadAlerts, ResolveAlert, ReadWatchlist, ManageWatchlist)")
+		panic("compliance: RegisterRoutes requires all RouteGuards (ReadAlerts, ReviewAlerts, ReadWatchlist, ManageWatchlist)")
 	}
 
 	comp := rg.Group("/compliance")
 	{
-		comp.GET("/alerts", guards.ReadAlerts, h.ListAlerts)
-		comp.GET("/alerts/:alertID", guards.ReadAlerts, h.GetAlert)
-		comp.POST("/alerts/:alertID/resolve", guards.ResolveAlert, h.ResolveAlert)
+		comp.GET("/alerts", guards.ReadAlerts, platformOperator, h.ListAlerts)
+		comp.GET("/alerts/:alertID", guards.ReadAlerts, platformOperator, h.GetAlert)
+		comp.POST("/alerts/:alertID/resolve", guards.ReviewAlerts, platformOperator, h.ResolveAlert)
+		comp.POST("/alerts/:alertID/approve", guards.ReviewAlerts, platformOperator, h.ApproveAlert)
+		comp.POST("/alerts/:alertID/reject", guards.ReviewAlerts, platformOperator, h.RejectAlertProposal)
 		comp.GET("/watchlist", guards.ReadWatchlist, h.ListWatchlist)
 		comp.POST("/watchlist", guards.ManageWatchlist, h.AddWatchlistEntry)
 		comp.DELETE("/watchlist/:entryID", guards.ManageWatchlist, h.RemoveWatchlistEntry)

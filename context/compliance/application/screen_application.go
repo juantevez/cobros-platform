@@ -46,11 +46,13 @@ func (uc *ScreenApplicationUseCase) Execute(ctx context.Context, cmd ScreenAppli
 		return nil // sin coincidencias → sin alerta
 	}
 
-	// Una alerta por aplicación, con el mejor match. Los detalles registran
-	// la lista y el país que dispararon la coincidencia.
+	// Una alerta por aplicación, con el mejor match. Ante empate de score se
+	// prefiere la lista de sanciones: es la que tiene consecuencias de
+	// enforcement (hold). Los detalles registran la lista y el país.
 	best := matches[0]
 	for _, m := range matches[1:] {
-		if m.Score > best.Score {
+		if m.Score > best.Score ||
+			(m.Score == best.Score && m.Entry.ListType == domain.ListTypeSanctions) {
 			best = m
 		}
 	}

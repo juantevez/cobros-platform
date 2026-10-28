@@ -121,6 +121,8 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidCurrency),
 		errors.Is(err, domain.ErrIdempotencyKeyRequired):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrPayoutsNotAllowed):
+		c.JSON(http.StatusForbidden, gin.H{"error": domain.ErrPayoutsNotAllowed.Error()})
 	case errors.Is(err, domain.ErrIdempotencyKeyConflict),
 		errors.Is(err, domain.ErrPayoutAlreadyExists):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

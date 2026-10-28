@@ -28,8 +28,19 @@ func TestListAlertsUseCase_Execute(t *testing.T) {
 		if len(views) != 1 || views[0].ID != a.ID().String() || views[0].Status != "open" {
 			t.Errorf("unexpected views: %+v", views)
 		}
-		if r.gotStatusFilter != "open" || r.gotLimit != 10 {
-			t.Errorf("filter/limit not forwarded: %q / %d", r.gotStatusFilter, r.gotLimit)
+		if r.gotStatusFilter != "open" || r.gotLimit != 10 || r.gotTenantFilter != tid.String() {
+			t.Errorf("filter/limit not forwarded: %q / %q / %d", r.gotStatusFilter, r.gotTenantFilter, r.gotLimit)
+		}
+	})
+
+	t.Run("without tenant lists the whole platform", func(t *testing.T) {
+		r := newAlertRepo()
+		uc := NewListAlertsUseCase(r)
+		if _, err := uc.Execute(context.Background(), ListAlertsQuery{StatusFilter: "pending_second_approval"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if r.gotTenantFilter != "" || r.gotStatusFilter != "pending_second_approval" {
+			t.Errorf("filter = %q / %q", r.gotTenantFilter, r.gotStatusFilter)
 		}
 	})
 
@@ -47,13 +58,6 @@ func TestListAlertsUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid tenant rejected", func(t *testing.T) {
-		uc := NewListAlertsUseCase(newAlertRepo())
-		if _, err := uc.Execute(context.Background(), ListAlertsQuery{TenantID: "bad"}); err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
 	t.Run("invalid status filter rejected before hitting the repo", func(t *testing.T) {
 		r := newAlertRepo()
 		uc := NewListAlertsUseCase(r)
@@ -66,9 +70,9 @@ func TestListAlertsUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid tenant is a typed error", func(t *testing.T) {
+	t.Run("invalid tenant filter is a typed error", func(t *testing.T) {
 		uc := NewListAlertsUseCase(newAlertRepo())
-		if _, err := uc.Execute(context.Background(), ListAlertsQuery{TenantID: ""}); !errors.Is(err, domain.ErrInvalidTenantID) {
+		if _, err := uc.Execute(context.Background(), ListAlertsQuery{TenantID: "nope"}); !errors.Is(err, domain.ErrInvalidTenantID) {
 			t.Fatalf("expected ErrInvalidTenantID, got %v", err)
 		}
 	})
@@ -86,46 +90,29 @@ func TestListAlertsUseCase_Execute(t *testing.T) {
 func TestGetAlertUseCase_Execute(t *testing.T) {
 	tid, _ := domain.ParseTenantID(validTenant())
 
-	t.Run("returns view for owned alert", func(t *testing.T) {
+	t.Run("returns view of any tenant's alert (platform review)", func(t *testing.T) {
 		r := newAlertRepo()
 		a := seedOpenAlert(r, tid)
 		uc := NewGetAlertUseCase(r)
-		v, err := uc.Execute(context.Background(), GetAlertQuery{TenantID: tid.String(), AlertID: a.ID().String()})
+		v, err := uc.Execute(context.Background(), GetAlertQuery{AlertID: a.ID().String()})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if v.ID != a.ID().String() {
-			t.Errorf("view id = %q", v.ID)
-		}
-	})
-
-	t.Run("invalid tenant rejected", func(t *testing.T) {
-		uc := NewGetAlertUseCase(newAlertRepo())
-		if _, err := uc.Execute(context.Background(), GetAlertQuery{TenantID: "bad", AlertID: uuid.NewString()}); err == nil {
-			t.Fatal("expected error")
+		if v.ID != a.ID().String() || v.TenantID != tid.String() || !v.RequiresSecondApproval {
+			t.Errorf("unexpected view: %+v", v)
 		}
 	})
 
 	t.Run("invalid alert id rejected", func(t *testing.T) {
 		uc := NewGetAlertUseCase(newAlertRepo())
-		if _, err := uc.Execute(context.Background(), GetAlertQuery{TenantID: validTenant(), AlertID: "bad"}); err == nil {
-			t.Fatal("expected error")
+		if _, err := uc.Execute(context.Background(), GetAlertQuery{AlertID: "bad"}); !errors.Is(err, domain.ErrInvalidAlertID) {
+			t.Fatalf("expected ErrInvalidAlertID, got %v", err)
 		}
 	})
 
 	t.Run("not found propagated", func(t *testing.T) {
 		uc := NewGetAlertUseCase(newAlertRepo())
-		_, err := uc.Execute(context.Background(), GetAlertQuery{TenantID: validTenant(), AlertID: uuid.NewString()})
-		if !errors.Is(err, domain.ErrAlertNotFound) {
-			t.Fatalf("expected ErrAlertNotFound, got %v", err)
-		}
-	})
-
-	t.Run("cross-tenant denied", func(t *testing.T) {
-		r := newAlertRepo()
-		a := seedOpenAlert(r, tid)
-		uc := NewGetAlertUseCase(r)
-		_, err := uc.Execute(context.Background(), GetAlertQuery{TenantID: validTenant(), AlertID: a.ID().String()})
+		_, err := uc.Execute(context.Background(), GetAlertQuery{AlertID: uuid.NewString()})
 		if !errors.Is(err, domain.ErrAlertNotFound) {
 			t.Fatalf("expected ErrAlertNotFound, got %v", err)
 		}
@@ -255,8 +242,12 @@ func TestToAlertView(t *testing.T) {
 	})
 
 	t.Run("resolved alert formats resolvedAt", func(t *testing.T) {
-		a := domain.ReconstituteAlert(domain.NewAlertID(), tid, domain.AlertSanctionsMatch, domain.RiskHigh,
-			domain.StatusConfirmed, "s", 95, nil, "note", "user-1", testNow, &resolved)
+		a := domain.ReconstituteAlert(domain.AlertSnapshot{
+			ID: domain.NewAlertID(), TenantID: tid, Type: domain.AlertSanctionsMatch, RiskLevel: domain.RiskHigh,
+			Status: domain.StatusConfirmed, Subject: "s", Score: 95, Note: "note", ResolvedBy: "user-1",
+			CreatedAt: testNow, ResolvedAt: &resolved,
+			ProposedStatus: domain.StatusConfirmed, ProposedBy: "user-0", ProposedAt: &resolved, ApprovalNote: "ok",
+		})
 		v := toAlertView(a)
 		if v.ResolvedAt == nil {
 			t.Fatal("expected non-nil resolvedAt")
@@ -266,6 +257,9 @@ func TestToAlertView(t *testing.T) {
 		}
 		if v.Note != "note" || v.ResolvedBy != "user-1" {
 			t.Errorf("note/resolvedBy = %q / %q", v.Note, v.ResolvedBy)
+		}
+		if v.ProposedStatus != "confirmed" || v.ProposedBy != "user-0" || v.ProposedAt == nil || v.ApprovalNote != "ok" {
+			t.Errorf("four-eyes fields not mapped: %+v", v)
 		}
 	})
 }

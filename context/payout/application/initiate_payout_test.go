@@ -12,6 +12,7 @@ import (
 )
 
 type initiateDeps struct {
+	gate     *fakeGate
 	repo     *fakeRepo
 	balance  *fakeBalanceChecker
 	bank     *fakeBankProvider
@@ -22,6 +23,7 @@ type initiateDeps struct {
 
 func newInitiateDeps() *initiateDeps {
 	return &initiateDeps{
+		gate:     &fakeGate{},
 		repo:     &fakeRepo{},
 		balance:  &fakeBalanceChecker{balance: 10_000},
 		bank:     &fakeBankProvider{account: validBankAccount()},
@@ -32,11 +34,30 @@ func newInitiateDeps() *initiateDeps {
 }
 
 func (d *initiateDeps) uc() *InitiatePayoutUseCase {
-	return NewInitiatePayoutUseCase(d.repo, d.balance, d.bank, d.transfer, d.tx, d.pub)
+	return NewInitiatePayoutUseCase(d.gate, d.repo, d.balance, d.bank, d.transfer, d.tx, d.pub)
+}
+
+type fakeGate struct{ err error }
+
+func (g *fakeGate) EnsurePayoutsAllowed(ctx context.Context, tenantID domain.TenantID) error {
+	return g.err
 }
 
 func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 	ctx := context.Background()
+
+	t.Run("tenant on hold or suspended cannot pay out", func(t *testing.T) {
+		d := newInitiateDeps()
+		d.gate.err = domain.ErrPayoutsNotAllowed
+
+		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 4_000, Currency: "ARS", IdempotencyKey: "k1"})
+		if !errors.Is(err, domain.ErrPayoutsNotAllowed) {
+			t.Fatalf("expected ErrPayoutsNotAllowed, got %v", err)
+		}
+		if len(d.repo.saved) != 0 || len(d.pub.events) != 0 {
+			t.Error("no payout must be created nor published")
+		}
+	})
 
 	t.Run("happy path confirms payout and publishes initiated + confirmed", func(t *testing.T) {
 		d := newInitiateDeps()

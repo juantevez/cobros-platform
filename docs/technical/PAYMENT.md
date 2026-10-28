@@ -27,7 +27,7 @@ Payment **no mueve dinero en el Ledger**: publica `payment.captured.v1` y el con
 |---|---|---|
 | `PSPRouter` / `PSPAdapter` | `psp.Router` → siempre **`mock`** | El mock aprueba todo salvo `payment_token = "REJECT"` y cobra un `psp_fee` = 1,5 % (mínimo 1). El refund siempre es exitoso. |
 | `RiskEvaluator` | `risk.PermissiveEvaluator` | Aprueba todo (score 0). |
-| `TenantGate` | `tenant.StatusGate` | Lee `tenants.status` (contexto Auth) y exige `active`: KYC aprobado y no suspendido. |
+| `TenantGate` | `tenant.StatusGate` | Lee `tenants.status` y `tenant_compliance_holds` (contexto Auth) y exige `active` sin hold de cumplimiento vigente: KYC aprobado, no suspendido y sin hold preventivo AML. El error al comercio es el mismo en todos los casos (anti tipping-off). |
 | `FeeCalculator` | `fees.BillingFeeCalculator` | Llama in-process a `billing.CalculateFeeUseCase` (plan del tenant, o fallback de 300 bps). `FixedRateCalculator` existe pero no está cableado. |
 
 ### Fuera de alcance (hoy)
@@ -172,7 +172,7 @@ Archivo: [process_payment.go](../../context/payment/application/process_payment.
 |---|---|---|---|
 | 1 | Parsear tenant, clave, `Money` y método | — | 400/500, sin persistir |
 | 2 | `FindByIdempotencyKey`: si existe y **no** está en `initiated`, devolverlo (`WasExisting`). Si está en `initiated`, se retoma desde el paso 5 | — | 500 |
-| 3 | `TenantGate.EnsureCanProcessPayments` (tenant `active`) | — | 403, sin persistir ni procesar |
+| 3 | `TenantGate.EnsureCanProcessPayments` (tenant `active` y sin hold de cumplimiento) | — | 403, sin persistir ni procesar |
 | 4 | `NewPayment` + `repo.Save` (**initiated**) | No | 500 |
 | 5 | `risk.Evaluate`; si rechaza → `RejectByRisk` | Sí: Update + outbox | Error del evaluador → queda en `initiated` y **un reintento lo retoma** |
 | 6 | `fee.Calculate` (Billing) | — | Queda en `initiated`; un reintento lo retoma |
@@ -394,7 +394,7 @@ context/payment/
         ├── psp/        # router.go + mock/
         ├── fees/       # billing_calculator.go (cableado), fixed_rate.go
         ├── risk/       # permissive.go
-        └── tenant/     # gate.go (TenantGate: lee tenants.status)
+        └── tenant/     # gate.go (TenantGate: lee tenants.status + tenant_compliance_holds)
 ```
 
 Cableado: [cmd/api/main.go](../../cmd/api/main.go), sección `Payment Processing` (grupo `paymentsAPI` con `JWTOrApiKeyMiddleware` y `RouteGuards`).

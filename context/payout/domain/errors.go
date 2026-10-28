@@ -29,4 +29,9 @@ var (
 
 	// ErrIdempotencyKeyRequired: todo desembolso debe traer clave de idempotencia.
 	ErrIdempotencyKeyRequired = errors.New("payout idempotency key is required")
+
+	// ErrPayoutsNotAllowed: el comercio no puede desembolsar (no activo,
+	// suspendido o en hold preventivo). El mensaje es genérico a propósito:
+	// no debe revelar un hold de cumplimiento (tipping-off).
+	ErrPayoutsNotAllowed = errors.New("payouts are not available for this account")
 )

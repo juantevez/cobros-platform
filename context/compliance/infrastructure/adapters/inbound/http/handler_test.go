@@ -12,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/juantevez/cobros-platform/context/compliance/application"
 	"github.com/juantevez/cobros-platform/context/compliance/domain"
@@ -28,6 +30,8 @@ type fakeAlertRepo struct {
 	listErr   error
 	updateErr error
 	updated   []*domain.Alert
+
+	gotFilter application.AlertFilter
 }
 
 func newAlertRepo() *fakeAlertRepo {
@@ -35,7 +39,7 @@ func newAlertRepo() *fakeAlertRepo {
 }
 
 func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error { return nil }
-func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert) error {
+func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error {
 	r.updated = append(r.updated, a)
 	return r.updateErr
 }
@@ -46,7 +50,8 @@ func (r *fakeAlertRepo) FindByID(ctx context.Context, id domain.AlertID) (*domai
 	}
 	return a, nil
 }
-func (r *fakeAlertRepo) ListByTenant(ctx context.Context, t domain.TenantID, s domain.AlertStatus, l int) ([]*domain.Alert, error) {
+func (r *fakeAlertRepo) List(ctx context.Context, f application.AlertFilter, l int) ([]*domain.Alert, error) {
+	r.gotFilter = f
 	return r.listed, r.listErr
 }
 
@@ -94,12 +99,18 @@ func (fixedClock) Now() time.Time { return time.Date(2026, 7, 6, 12, 0, 0, 0, ti
 
 func newHandler(r *fakeAlertRepo, w *fakeWatchlist) *ComplianceHandler {
 	return NewComplianceHandler(
-		application.NewListAlertsUseCase(r),
-		application.NewGetAlertUseCase(r),
-		application.NewResolveAlertUseCase(r, fakeTx{}, fakePublisher{}, fixedClock{}),
-		application.NewAddWatchlistEntryUseCase(w, fixedClock{}),
-		application.NewRemoveWatchlistEntryUseCase(w, fixedClock{}),
-		application.NewListWatchlistUseCase(w),
+		AlertUseCases{
+			List:           application.NewListAlertsUseCase(r),
+			Get:            application.NewGetAlertUseCase(r),
+			Resolve:        application.NewResolveAlertUseCase(r, fakeTx{}, fakePublisher{}, fixedClock{}),
+			Approve:        application.NewApproveAlertProposalUseCase(r, fakeTx{}, fakePublisher{}, fixedClock{}),
+			RejectProposal: application.NewRejectAlertProposalUseCase(r, fakeTx{}, fakePublisher{}, fixedClock{}),
+		},
+		WatchlistUseCases{
+			Add:    application.NewAddWatchlistEntryUseCase(w, fixedClock{}),
+			Remove: application.NewRemoveWatchlistEntryUseCase(w, fixedClock{}),
+			List:   application.NewListWatchlistUseCase(w),
+		},
 	)
 }
 
@@ -144,7 +155,7 @@ func TestListAlerts(t *testing.T) {
 		r := newAlertRepo()
 		r.listed = []*domain.Alert{seedAlert(r, tid)}
 		rec := doRequest(newHandler(r, &fakeWatchlist{}).ListAlerts, http.MethodGet,
-			"/compliance/alerts?status=open&limit=10", "", tid.String(), nil)
+			"/compliance/alerts?status=open&limit=10", "", "", nil)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d", rec.Code)
@@ -159,19 +170,34 @@ func TestListAlerts(t *testing.T) {
 		if body.Count != 1 || len(body.Alerts) != 1 {
 			t.Errorf("count/alerts mismatch: %+v", body)
 		}
+		if r.gotFilter.TenantID != "" {
+			t.Errorf("no tenant filter expected (cross-tenant), got %q", r.gotFilter.TenantID)
+		}
+	})
+
+	t.Run("tenant_id query param filters by merchant", func(t *testing.T) {
+		r := newAlertRepo()
+		rec := doRequest(newHandler(r, &fakeWatchlist{}).ListAlerts, http.MethodGet,
+			"/compliance/alerts?tenant_id="+tid.String()+"&status=pending_second_approval", "", uuid.NewString(), nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if r.gotFilter.TenantID != tid || r.gotFilter.Status != domain.StatusPendingSecondApproval {
+			t.Errorf("filter = %+v", r.gotFilter)
+		}
 	})
 
 	t.Run("invalid status filter yields 400", func(t *testing.T) {
 		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).ListAlerts, http.MethodGet,
-			"/compliance/alerts?status=bogus", "", tid.String(), nil)
+			"/compliance/alerts?status=bogus", "", "", nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", rec.Code)
 		}
 	})
 
-	t.Run("missing tenant yields 400, not 500", func(t *testing.T) {
+	t.Run("invalid tenant_id yields 400", func(t *testing.T) {
 		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).ListAlerts, http.MethodGet,
-			"/compliance/alerts", "", "", nil)
+			"/compliance/alerts?tenant_id=nope", "", "", nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", rec.Code)
 		}
@@ -181,7 +207,7 @@ func TestListAlerts(t *testing.T) {
 		r := newAlertRepo()
 		r.listErr = errors.New("boom")
 		rec := doRequest(newHandler(r, &fakeWatchlist{}).ListAlerts, http.MethodGet,
-			"/compliance/alerts", "", tid.String(), nil)
+			"/compliance/alerts", "", "", nil)
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", rec.Code)
 		}
@@ -193,100 +219,183 @@ func TestListAlerts(t *testing.T) {
 func TestGetAlert(t *testing.T) {
 	tid, _ := domain.ParseTenantID(uuid.NewString())
 
-	t.Run("returns alert", func(t *testing.T) {
+	t.Run("returns alert of any merchant", func(t *testing.T) {
 		r := newAlertRepo()
 		a := seedAlert(r, tid)
 		rec := doRequest(newHandler(r, &fakeWatchlist{}).GetAlert, http.MethodGet,
-			"/compliance/alerts/"+a.ID().String(), "", tid.String(),
-			gin.Params{{Key: "alertID", Value: a.ID().String()}})
+			"/x", "", uuid.NewString(), gin.Params{{Key: "alertID", Value: a.ID().String()}})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d", rec.Code)
 		}
 	})
 
 	t.Run("not found yields 404", func(t *testing.T) {
-		r := newAlertRepo()
-		rec := doRequest(newHandler(r, &fakeWatchlist{}).GetAlert, http.MethodGet,
-			"/compliance/alerts/x", "", tid.String(),
-			gin.Params{{Key: "alertID", Value: uuid.NewString()}})
+		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).GetAlert, http.MethodGet,
+			"/x", "", "", gin.Params{{Key: "alertID", Value: uuid.NewString()}})
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", rec.Code)
 		}
 	})
 
 	t.Run("invalid alert id yields 400", func(t *testing.T) {
-		r := newAlertRepo()
-		rec := doRequest(newHandler(r, &fakeWatchlist{}).GetAlert, http.MethodGet,
-			"/compliance/alerts/bad", "", tid.String(),
-			gin.Params{{Key: "alertID", Value: "not-a-uuid"}})
+		rec := doRequest(newHandler(newAlertRepo(), &fakeWatchlist{}).GetAlert, http.MethodGet,
+			"/x", "", "", gin.Params{{Key: "alertID", Value: "not-a-uuid"}})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", rec.Code)
 		}
 	})
 }
 
-// ── ResolveAlert ──────────────────────────────────────────────────────────────
+// ── Revisión (resolve / approve / reject) ─────────────────────────────────────
 
-func TestResolveAlert(t *testing.T) {
+// doAs ejecuta el handler autenticado como `actor` (userID del analista).
+func doAs(h gin.HandlerFunc, actor, body string, alertID domain.AlertID) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body))
+	req = req.WithContext(postgres.WithActor(req.Context(), actor))
+	c.Request = req
+	c.Params = gin.Params{{Key: "alertID", Value: alertID.String()}}
+	h(c)
+	c.Writer.WriteHeaderNow()
+	return rec
+}
+
+func decodeView(t *testing.T, rec *httptest.ResponseRecorder) application.AlertView {
+	t.Helper()
+	var v application.AlertView
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("bad json %q: %v", rec.Body.String(), err)
+	}
+	return v
+}
+
+func TestReviewFlow(t *testing.T) {
 	tid, _ := domain.ParseTenantID(uuid.NewString())
 
-	t.Run("resolves and returns 204", func(t *testing.T) {
+	t.Run("single-step alert is closed by one analyst", func(t *testing.T) {
 		r := newAlertRepo()
-		a := seedAlert(r, tid)
-		rec := doRequest(newHandler(r, &fakeWatchlist{}).ResolveAlert, http.MethodPost,
-			"/x", `{"disposition":"cleared","note":"fp"}`, tid.String(),
-			gin.Params{{Key: "alertID", Value: a.ID().String()}})
-		if rec.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want 204", rec.Code)
-		}
-		if len(r.updated) != 1 || r.updated[0].ResolvedBy() != "user-42" {
-			t.Errorf("resolved_by should come from the authenticated actor, got %+v", r.updated)
-		}
-	})
-
-	t.Run("invalid body yields 400", func(t *testing.T) {
-		r := newAlertRepo()
-		rec := doRequest(newHandler(r, &fakeWatchlist{}).ResolveAlert, http.MethodPost,
-			"/x", `{bad`, tid.String(),
-			gin.Params{{Key: "alertID", Value: uuid.NewString()}})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", rec.Code)
-		}
-	})
-
-	t.Run("not found yields 404", func(t *testing.T) {
-		r := newAlertRepo()
-		rec := doRequest(newHandler(r, &fakeWatchlist{}).ResolveAlert, http.MethodPost,
-			"/x", `{"disposition":"cleared"}`, tid.String(),
-			gin.Params{{Key: "alertID", Value: uuid.NewString()}})
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("status = %d, want 404", rec.Code)
-		}
-	})
-
-	t.Run("already resolved yields 409", func(t *testing.T) {
-		r := newAlertRepo()
-		a := seedAlert(r, tid)
-		_ = a.Resolve(domain.StatusConfirmed, "", "user-1", time.Now())
+		a := domain.NewAlert(domain.NewAlertID(), tid, domain.AlertTransactionThreshold,
+			domain.RiskMedium, "pay-1", 70, nil, time.Now())
 		a.PullEvents()
-		rec := doRequest(newHandler(r, &fakeWatchlist{}).ResolveAlert, http.MethodPost,
-			"/x", `{"disposition":"cleared"}`, tid.String(),
-			gin.Params{{Key: "alertID", Value: a.ID().String()}})
+		r.byID[a.ID()] = a
+		h := newHandler(r, &fakeWatchlist{})
+
+		rec := doAs(h.ResolveAlert, "officer-1", `{"disposition":"cleared","note":"fp"}`, a.ID())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if v := decodeView(t, rec); v.Status != "cleared" || v.ResolvedBy != "officer-1" || v.RequiresSecondApproval {
+			t.Errorf("unexpected view: %+v", v)
+		}
+	})
+
+	t.Run("four-eyes: propose, same analyst blocked, second analyst approves", func(t *testing.T) {
+		r := newAlertRepo()
+		a := seedAlert(r, tid) // sanctions_match / high
+		h := newHandler(r, &fakeWatchlist{})
+
+		rec := doAs(h.ResolveAlert, "officer-1", `{"disposition":"confirmed","note":"coincide"}`, a.ID())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("propose status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if v := decodeView(t, rec); v.Status != "pending_second_approval" || v.ProposedBy != "officer-1" ||
+			v.ProposedStatus != "confirmed" || !v.RequiresSecondApproval {
+			t.Fatalf("unexpected view: %+v", v)
+		}
+
+		if rec := doAs(h.ResolveAlert, "officer-2", `{"disposition":"cleared"}`, a.ID()); rec.Code != http.StatusConflict {
+			t.Errorf("re-resolve pending: status = %d, want 409", rec.Code)
+		}
+		if rec := doAs(h.ApproveAlert, "officer-1", "", a.ID()); rec.Code != http.StatusForbidden {
+			t.Errorf("self-approval: status = %d, want 403", rec.Code)
+		}
+
+		rec = doAs(h.ApproveAlert, "officer-2", `{"note":"ok"}`, a.ID())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("approve status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if v := decodeView(t, rec); v.Status != "confirmed" || v.ResolvedBy != "officer-2" || v.ApprovalNote != "ok" {
+			t.Errorf("unexpected view: %+v", v)
+		}
+
+		if rec := doAs(h.ApproveAlert, "officer-3", "", a.ID()); rec.Code != http.StatusConflict {
+			t.Errorf("approve closed alert: status = %d, want 409", rec.Code)
+		}
+	})
+
+	t.Run("second analyst rejects: alert back to open", func(t *testing.T) {
+		r := newAlertRepo()
+		a := seedAlert(r, tid)
+		h := newHandler(r, &fakeWatchlist{})
+		_ = doAs(h.ResolveAlert, "officer-1", `{"disposition":"cleared"}`, a.ID())
+
+		rec := doAs(h.RejectAlertProposal, "officer-2", `{"note":"falta evidencia"}`, a.ID())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if v := decodeView(t, rec); v.Status != "open" || v.ProposedBy != "" {
+			t.Errorf("unexpected view: %+v", v)
+		}
+	})
+
+	t.Run("error mapping", func(t *testing.T) {
+		r := newAlertRepo()
+		a := seedAlert(r, tid)
+		h := newHandler(r, &fakeWatchlist{})
+		cases := []struct {
+			name string
+			rec  *httptest.ResponseRecorder
+			want int
+		}{
+			{"invalid body", doAs(h.ResolveAlert, "o", `{bad`, a.ID()), http.StatusBadRequest},
+			{"invalid disposition", doAs(h.ResolveAlert, "o", `{"disposition":"maybe"}`, a.ID()), http.StatusBadRequest},
+			{"not found", doAs(h.ResolveAlert, "o", `{"disposition":"cleared"}`, domain.NewAlertID()), http.StatusNotFound},
+			{"approve without proposal", doAs(h.ApproveAlert, "o", "", a.ID()), http.StatusConflict},
+			{"reject invalid body", doAs(h.RejectAlertProposal, "o", `{bad`, a.ID()), http.StatusBadRequest},
+		}
+		for _, c := range cases {
+			if c.rec.Code != c.want {
+				t.Errorf("%s: status = %d, want %d", c.name, c.rec.Code, c.want)
+			}
+		}
+	})
+
+	t.Run("concurrent review yields 409", func(t *testing.T) {
+		r := newAlertRepo()
+		a := seedAlert(r, tid)
+		r.updateErr = domain.ErrAlertNotOpen
+		rec := doAs(newHandler(r, &fakeWatchlist{}).ResolveAlert, "o", `{"disposition":"cleared"}`, a.ID())
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", rec.Code)
 		}
 	})
+}
 
-	t.Run("invalid disposition yields 400", func(t *testing.T) {
-		r := newAlertRepo()
-		a := seedAlert(r, tid)
-		rec := doRequest(newHandler(r, &fakeWatchlist{}).ResolveAlert, http.MethodPost,
-			"/x", `{"disposition":"maybe"}`, tid.String(),
-			gin.Params{{Key: "alertID", Value: a.ID().String()}})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", rec.Code)
-		}
+func TestPlatformOperatorMiddleware(t *testing.T) {
+	// El middleware debe marcar el ctx para que RunWithAppTenant/RunInTx fijen
+	// app.platform_operator='on' (política RLS cross-tenant de aml_alerts).
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("mock: %v", err)
+	}
+	defer mock.Close()
+	mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	mock.ExpectExec("set_config").WithArgs(postgres.PlatformOperatorKey, "on").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCommit()
+
+	rec := httptest.NewRecorder()
+	c, engine := gin.CreateTestContext(rec)
+	engine.GET("/x", platformOperator, func(c *gin.Context) {
+		_ = postgres.RunWithAppTenant(c.Request.Context(), mock, func(context.Context) error { return nil })
 	})
+	c.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
+	engine.HandleContext(c)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("platform operator var not set: %v", err)
+	}
 }
 
 // ── Watchlist ─────────────────────────────────────────────────────────────────
@@ -420,12 +529,13 @@ func deny(c *gin.Context)  { c.AbortWithStatus(http.StatusForbidden) }
 
 func TestRegisterRoutes(t *testing.T) {
 	w := &fakeWatchlist{entries: []domain.WatchlistEntry{{ID: "1", FullName: "A", ListType: "pep"}}}
+	all := func(g gin.HandlerFunc) RouteGuards {
+		return RouteGuards{ReadAlerts: g, ReviewAlerts: g, ReadWatchlist: g, ManageWatchlist: g}
+	}
 
 	t.Run("routes are wired behind their guards", func(t *testing.T) {
 		r := gin.New()
-		RegisterRoutes(r.Group("/api/v1"), newHandler(newAlertRepo(), w), RouteGuards{
-			ReadAlerts: allow, ResolveAlert: allow, ReadWatchlist: allow, ManageWatchlist: allow,
-		})
+		RegisterRoutes(r.Group("/api/v1"), newHandler(newAlertRepo(), w), all(allow))
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/compliance/watchlist", nil))
 		if rec.Code != http.StatusOK {
@@ -435,16 +545,17 @@ func TestRegisterRoutes(t *testing.T) {
 
 	t.Run("each route enforces its guard", func(t *testing.T) {
 		r := gin.New()
-		RegisterRoutes(r.Group("/api/v1"), newHandler(newAlertRepo(), w), RouteGuards{
-			ReadAlerts: deny, ResolveAlert: deny, ReadWatchlist: deny, ManageWatchlist: deny,
-		})
+		RegisterRoutes(r.Group("/api/v1"), newHandler(newAlertRepo(), w), all(deny))
+		id := uuid.NewString()
 		routes := []struct{ method, path, body string }{
 			{http.MethodGet, "/api/v1/compliance/alerts", ""},
-			{http.MethodGet, "/api/v1/compliance/alerts/" + uuid.NewString(), ""},
-			{http.MethodPost, "/api/v1/compliance/alerts/" + uuid.NewString() + "/resolve", `{"disposition":"cleared"}`},
+			{http.MethodGet, "/api/v1/compliance/alerts/" + id, ""},
+			{http.MethodPost, "/api/v1/compliance/alerts/" + id + "/resolve", `{"disposition":"cleared"}`},
+			{http.MethodPost, "/api/v1/compliance/alerts/" + id + "/approve", ""},
+			{http.MethodPost, "/api/v1/compliance/alerts/" + id + "/reject", ""},
 			{http.MethodGet, "/api/v1/compliance/watchlist", ""},
 			{http.MethodPost, "/api/v1/compliance/watchlist", `{"full_name":"x","list_type":"pep"}`},
-			{http.MethodDelete, "/api/v1/compliance/watchlist/" + uuid.NewString(), ""},
+			{http.MethodDelete, "/api/v1/compliance/watchlist/" + id, ""},
 		}
 		for _, rt := range routes {
 			rec := httptest.NewRecorder()
@@ -464,8 +575,8 @@ func TestRegisterRoutes(t *testing.T) {
 				t.Fatal("expected panic for missing guard")
 			}
 		}()
-		RegisterRoutes(gin.New().Group("/api/v1"), newHandler(newAlertRepo(), w), RouteGuards{
-			ReadAlerts: allow, ResolveAlert: allow, ReadWatchlist: allow,
-		})
+		g := all(allow)
+		g.ReviewAlerts = nil
+		RegisterRoutes(gin.New().Group("/api/v1"), newHandler(newAlertRepo(), w), g)
 	})
 }

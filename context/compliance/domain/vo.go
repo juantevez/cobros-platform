@@ -71,6 +71,8 @@ const (
 	StatusOpen      AlertStatus = "open"
 	StatusCleared   AlertStatus = "cleared"   // revisado y descartado (falso positivo)
 	StatusConfirmed AlertStatus = "confirmed" // revisado y confirmado (verdadero positivo)
+	// StatusPendingSecondApproval: disposición propuesta, espera a un segundo analista.
+	StatusPendingSecondApproval AlertStatus = "pending_second_approval"
 )
 
 func (s AlertStatus) String() string { return string(s) }
@@ -78,7 +80,7 @@ func (s AlertStatus) String() string { return string(s) }
 // ParseStatusFilter valida el filtro de estado de un listado. Vacío = sin filtro.
 func ParseStatusFilter(s string) (AlertStatus, error) {
 	switch AlertStatus(s) {
-	case "", StatusOpen, StatusCleared, StatusConfirmed:
+	case "", StatusOpen, StatusPendingSecondApproval, StatusCleared, StatusConfirmed:
 		return AlertStatus(s), nil
 	}
 	return "", fmt.Errorf("%w: %q", ErrInvalidStatusFilter, s)

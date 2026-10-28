@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 
+	"github.com/juantevez/cobros-platform/context/compliance/application"
 	"github.com/juantevez/cobros-platform/context/compliance/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
@@ -18,7 +19,13 @@ import (
 var alertCols = []string{
 	"id", "tenant_id", "alert_type", "risk_level", "status", "subject", "score",
 	"details", "note", "resolved_by", "created_at", "resolved_at",
+	"proposed_status", "proposed_by", "proposed_at", "approval_note",
 }
+
+// noProposal son las 4 columnas four-eyes vacías de una alerta sin propuesta.
+var noProposal = []any{"", "", (*time.Time)(nil), ""}
+
+func alertRow(vals ...any) []any { return append(vals, noProposal...) }
 
 // expectRLSTx espera la tx efímera de RunWithAppTenant que fija app.current_tenant.
 func expectRLSTx(mock pgxmock.PgxPoolIface, tenant string) {
@@ -119,17 +126,27 @@ func TestAlertRepository_Update(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	resolved := now.Add(time.Hour)
 
-	t.Run("updates status and resolution", func(t *testing.T) {
+	snapshot := func(t *testing.T, status domain.AlertStatus) domain.AlertSnapshot {
+		return domain.AlertSnapshot{
+			ID: domain.NewAlertID(), TenantID: tenantID(t), Type: domain.AlertSanctionsMatch,
+			RiskLevel: domain.RiskHigh, Status: status, Subject: "subj", Score: 95, CreatedAt: now,
+		}
+	}
+
+	t.Run("final disposition persisted conditionally on previous status", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
-		a := domain.ReconstituteAlert(domain.NewAlertID(), tenantID(t), domain.AlertSanctionsMatch,
-			domain.RiskHigh, domain.StatusConfirmed, "subj", 95, nil, "confirmado", "user-1", now, &resolved)
+		snap := snapshot(t, domain.StatusConfirmed)
+		snap.Note, snap.ResolvedBy, snap.ResolvedAt = "confirmado", "officer-2", &resolved
+		snap.ProposedStatus, snap.ProposedBy, snap.ProposedAt, snap.ApprovalNote = domain.StatusConfirmed, "officer-1", &now, "ok"
+		a := domain.ReconstituteAlert(snap)
 
-		mock.ExpectExec("UPDATE aml_alerts SET .*resolved_by=\\$5").
-			WithArgs(a.ID().String(), "confirmed", pgxmock.AnyArg(), &resolved, pgxmock.AnyArg()).
+		mock.ExpectExec(`UPDATE aml_alerts\s+SET status=\$3, .*approval_note=\$10\s+WHERE id=\$1 AND status=\$2`).
+			WithArgs(a.ID().String(), "pending_second_approval", "confirmed", pgxmock.AnyArg(),
+				&resolved, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &now, pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := repo.Update(context.Background(), a); err != nil {
+		if err := repo.Update(context.Background(), a, domain.StatusPendingSecondApproval); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -140,30 +157,24 @@ func TestAlertRepository_Update(t *testing.T) {
 	t.Run("db error propagated", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
-		a := domain.ReconstituteAlert(domain.NewAlertID(), tenantID(t), domain.AlertSanctionsMatch,
-			domain.RiskHigh, domain.StatusCleared, "s", 1, nil, "", "", now, nil)
+		a := domain.ReconstituteAlert(snapshot(t, domain.StatusCleared))
 		mock.ExpectExec("UPDATE aml_alerts").WillReturnError(errors.New("boom"))
-		if err := repo.Update(context.Background(), a); err == nil {
+		if err := repo.Update(context.Background(), a, domain.StatusOpen); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 
-	t.Run("concurrent resolution yields ErrAlertNotOpen", func(t *testing.T) {
-		// Concurrencia optimista: si el UPDATE no toca ninguna fila porque otra
-		// transacción ya dispuso la alerta (status != 'open'), el repo reporta
-		// ErrAlertNotOpen y el caso de uso aborta antes de publicar eventos.
+	t.Run("concurrent review yields ErrAlertNotOpen", func(t *testing.T) {
+		// Concurrencia optimista: si otra transacción ya movió la alerta desde
+		// `from`, el UPDATE no toca filas y el caso de uso aborta sin publicar.
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
-		a := domain.ReconstituteAlert(domain.NewAlertID(), tenantID(t), domain.AlertSanctionsMatch,
-			domain.RiskHigh, domain.StatusCleared, "s", 1, nil, "", "", now, &resolved)
-		mock.ExpectExec(`UPDATE aml_alerts .* AND status='open'`).
-			WithArgs(a.ID().String(), "cleared", pgxmock.AnyArg(), &resolved, pgxmock.AnyArg()).
+		a := domain.ReconstituteAlert(snapshot(t, domain.StatusCleared))
+		mock.ExpectExec(`UPDATE aml_alerts .* AND status=\$2`).
+			WithArgs(append([]any{a.ID().String(), "open"}, anyArgs(8)...)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
-		if err := repo.Update(context.Background(), a); !errors.Is(err, domain.ErrAlertNotOpen) {
+		if err := repo.Update(context.Background(), a, domain.StatusOpen); !errors.Is(err, domain.ErrAlertNotOpen) {
 			t.Fatalf("err = %v, want ErrAlertNotOpen", err)
-		}
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("expectations: %v", err)
 		}
 	})
 }
@@ -176,10 +187,10 @@ func TestAlertRepository_FindByID(t *testing.T) {
 		repo := NewAlertRepository(mock)
 		id := domain.NewAlertID()
 		tid := tenantID(t)
-		rows := pgxmock.NewRows(alertCols).AddRow(
+		rows := pgxmock.NewRows(alertCols).AddRow(alertRow(
 			id.String(), tid.String(), "sanctions_match", "high", "open", "subj", 95,
 			[]byte(`{"list":"OFAC"}`), "nota", "", now, (*time.Time)(nil),
-		)
+		)...)
 		mock.ExpectQuery("FROM aml_alerts WHERE id=\\$1").WithArgs(id.String()).WillReturnRows(rows)
 
 		a, err := repo.FindByID(context.Background(), id)
@@ -194,15 +205,16 @@ func TestAlertRepository_FindByID(t *testing.T) {
 		}
 	})
 
-	t.Run("with tenant in context reads under RLS session", func(t *testing.T) {
+	t.Run("pending proposal is restored under RLS session", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
 		id := domain.NewAlertID()
 		tid := tenantID(t)
 		expectRLSTx(mock, tid.String())
 		rows := pgxmock.NewRows(alertCols).AddRow(
-			id.String(), tid.String(), "sanctions_match", "high", "cleared", "subj", 95,
-			[]byte(`{}`), "", "user-1", now, &now,
+			id.String(), tid.String(), "sanctions_match", "high", "pending_second_approval", "subj", 95,
+			[]byte(`{}`), "coincide", "", now, (*time.Time)(nil),
+			"confirmed", "officer-1", &now, "",
 		)
 		mock.ExpectQuery("FROM aml_alerts WHERE id=\\$1").WithArgs(id.String()).WillReturnRows(rows)
 		mock.ExpectCommit()
@@ -212,8 +224,9 @@ func TestAlertRepository_FindByID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if a.ResolvedBy() != "user-1" {
-			t.Errorf("resolvedBy = %q", a.ResolvedBy())
+		if a.Status() != domain.StatusPendingSecondApproval || a.ProposedStatus() != domain.StatusConfirmed ||
+			a.ProposedBy() != "officer-1" || a.ProposedAt() == nil {
+			t.Errorf("proposal not restored: %+v", a)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("expectations: %v", err)
@@ -234,61 +247,81 @@ func TestAlertRepository_FindByID(t *testing.T) {
 	})
 }
 
-func TestAlertRepository_ListByTenant(t *testing.T) {
+func TestAlertRepository_List(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
 	makeRows := func(tid domain.TenantID) *pgxmock.Rows {
-		return pgxmock.NewRows(alertCols).AddRow(
+		return pgxmock.NewRows(alertCols).AddRow(alertRow(
 			domain.NewAlertID().String(), tid.String(), "sanctions_match", "high", "open",
 			"subj", 95, []byte(`{}`), "", "", now, (*time.Time)(nil),
-		)
+		)...)
+	}
+	operatorCtx := func() context.Context {
+		return pkgpostgres.WithPlatformOperator(context.Background())
+	}
+	expectOperatorTx := func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(pkgpostgres.PlatformOperatorKey, "on").
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	}
 
-	t.Run("without status filter", func(t *testing.T) {
+	t.Run("cross-tenant without filters", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
-		tid := tenantID(t)
-		// Sin filtro: args = [tenant, limit], sin "AND status".
-		expectRLSTx(mock, tid.String())
-		mock.ExpectQuery("WHERE tenant_id=\\$1 ORDER BY created_at DESC LIMIT \\$2").
-			WithArgs(tid.String(), 50).WillReturnRows(makeRows(tid))
+		expectOperatorTx(mock)
+		mock.ExpectQuery("FROM aml_alerts ORDER BY created_at DESC LIMIT \\$1").
+			WithArgs(50).WillReturnRows(makeRows(tenantID(t)))
 		mock.ExpectCommit()
 
-		out, err := repo.ListByTenant(context.Background(), tid, "", 50)
+		out, err := repo.List(operatorCtx(), application.AlertFilter{}, 50)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(out) != 1 {
 			t.Fatalf("expected 1 alert, got %d", len(out))
 		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
 	})
 
-	t.Run("with status filter adds predicate", func(t *testing.T) {
+	t.Run("tenant and status filters add predicates", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
 		tid := tenantID(t)
 		expectRLSTx(mock, tid.String())
 		mock.ExpectQuery("WHERE tenant_id=\\$1 AND status=\\$2 ORDER BY created_at DESC LIMIT \\$3").
-			WithArgs(tid.String(), "open", 50).WillReturnRows(makeRows(tid))
+			WithArgs(tid.String(), "pending_second_approval", 50).WillReturnRows(makeRows(tid))
 		mock.ExpectCommit()
 
-		out, err := repo.ListByTenant(context.Background(), tid, "open", 50)
-		if err != nil {
+		filter := application.AlertFilter{TenantID: tid, Status: domain.StatusPendingSecondApproval}
+		if _, err := repo.List(context.Background(), filter, 50); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(out) != 1 {
-			t.Fatalf("expected 1 alert, got %d", len(out))
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("status filter only", func(t *testing.T) {
+		mock := newMock(t)
+		repo := NewAlertRepository(mock)
+		expectOperatorTx(mock)
+		mock.ExpectQuery("FROM aml_alerts WHERE status=\\$1 ORDER BY created_at DESC LIMIT \\$2").
+			WithArgs("open", 50).WillReturnRows(makeRows(tenantID(t)))
+		mock.ExpectCommit()
+		if _, err := repo.List(operatorCtx(), application.AlertFilter{Status: domain.StatusOpen}, 50); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("query error propagated", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
-		tid := tenantID(t)
-		expectRLSTx(mock, tid.String())
-		mock.ExpectQuery("WHERE tenant_id=\\$1").WillReturnError(errors.New("boom"))
+		expectOperatorTx(mock)
+		mock.ExpectQuery("FROM aml_alerts").WillReturnError(errors.New("boom"))
 		mock.ExpectRollback()
-		if _, err := repo.ListByTenant(context.Background(), tid, "", 50); err == nil {
+		if _, err := repo.List(operatorCtx(), application.AlertFilter{}, 50); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -296,16 +329,15 @@ func TestAlertRepository_ListByTenant(t *testing.T) {
 	t.Run("scan error propagated", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAlertRepository(mock)
-		tid := tenantID(t)
+		expectOperatorTx(mock)
 		// score como string no asignable a int → error de scan.
-		badRows := pgxmock.NewRows(alertCols).AddRow(
-			domain.NewAlertID().String(), tid.String(), "sanctions_match", "high", "open",
+		badRows := pgxmock.NewRows(alertCols).AddRow(alertRow(
+			domain.NewAlertID().String(), tenantID(t).String(), "sanctions_match", "high", "open",
 			"subj", "not-an-int", []byte(`{}`), "", "", now, (*time.Time)(nil),
-		)
-		expectRLSTx(mock, tid.String())
-		mock.ExpectQuery("WHERE tenant_id=\\$1").WithArgs(tid.String(), 50).WillReturnRows(badRows)
+		)...)
+		mock.ExpectQuery("FROM aml_alerts").WithArgs(50).WillReturnRows(badRows)
 		mock.ExpectRollback()
-		if _, err := repo.ListByTenant(context.Background(), tid, "", 50); err == nil {
+		if _, err := repo.List(operatorCtx(), application.AlertFilter{}, 50); err == nil {
 			t.Fatal("expected scan error")
 		}
 	})

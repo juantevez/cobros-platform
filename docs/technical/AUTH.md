@@ -35,8 +35,10 @@ Todos los demás contextos dependen de Auth para saber "quién es el tenant" de 
 | **Ambiente** (`Environment`) | `test` o `production`. Solo `active` + `production` puede mover dinero real (`CanProcessRealPayments`). |
 | **Usuario** (`User`) | Persona con credenciales (email + contraseña) dentro de **un** tenant. |
 | **Membership** | Vínculo usuario ↔ tenant ↔ rol. |
-| **Rol** | `admin`, `operator`, `accountant`, `read_only`, `platform_support`. |
+| **Rol** | `admin`, `operator`, `accountant`, `read_only`, `platform_support`, `compliance_officer`. |
 | **`platform_support`** | Rol "interno" del operador de la plataforma, que actúa sobre cualquier tenant. No se puede otorgar desde la API (`Role.IsTenantAssignable()`): se provisiona por fuera. |
+| **`compliance_officer`** | Rol interno de la plataforma: analista de cumplimiento que revisa alertas AML de todos los comercios (four-eyes, ver [COMPLIANCE.md](COMPLIANCE.md)). Igual que `platform_support`, no es asignable desde un tenant. No tiene permisos de la matriz de tenant. |
+| **Hold de cumplimiento** | Bloqueo preventivo y reversible de cobros y payouts por `(tenant, alerta)`, en `tenant_compliance_holds`. No cambia `tenants.status`. |
 | **Access token** | JWT HS256 de 15 minutos con `sub`, `tid`, `role` y `env`. |
 | **Refresh token** | Secreto opaco de 7 días, guardado como SHA-256, que se rota en cada uso. |
 | **API key** | Credencial server-to-server `<env>_<prefix>_<secret>` con scopes. |
@@ -184,13 +186,16 @@ Directorio: [application/](../../context/auth/application/)
 | `RegisterTenant` | `legal_name` no vacío | Tenant `pending` / `test` | `auth.tenant.created.v1` |
 | `ActivateTenant` | Tenant `pending`; env válido | `active` + env | `auth.tenant.activated.v1` |
 | `SuspendTenant` | Motivo no vacío; tenant no suspendido | `suspended` | `auth.tenant.suspended.v1` |
-| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password no vacío; rol válido y distinto de `platform_support` | User `active` + Membership | `auth.user.registered.v1` |
-| `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol distinto de `platform_support` | Crea o actualiza la Membership | `auth.role.assigned.v1` |
+| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password no vacío; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
+| `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol asignable por el tenant (no `platform_support` ni `compliance_officer`) | Crea o actualiza la Membership | `auth.role.assigned.v1` |
 | `Authenticate` | Tenant no suspendido; usuario activo; password correcto; membership existente | Access + refresh token | — |
 | `RefreshToken` | Token vigente y no revocado; usuario y tenant OK | Nuevo par; revoca el anterior (`replaced_by`) | — |
 | `Logout` | — (idempotente) | Revoca el refresh token | — |
 | `IssueApiKey` | Tenant **activo**; para `production`, el tenant debe estar en `production`; ≥1 scope válido | API key nueva | `auth.apikey.issued.v1` |
 | `RevokeApiKey` | La key pertenece al tenant del caller | Revocada | `auth.apikey.revoked.v1` |
+| `PlaceComplianceHold` | `compliance.sanction.matched.v1` | Hold vigente `(tenant, alerta)`; idempotente | — (anti tipping-off) |
+| `ReleaseComplianceHold` | `compliance.sanction.cleared.v1` | `released_at` del hold; tolera llegar antes que el place | — |
+| `SuspendForCompliance` | `compliance.sanction.confirmed.v1` | `SuspendTenant` con `ComplianceReviewReason` (genérico); ya suspendido = no-op | `auth.tenant.suspended.v1` |
 
 Detalles relevantes:
 
@@ -339,6 +344,13 @@ Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican po
 | Durable | Filtro | Acción | Archivo |
 |---|---|---|---|
 | `auth-onboarding-consumer` | `onboarding.application.approved.v1` | `ActivateTenant{env: production}` | [onboarding_consumer.go](../../context/auth/infrastructure/adapters/inbound/nats/onboarding_consumer.go) |
+| `auth-compliance-consumer` | `compliance.sanction.>` (stream `COMPLIANCE`) | `matched` → `PlaceComplianceHold`; `cleared` → `ReleaseComplianceHold`; `confirmed` → `SuspendForCompliance`. `MaxDeliver: 10`. | [compliance_consumer.go](../../context/auth/infrastructure/adapters/inbound/nats/compliance_consumer.go) |
+
+**Anti tipping-off:** Webhook reenvía `auth.tenant.>` al endpoint del
+comercio, por eso el hold **no** emite eventos de Auth y la suspensión por
+cumplimiento usa el motivo genérico `domain.ComplianceReviewReason`. Los gates
+que leen el hold (Payment `StatusGate`, Payout `PayoutGate`) responden con el
+mismo error que para cualquier tenant inhabilitado.
 
 `MaxDeliver: 5`. Si el tenant no está `pending` (por ejemplo, un operador ya lo activó en `test`), `Activate` falla con `ErrTenantCannotTransition` en los 5 intentos y el mensaje se descarta: **el tenant queda en `test` aunque el KYC esté aprobado**, mientras Ledger sí crea sus cuentas.
 
@@ -393,6 +405,7 @@ erDiagram
 | `memberships` | Sí | PK `(user_id, tenant_id)`; `Save` usa `ON CONFLICT DO NOTHING`. |
 | `api_keys` | No | `prefix` único global (se busca sin tenant); el aislamiento se hace en código. |
 | `refresh_tokens` | No | Se busca por `token_hash` global. |
+| `tenant_compliance_holds` | No | PK `(tenant_id, alert_id)`, FK a `tenants` con `ON DELETE CASCADE`; vigente = `released_at IS NULL` (índice parcial). Lo leen los gates de Payment y Payout. Migración 000020. |
 
 La violación de `UNIQUE(tenant_id, email)` (`23505`) se mapea a `ErrEmailAlreadyExists` → `409`.
 
@@ -450,9 +463,9 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 | Dominio | `domain/*_test.go` | Unitarios: FSM de Tenant, User, ApiKey, VOs, eventos, permisos. |
 | Aplicación | `application/*_test.go` (+ `mocks_test.go`) | Unitarios con repos, hasher y token issuer falsos. `TestHashRefreshToken_IsDeterministic` cubre la regresión del bug #1. |
 | HTTP | `infrastructure/adapters/inbound/http/*_test.go` | Handlers, middleware (JWT, ApiKey, RequireRole), guards de tenant, router y mapeo de errores. |
-| NATS | `inbound/nats/onboarding_consumer_test.go` | Consumer de aprobación de onboarding. |
+| NATS | `inbound/nats/onboarding_consumer_test.go`, `compliance_consumer_test.go` | Consumer de aprobación de onboarding; enforcement de cumplimiento (hold, release, suspensión genérica, acks/naks). |
 | Crypto / Token | `outbound/crypto`, `outbound/token` | Argon2 real y JWT real. |
-| Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`); se saltan si no hay DB. |
+| Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`); se saltan si no hay DB. `compliance_hold_repo_mock_test.go` usa pgxmock (SQL idempotente). |
 
 ```bash
 go test ./context/auth/...
@@ -482,9 +495,9 @@ context/auth/
 │   └── <caso_de_uso>.go   # 10 casos de uso (Logout vive en refresh_token.go)
 └── infrastructure/adapters/
     ├── inbound/http/      # router, middleware (JWT, ApiKey, RequireRole, CorrelationID), handlers, response
-    ├── inbound/nats/      # OnboardingConsumer
+    ├── inbound/nats/      # OnboardingConsumer, ComplianceConsumer
     └── outbound/
-        ├── postgres/      # tenant, user, membership, apikey, refresh_token repos
+        ├── postgres/      # tenant, user, membership, apikey, refresh_token, compliance_hold repos
         ├── crypto/        # Argon2Hasher
         └── token/         # JWTIssuer (HS256)
 ```
@@ -492,4 +505,4 @@ context/auth/
 Cableado:
 
 - [cmd/api/main.go](../../cmd/api/main.go): sección `Auth`. Construye el router base sobre el que se montan los demás BCs con `protected := router.Group("/api/v1")` + `JWTMiddleware`.
-- [cmd/worker/main.go](../../cmd/worker/main.go): `authOnboardingConsumer`.
+- [cmd/worker/main.go](../../cmd/worker/main.go): `authOnboardingConsumer`, `authComplianceConsumer`.

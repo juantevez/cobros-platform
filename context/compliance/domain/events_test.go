@@ -44,4 +44,17 @@ func TestEventTypes(t *testing.T) {
 	if resolved.EventType() != "compliance.alert.resolved.v1" {
 		t.Errorf("AlertResolvedEvent type = %q", resolved.EventType())
 	}
+
+	others := map[Event]string{
+		AlertReviewProposedEvent{}:   "compliance.alert.review_proposed.v1",
+		AlertProposalRejectedEvent{}: "compliance.alert.proposal_rejected.v1",
+		SanctionMatchedEvent{}:       "compliance.sanction.matched.v1",
+		SanctionClearedEvent{}:       "compliance.sanction.cleared.v1",
+		SanctionConfirmedEvent{}:     "compliance.sanction.confirmed.v1",
+	}
+	for e, want := range others {
+		if got := e.EventType(); got != want {
+			t.Errorf("%T type = %q, want %q", e, got, want)
+		}
+	}
 }

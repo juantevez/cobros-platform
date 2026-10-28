@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/juantevez/cobros-platform/context/compliance/application"
 	"github.com/juantevez/cobros-platform/context/compliance/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
@@ -49,17 +50,21 @@ func (r *AlertRepository) Save(ctx context.Context, a *domain.Alert) error {
 	return nil
 }
 
-// Update dispone la alerta con concurrencia optimista: el UPDATE solo aplica
-// si la fila sigue en estado 'open'. Si otra resolución concurrente ya la
-// dispuso, RowsAffected == 0 y retornamos ErrAlertNotOpen para que el caso de
-// uso responda 409 en lugar de publicar un segundo AlertResolvedEvent.
-func (r *AlertRepository) Update(ctx context.Context, a *domain.Alert) error {
+// Update persiste la transición de revisión con concurrencia optimista: el
+// UPDATE solo aplica si la fila sigue en el estado previo (`from`). Si otra
+// revisión concurrente ya la movió, RowsAffected == 0 y retornamos
+// ErrAlertNotOpen para que el caso de uso responda 409 sin publicar eventos.
+func (r *AlertRepository) Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error {
 	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
 	tag, err := conn.Exec(ctx, `
-		UPDATE aml_alerts SET status=$2, note=$3, resolved_at=$4, resolved_by=$5
-		WHERE id=$1 AND status='open'`,
-		a.ID().String(), a.Status().String(), nullStr(a.Note()), a.ResolvedAt(),
-		nullStr(a.ResolvedBy()),
+		UPDATE aml_alerts
+		SET status=$3, note=$4, resolved_at=$5, resolved_by=$6,
+		    proposed_status=$7, proposed_by=$8, proposed_at=$9, approval_note=$10
+		WHERE id=$1 AND status=$2`,
+		a.ID().String(), from.String(), a.Status().String(), nullStr(a.Note()),
+		a.ResolvedAt(), nullStr(a.ResolvedBy()),
+		nullStr(a.ProposedStatus().String()), nullStr(a.ProposedBy()), a.ProposedAt(),
+		nullStr(a.ApprovalNote()),
 	)
 	if err != nil {
 		return fmt.Errorf("compliance repo: update alert: %w", err)
@@ -72,11 +77,14 @@ func (r *AlertRepository) Update(ctx context.Context, a *domain.Alert) error {
 
 const alertBaseSelect = `
 	SELECT id, tenant_id, alert_type, risk_level, status, subject, score,
-	       details, COALESCE(note,''), COALESCE(resolved_by,''), created_at, resolved_at
+	       details, COALESCE(note,''), COALESCE(resolved_by,''), created_at, resolved_at,
+	       COALESCE(proposed_status,''), COALESCE(proposed_by,''), proposed_at,
+	       COALESCE(approval_note,'')
 	FROM aml_alerts`
 
-// FindByID busca por ID. Si el contexto trae tenant (JWT), lo fija como
-// variable RLS para que la lectura funcione aunque corra fuera de una tx.
+// FindByID busca por ID. La revisión de cumplimiento opera sobre alertas de
+// cualquier comercio: bajo RLS efectivo solo encuentra la fila si el contexto
+// trae WithPlatformOperator (o el tenant dueño de la alerta).
 func (r *AlertRepository) FindByID(ctx context.Context, id domain.AlertID) (*domain.Alert, error) {
 	if tenantID, ok := pkgpostgres.TenantIDFromContext(ctx); ok {
 		ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, tenantID)
@@ -97,20 +105,30 @@ func (r *AlertRepository) FindByID(ctx context.Context, id domain.AlertID) (*dom
 	return a, nil
 }
 
-// ListByTenant fija app.current_tenant al tenant listado: el aislamiento no
-// depende solo del WHERE tenant_id explícito.
-func (r *AlertRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter domain.AlertStatus, limit int) ([]*domain.Alert, error) {
-	args := []any{tenantID.String()}
-	q := alertBaseSelect + " WHERE tenant_id=$1"
-	if statusFilter != "" {
-		args = append(args, statusFilter.String())
-		q += fmt.Sprintf(" AND status=$%d", len(args))
+// List lista alertas cross-tenant (requiere WithPlatformOperator bajo RLS
+// efectivo). Con filtro de tenant fija además app.current_tenant a ese tenant.
+func (r *AlertRepository) List(ctx context.Context, filter application.AlertFilter, limit int) ([]*domain.Alert, error) {
+	var (
+		args  []any
+		where []string
+	)
+	if filter.TenantID != "" {
+		args = append(args, filter.TenantID.String())
+		where = append(where, fmt.Sprintf("tenant_id=$%d", len(args)))
+		ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, filter.TenantID.String())
+	}
+	if filter.Status != "" {
+		args = append(args, filter.Status.String())
+		where = append(where, fmt.Sprintf("status=$%d", len(args)))
+	}
+	q := alertBaseSelect
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
 
 	var alerts []*domain.Alert
-	ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, tenantID.String())
 	err := pkgpostgres.RunWithAppTenant(ctx, r.pool, func(ctx context.Context) error {
 		rows, err := pkgpostgres.ConnFromContext(ctx, r.pool).Query(ctx, q, args...)
 		if err != nil {
@@ -136,27 +154,25 @@ type scanner interface {
 
 func scanAlert(s scanner) (*domain.Alert, error) {
 	var (
-		idStr, tenantIDStr, alertType, riskLevel, status, subject string
-		note, resolvedBy                                          string
-		score                                                     int
-		detailsRaw                                                []byte
-		createdAt                                                 time.Time
-		resolvedAt                                                *time.Time
+		snap                                                       domain.AlertSnapshot
+		idStr, tenantIDStr, alertType, riskLevel, status, proposed string
+		detailsRaw                                                 []byte
 	)
 	if err := s.Scan(&idStr, &tenantIDStr, &alertType, &riskLevel, &status,
-		&subject, &score, &detailsRaw, &note, &resolvedBy, &createdAt, &resolvedAt); err != nil {
+		&snap.Subject, &snap.Score, &detailsRaw, &snap.Note, &snap.ResolvedBy,
+		&snap.CreatedAt, &snap.ResolvedAt,
+		&proposed, &snap.ProposedBy, &snap.ProposedAt, &snap.ApprovalNote); err != nil {
 		return nil, err
 	}
-	details := map[string]string{}
+	snap.Details = map[string]string{}
 	if len(detailsRaw) > 0 {
-		_ = json.Unmarshal(detailsRaw, &details)
+		_ = json.Unmarshal(detailsRaw, &snap.Details)
 	}
-	return domain.ReconstituteAlert(
-		domain.AlertID(idStr), domain.TenantID(tenantIDStr),
-		domain.AlertType(alertType), domain.RiskLevel(riskLevel),
-		domain.AlertStatus(status), subject, score, details, note, resolvedBy,
-		createdAt.UTC(), resolvedAt,
-	), nil
+	snap.ID, snap.TenantID = domain.AlertID(idStr), domain.TenantID(tenantIDStr)
+	snap.Type, snap.RiskLevel = domain.AlertType(alertType), domain.RiskLevel(riskLevel)
+	snap.Status, snap.ProposedStatus = domain.AlertStatus(status), domain.AlertStatus(proposed)
+	snap.CreatedAt = snap.CreatedAt.UTC()
+	return domain.ReconstituteAlert(snap), nil
 }
 
 func nullStr(s string) *string {
