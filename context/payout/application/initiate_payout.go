@@ -31,6 +31,7 @@ import (
 // Nota: el Ledger actúa sobre los eventos de forma asíncrona (consistencia eventual).
 // El payout no espera confirmación del Ledger para continuar.
 type InitiatePayoutUseCase struct {
+	gate            PayoutGate
 	repo            PayoutRepository
 	balanceChecker  BalanceChecker
 	bankProvider    BankAccountProvider
@@ -40,6 +41,7 @@ type InitiatePayoutUseCase struct {
 }
 
 func NewInitiatePayoutUseCase(
+	gate PayoutGate,
 	repo PayoutRepository,
 	balanceChecker BalanceChecker,
 	bankProvider BankAccountProvider,
@@ -48,6 +50,7 @@ func NewInitiatePayoutUseCase(
 	publisher EventPublisher,
 ) *InitiatePayoutUseCase {
 	return &InitiatePayoutUseCase{
+		gate:            gate,
 		repo:            repo,
 		balanceChecker:  balanceChecker,
 		bankProvider:    bankProvider,
@@ -69,6 +72,13 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 	key := cmd.IdempotencyKey
 	if key == "" {
 		return InitiatePayoutResult{}, domain.ErrIdempotencyKeyRequired
+	}
+
+	// ── 1b. El comercio puede desembolsar ─────────────────────────────────────
+	// Tenant suspendido o en hold de cumplimiento → no sale dinero. Va antes
+	// del replay idempotente: un hold también bloquea reintentos.
+	if err := uc.gate.EnsurePayoutsAllowed(ctx, tenantID); err != nil {
+		return InitiatePayoutResult{}, err
 	}
 
 	currency := cmd.Currency

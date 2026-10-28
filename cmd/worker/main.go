@@ -119,6 +119,20 @@ func main() {
 		logger.With("component", "auth_onboarding"),
 	)
 
+	// ── Auth consumer: enforcement de cumplimiento (compliance.sanction.*) ───
+	// matched → hold reversible; cleared → levanta el hold; confirmed → suspende.
+
+	complianceHolds := authpg.NewComplianceHoldRepository(pool)
+	authComplianceConsumer := authnats.NewComplianceConsumer(
+		eventbus.NewConsumer(natsClient, logger.With("component", "auth_compliance")),
+		authapp.NewPlaceComplianceHoldUseCase(complianceHolds, realClock{}),
+		authapp.NewReleaseComplianceHoldUseCase(complianceHolds, realClock{}),
+		authapp.NewSuspendForComplianceUseCase(
+			authapp.NewSuspendTenantUseCase(tenantRepo, postgres.NewTxManager(pool), authPub),
+		),
+		logger.With("component", "auth_compliance"),
+	)
+
 	// ── Ledger consumers ──────────────────────────────────────────────────────
 
 	accountRepo := ledgerpg.NewAccountRepository(pool)
@@ -170,6 +184,11 @@ func main() {
 	go func() {
 		if err := authOnboardingConsumer.Start(ctx); err != nil {
 			logger.Error("auth onboarding consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := authComplianceConsumer.Start(ctx); err != nil {
+			logger.Error("auth compliance consumer stopped", "error", err)
 		}
 	}()
 	go func() {

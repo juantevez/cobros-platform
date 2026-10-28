@@ -85,3 +85,9 @@ var (
 	// ErrInvalidEnvironment se retorna cuando el ambiente especificado no existe.
 	ErrInvalidEnvironment = errors.New("invalid environment: must be 'test' or 'production'")
 )
+
+// ComplianceReviewReason es el motivo que se registra al suspender un comercio
+// por cumplimiento. Es deliberadamente genérico: auth.tenant.suspended.v1 se
+// reenvía al comercio por webhook y notificación, y explicitar el motivo real
+// (coincidencia con lista de sanciones) sería tipping-off.
+const ComplianceReviewReason = "Cuenta en revisión preventiva por controles de seguridad"

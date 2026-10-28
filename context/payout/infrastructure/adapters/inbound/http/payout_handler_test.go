@@ -97,7 +97,14 @@ func (fakePublisher) Publish(ctx context.Context, events ...domain.Event) error 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+type fakeGate struct{ err error }
+
+func (g fakeGate) EnsurePayoutsAllowed(ctx context.Context, tenantID domain.TenantID) error {
+	return g.err
+}
+
 type handlerOpts struct {
+	gateErr     error
 	balance     int64
 	account     domain.BankAccountInfo
 	transferErr error
@@ -112,7 +119,7 @@ func defaultOpts() handlerOpts {
 
 func newHandler(r *fakeRepo, o handlerOpts) *PayoutHandler {
 	return NewPayoutHandler(
-		application.NewInitiatePayoutUseCase(r, fakeBalance{o.balance}, fakeBank{o.account},
+		application.NewInitiatePayoutUseCase(fakeGate{o.gateErr}, r, fakeBalance{o.balance}, fakeBank{o.account},
 			fakeTransfer{o.transferErr}, fakeTx{}, fakePublisher{}),
 		application.NewGetPayoutUseCase(r),
 		application.NewListPayoutsUseCase(r),
@@ -195,6 +202,18 @@ func TestInitiate(t *testing.T) {
 		}
 		if len(r.byID) != 1 {
 			t.Errorf("expected payout saved, got %d", len(r.byID))
+		}
+	})
+
+	t.Run("account not allowed to pay out returns 403 with generic message", func(t *testing.T) {
+		o := defaultOpts()
+		o.gateErr = fmt.Errorf("%w: account on hold", domain.ErrPayoutsNotAllowed)
+		rec := postPayout(newHandler(newRepo(), o), tid, `{"amount":3000}`)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body)
+		}
+		if got := errorBody(t, rec); got != domain.ErrPayoutsNotAllowed.Error() {
+			t.Errorf("error = %q (internal detail must not leak)", got)
 		}
 	})
 

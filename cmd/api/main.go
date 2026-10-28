@@ -58,6 +58,7 @@ import (
 	payoutledger "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/ledger"
 	payoutonboarding "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/onboarding"
 	payoutpg "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/postgres"
+	payouttenant "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/tenant"
 	payouttransfer "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/transfer/mock"
 	reconciliationapp "github.com/juantevez/cobros-platform/context/reconciliation/application"
 	reconciliationdomain "github.com/juantevez/cobros-platform/context/reconciliation/domain"
@@ -274,8 +275,11 @@ func main() {
 	bankProvider := payoutonboarding.NewBankAccountProvider(pool)
 	transferAdapter := payouttransfer.New()
 
+	// Gate: tenant activo y sin hold de cumplimiento (lee tenants + tenant_compliance_holds).
+	payoutGate := payouttenant.NewPayoutGate(pool)
+
 	initiatePayout := payoutapp.NewInitiatePayoutUseCase(
-		payoutRepo, balanceChecker, bankProvider, transferAdapter, txManager, payoutPub,
+		payoutGate, payoutRepo, balanceChecker, bankProvider, transferAdapter, txManager, payoutPub,
 	)
 	getPayout := payoutapp.NewGetPayoutUseCase(payoutRepo)
 	listPayouts := payoutapp.NewListPayoutsUseCase(payoutRepo)

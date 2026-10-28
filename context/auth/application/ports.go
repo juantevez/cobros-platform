@@ -50,6 +50,18 @@ type MembershipRepository interface {
 	ListByTenant(ctx context.Context, tenantID domain.TenantID) ([]domain.Membership, error)
 }
 
+// ComplianceHoldRepository persiste los holds preventivos de cumplimiento.
+//
+// Un hold bloquea cobros y payouts del comercio sin cambiar su estado (es
+// reversible). Se identifica por (tenant, alerta): el comercio queda en hold
+// mientras tenga al menos uno activo. Ambas operaciones son idempotentes y
+// tolerantes al orden: si el release llega antes que el place (re-entrega
+// desordenada), el place posterior no reactiva el hold.
+type ComplianceHoldRepository interface {
+	Place(ctx context.Context, tenantID domain.TenantID, alertID string, at time.Time) error
+	Release(ctx context.Context, tenantID domain.TenantID, alertID string, at time.Time) error
+}
+
 // ApiKeyRepository persiste y recupera el agregado ApiKey.
 type ApiKeyRepository interface {
 	Save(ctx context.Context, k *domain.ApiKey) error
