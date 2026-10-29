@@ -60,6 +60,33 @@ func (l *TransactionLog) SumAmountInWindow(ctx context.Context, tenantID, curren
 	return total, nil
 }
 
+// PurgeBefore borra un lote de pagos vencidos de todos los tenants. Corre
+// como operador de plataforma (política RLS aml_monitored_payments_platform_operator):
+// sin tenant en el contexto, la política por tenant no vería ninguna fila.
+func (l *TransactionLog) PurgeBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	var deleted int
+	ctx = pkgpostgres.WithPlatformOperator(ctx)
+	err := pkgpostgres.RunWithAppTenant(ctx, l.pool, func(ctx context.Context) error {
+		tag, err := pkgpostgres.ConnFromContext(ctx, l.pool).Exec(ctx, `
+			DELETE FROM aml_monitored_payments
+			WHERE payment_id IN (
+				SELECT payment_id FROM aml_monitored_payments
+				WHERE captured_at < $1
+				LIMIT $2)`,
+			before, limit,
+		)
+		if err != nil {
+			return err
+		}
+		deleted = int(tag.RowsAffected())
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("compliance log: purge: %w", err)
+	}
+	return deleted, nil
+}
+
 // queryRow corre una lectura escalar con app.current_tenant fijado (RLS).
 func (l *TransactionLog) queryRow(ctx context.Context, tenantID, q string, args []any, dest any) error {
 	ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, tenantID)

@@ -366,9 +366,16 @@ func main() {
 	screenApp := complianceapp.NewScreenApplicationUseCase(
 		complianceAlerts, complianceWatch, txMgr, compliancePub, realClock{},
 	)
+	monitoringRules := complianceapp.DefaultMonitoringRules()
 	monitorTx := complianceapp.NewMonitorTransactionUseCase(
 		complianceAlerts, complianceTxLog, txMgr, compliancePub, realClock{},
-		complianceapp.DefaultMonitoringRules(),
+		monitoringRules,
+	)
+	// Purga la proyección aml_monitored_payments (las alertas no se purgan).
+	compliancePurger := complianceapp.NewProjectionPurger(
+		complianceTxLog, realClock{}, monitoringRules,
+		complianceapp.DefaultProjectionRetention, complianceapp.DefaultPurgeInterval,
+		logger.With("component", "compliance_purge"),
 	)
 	complianceConsumer := compliancenats.NewEventConsumer(
 		eventbus.NewConsumer(natsClient, logger.With("component", "compliance")),
@@ -384,6 +391,11 @@ func main() {
 	go func() {
 		if err := complianceConsumer.StartPaymentConsumer(ctx); err != nil {
 			logger.Error("compliance payment consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := compliancePurger.Start(ctx); err != nil {
+			logger.Error("compliance projection purger stopped", "error", err)
 		}
 	}()
 

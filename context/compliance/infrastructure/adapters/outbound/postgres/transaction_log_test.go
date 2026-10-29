@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/juantevez/cobros-platform/context/compliance/application"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 func TestTransactionLog_Record(t *testing.T) {
@@ -105,6 +107,39 @@ func TestTransactionLog_SumAmountInWindow(t *testing.T) {
 		mock.ExpectQuery("SELECT COALESCE").WillReturnError(errors.New("boom"))
 		mock.ExpectRollback()
 		if _, err := log.SumAmountInWindow(context.Background(), "tenant-1", "ARS", since, until); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestTransactionLog_PurgeBefore(t *testing.T) {
+	before := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("deletes a batch as platform operator", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(pkgpostgres.PlatformOperatorKey, "on").
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectExec(`DELETE FROM aml_monitored_payments\s+WHERE payment_id IN \(\s+SELECT payment_id FROM aml_monitored_payments\s+WHERE captured_at < \$1\s+LIMIT \$2\)`).
+			WithArgs(before, 100).WillReturnResult(pgxmock.NewResult("DELETE", 42))
+		mock.ExpectCommit()
+
+		n, err := NewTransactionLog(mock).PurgeBefore(context.Background(), before, 100)
+		if err != nil || n != 42 {
+			t.Fatalf("got %d, %v", n, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("db error propagated", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectExec("DELETE FROM aml_monitored_payments").WillReturnError(errors.New("boom"))
+		mock.ExpectRollback()
+		if _, err := NewTransactionLog(mock).PurgeBefore(context.Background(), before, 100); err == nil {
 			t.Fatal("expected error")
 		}
 	})

@@ -155,6 +155,10 @@ type fakeTxLog struct {
 	gotUntil    time.Time
 	gotCurrency string
 	sumCalls    int
+
+	purgeBatches []int // filas borradas por llamada sucesiva
+	purgeErr     error
+	purgeBefore  []time.Time
 }
 
 func (l *fakeTxLog) Record(ctx context.Context, p MonitoredPayment) error {
@@ -180,6 +184,19 @@ func (l *fakeTxLog) SumAmountInWindow(ctx context.Context, tenantID, currency st
 		return 0, l.sumErr
 	}
 	return l.sum, nil
+}
+
+func (l *fakeTxLog) PurgeBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	l.purgeBefore = append(l.purgeBefore, before)
+	if l.purgeErr != nil {
+		return 0, l.purgeErr
+	}
+	if len(l.purgeBatches) == 0 {
+		return 0, nil
+	}
+	n := l.purgeBatches[0]
+	l.purgeBatches = l.purgeBatches[1:]
+	return n, nil
 }
 
 type fakePublisher struct {

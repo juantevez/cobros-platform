@@ -71,6 +71,9 @@ type TransactionLog interface {
 	CountInWindow(ctx context.Context, tenantID string, since, until time.Time) (int, error)
 	// SumAmountInWindow suma los montos del tenant en `currency` en la ventana.
 	SumAmountInWindow(ctx context.Context, tenantID, currency string, since, until time.Time) (int64, error)
+	// PurgeBefore borra hasta `limit` pagos (de todos los tenants) con
+	// captured_at < before y retorna cuántos borró.
+	PurgeBefore(ctx context.Context, before time.Time, limit int) (int, error)
 }
 
 // EventPublisher publica eventos de dominio hacia el Outbox.

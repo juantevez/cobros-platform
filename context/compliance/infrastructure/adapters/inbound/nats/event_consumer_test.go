@@ -75,6 +75,9 @@ func (l *fakeTxLog) Record(ctx context.Context, p application.MonitoredPayment) 
 func (l *fakeTxLog) CountInWindow(ctx context.Context, tenantID string, since, until time.Time) (int, error) {
 	return l.count, l.err
 }
+func (l *fakeTxLog) PurgeBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return 0, nil
+}
 func (l *fakeTxLog) SumAmountInWindow(ctx context.Context, tenantID, currency string, since, until time.Time) (int64, error) {
 	return 0, l.err
 }

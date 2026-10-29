@@ -612,6 +612,16 @@ RLS: `aml_alerts` y `aml_monitored_payments`, con policy
 una tx previa). `aml_alerts` suma `aml_alerts_platform_operator` para la
 revisión cross-tenant (§9). `aml_watchlist` es global, sin RLS.
 
+**Retención de la proyección** (migración 000021): `ProjectionPurger`
+([application/purge_projection.go](../../context/compliance/application/purge_projection.go))
+corre en `cmd/worker` cada `DefaultPurgeInterval` (1 h, y una vez al arrancar)
+y borra en lotes de 5.000 los pagos con `captured_at` anterior a
+`DefaultProjectionRetention` (7 días). La retención nunca es menor que la
+ventana de las reglas. Como corre sin tenant, usa la política RLS
+`aml_monitored_payments_platform_operator`; con un rol sin `BYPASSRLS` la
+política por tenant no vería filas. **`aml_alerts` no se purga**: las alertas
+se conservan por exigencia normativa.
+
 Enforcement (contexto Auth, migración 000020): `tenant_compliance_holds
 (tenant_id FK tenants ON DELETE CASCADE, alert_id, placed_at, released_at)`,
 PK `(tenant_id, alert_id)`, índice parcial de holds vigentes. Sin RLS, como
@@ -636,6 +646,7 @@ idempotente).
 | `WatchlistRepository.Add/Remove/List` | `INSERT …` / `UPDATE … SET removed_at WHERE id=$1 AND removed_at IS NULL` / `SELECT … WHERE removed_at IS NULL ORDER BY full_name LIMIT $1` | Pool directo, sin tenant. `Remove` con 0 filas → `ErrWatchlistEntryNotFound`. |
 | `TransactionLog.Record` | `INSERT INTO aml_monitored_payments … ON CONFLICT (payment_id) DO NOTHING` | Dentro de `RunInTx` (tenant del evento). |
 | `TransactionLog.CountInWindow` / `SumAmountInWindow` | `SELECT COUNT(*)` / `COALESCE(SUM(amount),0) FROM aml_monitored_payments WHERE tenant_id=$1 [AND currency=$2] AND captured_at > $since AND captured_at <= $until` | Ventana deslizante sobre la proyección propia. |
+| `TransactionLog.PurgeBefore` | `DELETE … WHERE payment_id IN (SELECT … WHERE captured_at < $1 LIMIT $2)` | Purga por lotes como operador de plataforma (índice `captured_at`). |
 | `AlertRepository.SaveUnlessRecent` | `pg_advisory_xact_lock(...)` + `EXISTS (… alert_type=$2 AND starts_with(subject,$3) AND created_at > $4)` + `INSERT` | Cooldown de reglas de ventana; reciente → `ErrDuplicateAlert` (no-op). |
 
 Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
@@ -681,7 +692,6 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 | 1 | Hold solo por match exacto | Matches parciales (80/90) y reglas transaccionales no bloquean, aunque sean `high`; dependen de la revisión manual. Un payout iniciado antes del hold no se cancela. | Medio |
 | 2 | Provisión de analistas fuera de banda | No hay endpoint para dar de alta usuarios `compliance_officer` (igual que `platform_support`). Four-eyes requiere al menos dos. | Operativo |
 | 3 | Sin fuzzy/fonético | El matching por tokens cubre orden, acentos y puntuación, pero no errores de tipeo, transliteraciones ("Petrov"/"Petroff") ni abreviaturas. La réplica SQL de `NormalizeName` en 000018 solo cubre acentos latinos comunes. | Medio |
-| 5 | Proyección sin retención | `aml_monitored_payments` crece sin purga; solo se consulta la última ventana. | Operativo |
 | 6 | Carga de listas oficiales | No hay proceso de importación OFAC/EU/UN; la watchlist se carga entrada por entrada por API. | Operativo |
 
 ---
