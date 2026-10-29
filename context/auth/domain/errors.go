@@ -76,6 +76,9 @@ var (
 	// ErrRoleNotAssignable se retorna cuando se intenta otorgar desde un tenant
 	// un rol reservado a la plataforma (platform_support).
 	ErrRoleNotAssignable = errors.New("role cannot be assigned by a tenant")
+	// ErrNotPlatformRole se retorna cuando el aprovisionamiento de plataforma
+	// recibe un rol de tenant (esos se dan de alta por la API del tenant).
+	ErrNotPlatformRole = errors.New("role is not a platform role")
 
 	// ── Value Objects ────────────────────────────────────────────────────────
 

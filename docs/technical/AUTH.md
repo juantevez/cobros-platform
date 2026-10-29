@@ -36,7 +36,7 @@ Todos los demás contextos dependen de Auth para saber "quién es el tenant" de 
 | **Usuario** (`User`) | Persona con credenciales (email + contraseña) dentro de **un** tenant. |
 | **Membership** | Vínculo usuario ↔ tenant ↔ rol. |
 | **Rol** | `admin`, `operator`, `accountant`, `read_only`, `platform_support`, `compliance_officer`. |
-| **`platform_support`** | Rol "interno" del operador de la plataforma, que actúa sobre cualquier tenant. No se puede otorgar desde la API (`Role.IsTenantAssignable()`): se provisiona por fuera. |
+| **`platform_support`** | Rol "interno" del operador de la plataforma, que actúa sobre cualquier tenant. No se puede otorgar desde la API (`Role.IsTenantAssignable()`): se provisiona con el CLI `cmd/provision` (`make provision`). |
 | **`compliance_officer`** | Rol interno de la plataforma: analista de cumplimiento que revisa alertas AML de todos los comercios (four-eyes, ver [COMPLIANCE.md](COMPLIANCE.md)). Igual que `platform_support`, no es asignable desde un tenant. No tiene permisos de la matriz de tenant. |
 | **Hold de cumplimiento** | Bloqueo preventivo y reversible de cobros y payouts por `(tenant, alerta)`, en `tenant_compliance_holds`. No cambia `tenants.status`. |
 | **Access token** | JWT HS256 de 15 minutos con `sub`, `tid`, `role` y `env`. |
@@ -193,6 +193,7 @@ Directorio: [application/](../../context/auth/application/)
 | `Logout` | — (idempotente) | Revoca el refresh token | — |
 | `IssueApiKey` | Tenant **activo**; para `production`, el tenant debe estar en `production`; ≥1 scope válido | API key nueva | `auth.apikey.issued.v1` |
 | `RevokeApiKey` | La key pertenece al tenant del caller | Revocada | `auth.apikey.revoked.v1` |
+| `ProvisionPlatformUser` | Solo CLI ([cmd/provision](../../cmd/provision/main.go)); rol de **plataforma** (`compliance_officer`/`platform_support`), el inverso de `RegisterUser`; mismas validaciones de tenant, email y password | User `active` + Membership | `auth.user.registered.v1` |
 | `PlaceComplianceHold` | `compliance.sanction.matched.v1` | Hold vigente `(tenant, alerta)`; idempotente | — (anti tipping-off) |
 | `ReleaseComplianceHold` | `compliance.sanction.cleared.v1` | `released_at` del hold; tolera llegar antes que el place | — |
 | `SuspendForCompliance` | `compliance.sanction.confirmed.v1` | `SuspendTenant` con `ComplianceReviewReason` (genérico); ya suspendido = no-op | `auth.tenant.suspended.v1` |

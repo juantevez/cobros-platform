@@ -1,4 +1,4 @@
-.PHONY: up down up-app down-app migrate migrate-down seed-dev test lint tidy build
+.PHONY: up down up-app down-app migrate migrate-down seed-dev provision test lint tidy build
 
 COMPOSE = docker compose -f deploy/docker/docker-compose.yml
 # URL vista desde la red de Compose: las migraciones y el seed corren en
@@ -38,6 +38,13 @@ migrate-drop:
 seed-dev:
 	$(COMPOSE) exec -T postgres psql -U cobros -d cobros -v ON_ERROR_STOP=1 < deploy/seed/compliance_watchlist.sql
 
+# Alta de usuarios de plataforma (compliance_officer / platform_support), que
+# la API no permite otorgar. La contraseña va por entorno, nunca por argumento:
+#   PROVISION_PASSWORD=... make provision TENANT=<uuid> EMAIL=ana@x.com [ROLE=platform_support]
+ROLE ?= compliance_officer
+provision:
+	go run ./cmd/provision -tenant "$(TENANT)" -email "$(EMAIL)" -role "$(ROLE)"
+
 # ── Calidad de código ────────────────────────────────────────────────────────
 
 tidy:
@@ -57,6 +64,7 @@ test-verbose:
 build:
 	go build -o bin/api    ./cmd/api
 	go build -o bin/worker ./cmd/worker
+	go build -o bin/provision ./cmd/provision
 
 # ── Run local (sin Docker para la app) ───────────────────────────────────────
 

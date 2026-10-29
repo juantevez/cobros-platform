@@ -663,6 +663,17 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 
 ## 9. Seguridad y multi-tenancy
 
+- **Alta de analistas**: los usuarios `compliance_officer` (y `platform_support`)
+  se crean con el CLI [`cmd/provision`](../../cmd/provision/main.go), nunca por
+  HTTP, en el tenant de la propia plataforma. Four-eyes requiere al menos dos:
+
+  ```bash
+  PROVISION_PASSWORD=... make provision TENANT=<uuid-tenant-plataforma> EMAIL=ana@plataforma.com
+  PROVISION_PASSWORD=... make provision TENANT=<uuid-tenant-plataforma> EMAIL=beto@plataforma.com
+  ```
+
+  La contraseña va por entorno (`PROVISION_PASSWORD`) o por stdin
+  (`-password-stdin`), nunca como argumento.
 - **La plataforma revisa a los comercios.** Alertas y watchlist son de uso
   interno: `compliance_officer` revisa (y es el único que dispone),
   `platform_support` puede leer y gestionar la watchlist. Ningún rol de tenant
@@ -690,7 +701,6 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
 | 1 | Hold solo por match exacto | Matches parciales (80/90) y reglas transaccionales no bloquean, aunque sean `high`; dependen de la revisión manual. Un payout iniciado antes del hold no se cancela. | Medio |
-| 2 | Provisión de analistas fuera de banda | No hay endpoint para dar de alta usuarios `compliance_officer` (igual que `platform_support`). Four-eyes requiere al menos dos. | Operativo |
 | 3 | Sin fuzzy/fonético | El matching por tokens cubre orden, acentos y puntuación, pero no errores de tipeo, transliteraciones ("Petrov"/"Petroff") ni abreviaturas. La réplica SQL de `NormalizeName` en 000018 solo cubre acentos latinos comunes. | Medio |
 | 6 | Carga de listas oficiales | No hay proceso de importación OFAC/EU/UN; la watchlist se carga entrada por entrada por API. | Operativo |
 

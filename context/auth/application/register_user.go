@@ -20,6 +20,10 @@ type RegisterUserUseCase struct {
 	hasher         PasswordHasher
 	txManager      TxManager
 	publisher      EventPublisher
+
+	// platformRoles invierte la validación de rol: solo admite roles de
+	// plataforma (ver ProvisionPlatformUserUseCase).
+	platformRoles bool
 }
 
 func NewRegisterUserUseCase(
@@ -61,8 +65,11 @@ func (uc *RegisterUserUseCase) Execute(ctx context.Context, cmd RegisterUserCmd)
 	if err != nil {
 		return RegisterUserResult{}, err
 	}
-	if !role.IsTenantAssignable() {
+	switch {
+	case !uc.platformRoles && !role.IsTenantAssignable():
 		return RegisterUserResult{}, domain.ErrRoleNotAssignable
+	case uc.platformRoles && role.IsTenantAssignable():
+		return RegisterUserResult{}, domain.ErrNotPlatformRole
 	}
 
 	// ── 2. Verificar que el tenant existe y no está suspendido ───────────────
@@ -116,4 +123,30 @@ func (uc *RegisterUserUseCase) Execute(ctx context.Context, cmd RegisterUserCmd)
 	}
 
 	return RegisterUserResult{UserID: userID.String()}, nil
+}
+
+// ProvisionPlatformUserUseCase da de alta usuarios con roles de plataforma
+// (platform_support, compliance_officer). No está expuesto por HTTP: un
+// endpoint que otorgue roles de plataforma sería una superficie de escalada
+// de privilegios. Lo usa el CLI cmd/provision, que corre quien opera la
+// infraestructura. El usuario vive en el tenant de la plataforma.
+type ProvisionPlatformUserUseCase struct {
+	register *RegisterUserUseCase
+}
+
+func NewProvisionPlatformUserUseCase(
+	tenantRepo TenantRepository,
+	userRepo UserRepository,
+	membershipRepo MembershipRepository,
+	hasher PasswordHasher,
+	txManager TxManager,
+	publisher EventPublisher,
+) *ProvisionPlatformUserUseCase {
+	uc := NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, publisher)
+	uc.platformRoles = true
+	return &ProvisionPlatformUserUseCase{register: uc}
+}
+
+func (uc *ProvisionPlatformUserUseCase) Execute(ctx context.Context, cmd RegisterUserCmd) (RegisterUserResult, error) {
+	return uc.register.Execute(ctx, cmd)
 }
