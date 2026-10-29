@@ -31,8 +31,8 @@ NATS JetStream
 |---|---|---|
 | Screening | Todos los tokens de una entrada vigente de `aml_watchlist` presentes en el `legal_name` normalizado | `sanctions_match` |
 | Umbral | `amount ≥ ThresholdAmount` (default $10.000) | `transaction_threshold` |
-| Velocity | ≥ `VelocityCount` pagos capturados en `VelocityWindow` (default 10 / 10min) — una alerta por ventana | `transaction_velocity` |
-| Volumen | ≥ `VolumeAmount` acumulado por moneda en `VelocityWindow` (default $50.000) — una alerta por ventana y moneda | `transaction_volume` |
+| Velocity | ≥ `VelocityCount` pagos capturados en `VelocityWindow` (default 10 / 10min) — ventana deslizante con cooldown (una alerta por pico) | `transaction_velocity` |
+| Volumen | ≥ `VolumeAmount` acumulado por moneda en `VelocityWindow` (default $50.000) — ventana deslizante con cooldown por moneda | `transaction_volume` |
 
 Los umbrales viven en `application.MonitoringRules` (`DefaultMonitoringRules()`),
 inyectados en `MonitorTransactionUseCase` desde `cmd/worker`.

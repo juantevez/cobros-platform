@@ -21,6 +21,12 @@ type AlertRepository interface {
 	// la fila sigue en `from`. Si otra revisión ya la movió retorna
 	// domain.ErrAlertNotOpen.
 	Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error
+	// SaveUnlessRecent inserta una alerta de ventana (velocity/volumen) salvo
+	// que el tenant ya tenga otra del mismo tipo cuyo subject empiece con
+	// subjectPrefix y creada desde `since` (cooldown). En ese caso retorna
+	// domain.ErrDuplicateAlert. Debe correr dentro de RunInTx: serializa por
+	// (tenant, prefijo) para que pagos concurrentes no dupliquen la alerta.
+	SaveUnlessRecent(ctx context.Context, a *domain.Alert, subjectPrefix string, since time.Time) error
 	FindByID(ctx context.Context, id domain.AlertID) (*domain.Alert, error)
 	// List lista alertas de la plataforma (cross-tenant) según el filtro.
 	List(ctx context.Context, filter AlertFilter, limit int) ([]*domain.Alert, error)
@@ -56,14 +62,15 @@ type MonitoredPayment struct {
 }
 
 // TransactionLog es la proyección de pagos capturados que alimenta las reglas
-// de ventana (velocity y volumen).
+// de ventana (velocity y volumen). Las ventanas son deslizantes sobre la hora
+// del evento: (since, until].
 type TransactionLog interface {
 	// Record registra el pago; idempotente por payment_id (re-entregas no duplican).
 	Record(ctx context.Context, p MonitoredPayment) error
-	// CountSince cuenta los pagos del tenant registrados desde `since`.
-	CountSince(ctx context.Context, tenantID string, since time.Time) (int, error)
-	// SumAmountSince suma los montos del tenant en `currency` desde `since`.
-	SumAmountSince(ctx context.Context, tenantID, currency string, since time.Time) (int64, error)
+	// CountInWindow cuenta los pagos del tenant con since < captured_at <= until.
+	CountInWindow(ctx context.Context, tenantID string, since, until time.Time) (int, error)
+	// SumAmountInWindow suma los montos del tenant en `currency` en la ventana.
+	SumAmountInWindow(ctx context.Context, tenantID, currency string, since, until time.Time) (int64, error)
 }
 
 // EventPublisher publica eventos de dominio hacia el Outbox.

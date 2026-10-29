@@ -16,8 +16,7 @@ func TestMonitorTransactionUseCase_Execute(t *testing.T) {
 		VelocityWindow:  10 * time.Minute,
 		VolumeAmount:    5_000_000,
 	}
-	// testNow = 12:00:00 → bucket de 10 min = 12:00:00.
-	wantBucket := testNow.Truncate(10 * time.Minute).Format(time.RFC3339)
+	wantWindowStart := testNow.Add(-10 * time.Minute).Format(time.RFC3339)
 
 	baseCmd := func() MonitorTransactionCmd {
 		return MonitorTransactionCmd{
@@ -88,7 +87,7 @@ func TestMonitorTransactionUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("velocity alert is keyed by window bucket, not payment", func(t *testing.T) {
+	t.Run("velocity alert uses cooldown keyed by rule, subject by payment", func(t *testing.T) {
 		r := newAlertRepo()
 		uc := newUC(r, &fakeTxLog{count: 10}, &fakePublisher{})
 		if err := uc.Execute(context.Background(), baseCmd()); err != nil {
@@ -101,24 +100,28 @@ func TestMonitorTransactionUseCase_Execute(t *testing.T) {
 		if a.Type() != domain.AlertTransactionVelocity || a.RiskLevel() != domain.RiskHigh {
 			t.Errorf("type/risk mismatch: %q / %q", a.Type(), a.RiskLevel())
 		}
-		if a.Subject() != "velocity:"+wantBucket {
-			t.Errorf("subject = %q, want velocity:%s", a.Subject(), wantBucket)
+		if a.Subject() != "velocity:pay-1" {
+			t.Errorf("subject = %q, want velocity:pay-1", a.Subject())
+		}
+		if len(r.gotPrefix) != 1 || r.gotPrefix[0] != "velocity:" || !r.gotCooldownSince.Equal(testNow.Add(-10*time.Minute)) {
+			t.Errorf("cooldown = %v since %v", r.gotPrefix, r.gotCooldownSince)
 		}
 		if a.Score() != 90 || a.Details()["count"] != "10" || a.Details()["payment_id"] != "pay-1" ||
-			a.Details()["window_start"] != wantBucket {
+			a.Details()["window_start"] != wantWindowStart {
 			t.Errorf("score/details mismatch: %d / %+v", a.Score(), a.Details())
 		}
 	})
 
-	t.Run("two payments in the same window share the velocity subject", func(t *testing.T) {
+	t.Run("recent alert of the same rule is a no-op (cooldown)", func(t *testing.T) {
 		r := newAlertRepo()
-		uc := newUC(r, &fakeTxLog{count: 12}, &fakePublisher{})
-		cmd1, cmd2 := baseCmd(), baseCmd()
-		cmd2.TenantID, cmd2.PaymentID = cmd1.TenantID, "pay-2"
-		_ = uc.Execute(context.Background(), cmd1)
-		_ = uc.Execute(context.Background(), cmd2)
-		if len(r.saved) != 2 || r.saved[0].Subject() != r.saved[1].Subject() {
-			t.Fatalf("expected same subject (dedup by unique constraint), got %+v", r.saved)
+		r.recent = true
+		p := &fakePublisher{}
+		uc := newUC(r, &fakeTxLog{count: 50, sum: 99_000_000}, p)
+		if err := uc.Execute(context.Background(), baseCmd()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(r.saved) != 0 || len(p.published) != 0 {
+			t.Errorf("cooldown should suppress window alerts: saved=%d published=%d", len(r.saved), len(p.published))
 		}
 	})
 
@@ -139,11 +142,32 @@ func TestMonitorTransactionUseCase_Execute(t *testing.T) {
 		if a.Type() != domain.AlertTransactionVolume || a.RiskLevel() != domain.RiskHigh {
 			t.Errorf("type/risk mismatch: %q / %q", a.Type(), a.RiskLevel())
 		}
-		if a.Subject() != "volume:ARS:"+wantBucket {
-			t.Errorf("subject = %q", a.Subject())
+		if a.Subject() != "volume:ARS:pay-1" || r.gotPrefix[0] != "volume:ARS:" {
+			t.Errorf("subject/prefix = %q / %v", a.Subject(), r.gotPrefix)
 		}
 		if a.Score() != 70 || a.Details()["total_amount"] != "5000000" || a.Details()["threshold"] != "5000000" {
 			t.Errorf("score/details mismatch: %d / %+v", a.Score(), a.Details())
+		}
+	})
+
+	t.Run("event time drives the window and the alert timestamps", func(t *testing.T) {
+		r := newAlertRepo()
+		tl := &fakeTxLog{count: 10}
+		uc := newUC(r, tl, &fakePublisher{})
+		captured := testNow.Add(-3 * time.Hour) // backlog: evento de hace 3 h
+		cmd := baseCmd()
+		cmd.CapturedAt = captured
+		if err := uc.Execute(context.Background(), cmd); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !tl.recorded[0].CapturedAt.Equal(captured) {
+			t.Errorf("captured_at = %v, want event time %v", tl.recorded[0].CapturedAt, captured)
+		}
+		if !tl.gotUntil.Equal(captured) || !tl.gotSince.Equal(captured.Add(-10*time.Minute)) {
+			t.Errorf("window = (%v, %v], want ending at event time", tl.gotSince, tl.gotUntil)
+		}
+		if !r.saved[0].CreatedAt().Equal(captured) {
+			t.Errorf("alert createdAt = %v, want %v", r.saved[0].CreatedAt(), captured)
 		}
 	})
 
@@ -199,8 +223,8 @@ func TestMonitorTransactionUseCase_Execute(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		wantSince := testNow.Add(-10 * time.Minute)
-		if !tl.gotSince.Equal(wantSince) {
-			t.Errorf("since = %v, want %v", tl.gotSince, wantSince)
+		if !tl.gotSince.Equal(wantSince) || !tl.gotUntil.Equal(testNow) {
+			t.Errorf("window = (%v, %v], want (%v, %v]", tl.gotSince, tl.gotUntil, wantSince, testNow)
 		}
 	})
 

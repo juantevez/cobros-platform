@@ -57,14 +57,20 @@ func (uc *MonitorTransactionUseCase) Execute(ctx context.Context, cmd MonitorTra
 	if err != nil {
 		return err
 	}
-	now := uc.clock.Now()
+	// Las reglas se evalúan en la hora real de la captura: si el worker
+	// procesa un backlog, la ventana no incluye pagos posteriores. Las alertas
+	// de monitoreo nacen con esa misma hora.
+	at := cmd.CapturedAt.UTC()
+	if cmd.CapturedAt.IsZero() {
+		at = uc.clock.Now()
+	}
 
 	// Proyección propia del pago (idempotente por payment_id): las reglas de
 	// ventana cuentan sobre ella en lugar de leer la tabla payments.
 	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		return uc.txLog.Record(ctx, MonitoredPayment{
 			PaymentID: cmd.PaymentID, TenantID: cmd.TenantID,
-			Amount: cmd.Amount, Currency: cmd.Currency, CapturedAt: now,
+			Amount: cmd.Amount, Currency: cmd.Currency, CapturedAt: at,
 		})
 	}); err != nil {
 		return err
@@ -83,7 +89,7 @@ func (uc *MonitorTransactionUseCase) Execute(ctx context.Context, cmd MonitorTra
 				"threshold":      strconv.FormatInt(uc.rules.ThresholdAmount, 10),
 				"payment_method": cmd.PaymentMethod,
 			},
-			now,
+			at,
 		)
 		if err := raiseAlert(ctx, uc.txManager, uc.repo, uc.publisher, alert); err != nil {
 			return err
@@ -93,59 +99,62 @@ func (uc *MonitorTransactionUseCase) Execute(ctx context.Context, cmd MonitorTra
 	if uc.rules.VelocityWindow <= 0 {
 		return nil // reglas de ventana desactivadas
 	}
-	since := now.Add(-uc.rules.VelocityWindow)
-	// Las alertas de ventana usan como subject el bucket fijo de la ventana:
-	// la unicidad (tenant, tipo, subject) deja una sola alerta por tenant y
-	// ventana en lugar de una por cada pago posterior al umbral.
-	bucket := now.Truncate(uc.rules.VelocityWindow).UTC().Format(time.RFC3339)
+	// Ventana deslizante (since, at]. Cooldown: no se levanta otra alerta del
+	// mismo tipo para el tenant si ya hubo una dentro de la ventana, así un
+	// pico genera una sola alerta aunque cruce cualquier borde de reloj. El
+	// subject incluye el pago que disparó la regla (re-entregas idempotentes).
+	since := at.Add(-uc.rules.VelocityWindow)
+	window := uc.rules.VelocityWindow.String()
 
 	// Regla 2: velocity — demasiados pagos capturados en la ventana.
-	count, err := uc.txLog.CountSince(ctx, cmd.TenantID, since)
+	count, err := uc.txLog.CountInWindow(ctx, cmd.TenantID, since, at)
 	if err != nil {
 		return err
 	}
 	if uc.rules.VelocityCount > 0 && count >= uc.rules.VelocityCount {
+		const prefix = "velocity:"
 		alert := domain.NewAlert(
 			domain.NewAlertID(), tenantID,
 			domain.AlertTransactionVelocity, domain.RiskHigh,
-			"velocity:"+bucket, 90,
+			prefix+cmd.PaymentID, 90,
 			map[string]string{
 				"payment_id":   cmd.PaymentID, // pago que cruzó el umbral
 				"count":        strconv.Itoa(count),
-				"window":       uc.rules.VelocityWindow.String(),
-				"window_start": bucket,
+				"window":       window,
+				"window_start": since.Format(time.RFC3339),
 				"threshold":    strconv.Itoa(uc.rules.VelocityCount),
 			},
-			now,
+			at,
 		)
-		if err := raiseAlert(ctx, uc.txManager, uc.repo, uc.publisher, alert); err != nil {
+		if err := raiseWindowAlert(ctx, uc.txManager, uc.repo, uc.publisher, alert, prefix, since); err != nil {
 			return err
 		}
 	}
 
 	// Regla 3: volumen — monto acumulado en la ventana (por moneda).
 	if uc.rules.VolumeAmount > 0 {
-		total, err := uc.txLog.SumAmountSince(ctx, cmd.TenantID, cmd.Currency, since)
+		total, err := uc.txLog.SumAmountInWindow(ctx, cmd.TenantID, cmd.Currency, since, at)
 		if err != nil {
 			return err
 		}
 		if total >= uc.rules.VolumeAmount {
+			prefix := fmt.Sprintf("volume:%s:", cmd.Currency)
 			alert := domain.NewAlert(
 				domain.NewAlertID(), tenantID,
 				domain.AlertTransactionVolume, domain.RiskHigh,
-				fmt.Sprintf("volume:%s:%s", cmd.Currency, bucket),
+				prefix+cmd.PaymentID,
 				riskScoreForAmount(total, uc.rules.VolumeAmount),
 				map[string]string{
 					"payment_id":   cmd.PaymentID, // pago que cruzó el umbral
 					"total_amount": strconv.FormatInt(total, 10),
 					"currency":     cmd.Currency,
-					"window":       uc.rules.VelocityWindow.String(),
-					"window_start": bucket,
+					"window":       window,
+					"window_start": since.Format(time.RFC3339),
 					"threshold":    strconv.FormatInt(uc.rules.VolumeAmount, 10),
 				},
-				now,
+				at,
 			)
-			if err := raiseAlert(ctx, uc.txManager, uc.repo, uc.publisher, alert); err != nil {
+			if err := raiseWindowAlert(ctx, uc.txManager, uc.repo, uc.publisher, alert, prefix, since); err != nil {
 				return err
 			}
 		}

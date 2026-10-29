@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -48,6 +49,32 @@ func (r *AlertRepository) Save(ctx context.Context, a *domain.Alert) error {
 		return fmt.Errorf("compliance repo: save alert: %w", err)
 	}
 	return nil
+}
+
+// SaveUnlessRecent aplica el cooldown de las reglas de ventana. Dentro de la
+// tx del caso de uso toma un advisory lock por (tenant, prefijo) para
+// serializar pagos concurrentes del mismo tenant y regla; luego, si ya hay una
+// alerta reciente del mismo tipo con ese prefijo de subject, retorna
+// ErrDuplicateAlert (no-op idempotente) y si no, inserta.
+func (r *AlertRepository) SaveUnlessRecent(ctx context.Context, a *domain.Alert, subjectPrefix string, since time.Time) error {
+	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"aml_window:"+a.TenantID().String()+":"+subjectPrefix); err != nil {
+		return fmt.Errorf("compliance repo: cooldown lock: %w", err)
+	}
+	var recent bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM aml_alerts
+			WHERE tenant_id=$1 AND alert_type=$2 AND starts_with(subject, $3) AND created_at > $4)`,
+		a.TenantID().String(), a.Type().String(), subjectPrefix, since,
+	).Scan(&recent); err != nil {
+		return fmt.Errorf("compliance repo: cooldown check: %w", err)
+	}
+	if recent {
+		return domain.ErrDuplicateAlert
+	}
+	return r.Save(ctx, a)
 }
 
 // Update persiste la transición de revisión con concurrencia optimista: el

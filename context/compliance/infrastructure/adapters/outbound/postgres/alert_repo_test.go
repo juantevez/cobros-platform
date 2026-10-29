@@ -122,6 +122,59 @@ func TestAlertRepository_Save(t *testing.T) {
 	})
 }
 
+func TestAlertRepository_SaveUnlessRecent(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-10 * time.Minute)
+
+	newWindowAlert := func(t *testing.T) *domain.Alert {
+		return domain.NewAlert(domain.NewAlertID(), tenantID(t), domain.AlertTransactionVelocity,
+			domain.RiskHigh, "velocity:pay-1", 90, nil, now)
+	}
+	expectLockAndCheck := func(mock pgxmock.PgxPoolIface, a *domain.Alert, recent bool) {
+		mock.ExpectExec(`SELECT pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)`).
+			WithArgs("aml_window:" + a.TenantID().String() + ":velocity:").
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectQuery(`starts_with\(subject, \$3\) AND created_at > \$4`).
+			WithArgs(a.TenantID().String(), "transaction_velocity", "velocity:", since).
+			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(recent))
+	}
+
+	t.Run("no recent alert: inserts", func(t *testing.T) {
+		mock := newMock(t)
+		a := newWindowAlert(t)
+		expectLockAndCheck(mock, a, false)
+		mock.ExpectExec("INSERT INTO aml_alerts").WithArgs(anyArgs(11)...).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		if err := NewAlertRepository(mock).SaveUnlessRecent(context.Background(), a, "velocity:", since); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("recent alert: ErrDuplicateAlert without insert", func(t *testing.T) {
+		mock := newMock(t)
+		a := newWindowAlert(t)
+		expectLockAndCheck(mock, a, true)
+		err := NewAlertRepository(mock).SaveUnlessRecent(context.Background(), a, "velocity:", since)
+		if !errors.Is(err, domain.ErrDuplicateAlert) {
+			t.Fatalf("expected ErrDuplicateAlert, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("lock error propagated", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectExec("pg_advisory_xact_lock").WillReturnError(errors.New("boom"))
+		if err := NewAlertRepository(mock).SaveUnlessRecent(context.Background(), newWindowAlert(t), "velocity:", since); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
 func TestAlertRepository_Update(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	resolved := now.Add(time.Hour)

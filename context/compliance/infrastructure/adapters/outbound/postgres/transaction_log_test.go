@@ -41,18 +41,19 @@ func TestTransactionLog_Record(t *testing.T) {
 	})
 }
 
-func TestTransactionLog_CountSince(t *testing.T) {
+func TestTransactionLog_CountInWindow(t *testing.T) {
 	since := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	until := since.Add(10 * time.Minute)
 
-	t.Run("returns count under RLS session", func(t *testing.T) {
+	t.Run("returns count of the sliding window under RLS session", func(t *testing.T) {
 		mock := newMock(t)
 		log := NewTransactionLog(mock)
 		expectRLSTx(mock, "tenant-1")
-		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM aml_monitored_payments").
-			WithArgs("tenant-1", since).WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(7))
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM aml_monitored_payments\\s+WHERE tenant_id = \\$1 AND captured_at > \\$2 AND captured_at <= \\$3").
+			WithArgs("tenant-1", since, until).WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(7))
 		mock.ExpectCommit()
 
-		got, err := log.CountSince(context.Background(), "tenant-1", since)
+		got, err := log.CountInWindow(context.Background(), "tenant-1", since, until)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -68,26 +69,27 @@ func TestTransactionLog_CountSince(t *testing.T) {
 		mock := newMock(t)
 		log := NewTransactionLog(mock)
 		expectRLSTx(mock, "tenant-1")
-		mock.ExpectQuery("SELECT COUNT").WithArgs("tenant-1", since).WillReturnError(errors.New("boom"))
+		mock.ExpectQuery("SELECT COUNT").WithArgs("tenant-1", since, until).WillReturnError(errors.New("boom"))
 		mock.ExpectRollback()
-		if _, err := log.CountSince(context.Background(), "tenant-1", since); err == nil {
+		if _, err := log.CountInWindow(context.Background(), "tenant-1", since, until); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 }
 
-func TestTransactionLog_SumAmountSince(t *testing.T) {
+func TestTransactionLog_SumAmountInWindow(t *testing.T) {
 	since := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	until := since.Add(10 * time.Minute)
 
 	t.Run("returns sum filtered by currency", func(t *testing.T) {
 		mock := newMock(t)
 		log := NewTransactionLog(mock)
 		expectRLSTx(mock, "tenant-1")
-		mock.ExpectQuery("SELECT COALESCE\\(SUM\\(amount\\), 0\\) FROM aml_monitored_payments\\s+WHERE tenant_id = \\$1 AND currency = \\$2").
-			WithArgs("tenant-1", "ARS", since).WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(9_000)))
+		mock.ExpectQuery("SELECT COALESCE\\(SUM\\(amount\\), 0\\) FROM aml_monitored_payments\\s+WHERE tenant_id = \\$1 AND currency = \\$2 AND captured_at > \\$3 AND captured_at <= \\$4").
+			WithArgs("tenant-1", "ARS", since, until).WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(9_000)))
 		mock.ExpectCommit()
 
-		got, err := log.SumAmountSince(context.Background(), "tenant-1", "ARS", since)
+		got, err := log.SumAmountInWindow(context.Background(), "tenant-1", "ARS", since, until)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -102,7 +104,7 @@ func TestTransactionLog_SumAmountSince(t *testing.T) {
 		expectRLSTx(mock, "tenant-1")
 		mock.ExpectQuery("SELECT COALESCE").WillReturnError(errors.New("boom"))
 		mock.ExpectRollback()
-		if _, err := log.SumAmountSince(context.Background(), "tenant-1", "ARS", since); err == nil {
+		if _, err := log.SumAmountInWindow(context.Background(), "tenant-1", "ARS", since, until); err == nil {
 			t.Fatal("expected error")
 		}
 	})

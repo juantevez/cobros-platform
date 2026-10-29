@@ -53,7 +53,7 @@ El contexto es **escritura reactiva + revisión/gestión**:
 | **Watchlist** (`WatchlistEntry`) | Entrada de la lista de vigilancia **global** de la plataforma (sanciones o PEP). |
 | **Screening** | Comparar la razón social de un onboarding contra la watchlist. Match → alerta `sanctions_match`. |
 | **Monitoreo transaccional** | Evaluar un pago capturado contra las reglas de umbral, velocity y volumen. |
-| **Subject** | Lo que disparó la alerta: `legal_name` (screening), `payment_id` (umbral) o el bucket de ventana (`velocity:<inicio>`, `volume:<moneda>:<inicio>`). Parte de la clave de idempotencia. |
+| **Subject** | Lo que disparó la alerta: `legal_name` (screening), `payment_id` (umbral) o el pago que cruzó una regla de ventana (`velocity:<payment_id>`, `volume:<moneda>:<payment_id>`). Parte de la clave de idempotencia. |
 | **Score** | Puntaje 0..100 de confianza/severidad; mapea a `RiskLevel` (≥90 high, ≥60 medium, resto low). |
 | **Proyección de pagos** | `aml_monitored_payments`: copia propia de cada `payment.captured.v1`, sobre la que cuentan las reglas de ventana. |
 | **Disposition** | Decisión sobre una alerta: `cleared` (falso positivo) o `confirmed` (verdadero positivo). En alertas four-eyes, la del primer analista es una **propuesta**. |
@@ -118,7 +118,7 @@ Archivo: [domain/alert.go](../../context/compliance/domain/alert.go)
 | `alertType` | `AlertType` | `sanctions_match` \| `transaction_threshold` \| `transaction_velocity` \| `transaction_volume`. |
 | `riskLevel` | `RiskLevel` | `low` \| `medium` \| `high`. |
 | `status` | `AlertStatus` | `open` \| `pending_second_approval` \| `cleared` \| `confirmed`. |
-| `subject` | `string` | `legal_name`, `payment_id` o bucket de ventana (§5.2). Clave de idempotencia junto a `(tenant, tipo)`. |
+| `subject` | `string` | `legal_name` o `payment_id` (con prefijo `velocity:`/`volume:<moneda>:` en reglas de ventana, §5.2). Clave de idempotencia junto a `(tenant, tipo)`. |
 | `score` | `int` | 0..100. |
 | `details` | `map[string]string` | Contexto (lista matched, monto, ventana, etc.). Se persiste como JSONB. |
 | `note` | `string` | Nota del analista que dispone o propone (viaja en `Resolve`). Se limpia si la propuesta se rechaza. |
@@ -271,22 +271,34 @@ Una sola alerta por aplicación aunque haya múltiples coincidencias.
 Reglas configurables vía `MonitoringRules` (inyectado desde `cmd/worker` con
 `DefaultMonitoringRules()`):
 
+**Hora del evento.** Todas las reglas se evalúan en `at` = hora real de la
+captura: el header `occurred-at` del mensaje, que el relay del outbox toma de
+la tx de Payment que capturó el pago. Si falta o es inválido, `at =
+clock.Now()`. Las alertas de monitoreo nacen con `created_at = at`, y procesar
+un backlog no altera las ventanas.
+
 Antes de evaluar, el pago se registra en `aml_monitored_payments`
 (`TransactionLog.Record`, `ON CONFLICT (payment_id) DO NOTHING`) con
-`captured_at = clock.Now()`. Las reglas de ventana cuentan sobre esa proyección.
+`captured_at = at`. Las reglas de ventana cuentan sobre esa proyección.
 
 | Regla | Condición | Alerta | Subject | Riesgo | Score |
 |---|---|---|---|---|---|
 | Umbral | `Amount ≥ ThresholdAmount` (default `1_000_000` centavos = $10.000) | `transaction_threshold` | `payment_id` | `medium` | `riskScoreForAmount`: `60 + (amount/threshold)*10`, tope 100; umbral ≤ 0 → 80 |
-| Velocity | `CountSince(now − VelocityWindow) ≥ VelocityCount` (default 10 pagos / 10 min, todas las monedas) | `transaction_velocity` | `velocity:<bucket>` | `high` | 90 fijo |
-| Volumen | `SumAmountSince(moneda del pago, now − VelocityWindow) ≥ VolumeAmount` (default `5_000_000` = $50.000; `0` desactiva) | `transaction_volume` | `volume:<moneda>:<bucket>` | `high` | `riskScoreForAmount(total, VolumeAmount)` |
+| Velocity | `CountInWindow(at − VelocityWindow, at) ≥ VelocityCount` (default 10 pagos / 10 min, todas las monedas) | `transaction_velocity` | `velocity:<payment_id>` | `high` | 90 fijo |
+| Volumen | `SumAmountInWindow(moneda del pago, at − VelocityWindow, at) ≥ VolumeAmount` (default `5_000_000` = $50.000; `0` desactiva) | `transaction_volume` | `volume:<moneda>:<payment_id>` | `high` | `riskScoreForAmount(total, VolumeAmount)` |
 
-`<bucket>` = `now.Truncate(VelocityWindow)` en RFC3339 (ventanas fijas). Como el
-subject es el bucket y no el pago, la unicidad `(tenant, tipo, subject)` deja
-**una sola alerta por tenant y ventana** para velocity/volumen: los pagos
-siguientes del mismo pico chocan con la constraint y son no-op. Una ráfaga que
-cruza el borde de dos buckets puede generar dos alertas. `VelocityWindow ≤ 0`
-desactiva ambas reglas de ventana.
+**Ventana deslizante** `(at − VelocityWindow, at]`: no hay buckets de reloj, así
+que una ráfaga se mide igual sin importar dónde caiga.
+
+**Cooldown** en lugar de bucket: `AlertRepository.SaveUnlessRecent` no inserta
+una alerta de velocity (o de volumen en esa moneda) si el tenant ya tiene otra
+del mismo tipo creada dentro de la ventana; un pico sostenido genera **una
+sola alerta**, y una nueva solo después de una ventana completa sin alertas.
+Dentro de la tx toma `pg_advisory_xact_lock(hashtextextended('aml_window:<tenant>:<prefijo>'))`
+antes de chequear, así dos pagos concurrentes del mismo tenant no duplican la
+alerta. Las re-entregas del mismo pago siguen siendo no-op por la unicidad
+`(tenant, tipo, subject)`. `VelocityWindow ≤ 0` desactiva ambas reglas de
+ventana.
 
 Detalles persistidos: threshold → `{payment_id, amount, currency, threshold,
 payment_method}`; velocity → `{payment_id, count, window, window_start,
@@ -623,7 +635,8 @@ idempotente).
 | `WatchlistRepository.Screen` | `… WHERE removed_at IS NULL AND string_to_array(normalized_name,' ') <@ string_to_array($1,' ')` | Prefiltro por **conjunto de tokens** (GIN); el score lo asigna `domain.MatchScore`. |
 | `WatchlistRepository.Add/Remove/List` | `INSERT …` / `UPDATE … SET removed_at WHERE id=$1 AND removed_at IS NULL` / `SELECT … WHERE removed_at IS NULL ORDER BY full_name LIMIT $1` | Pool directo, sin tenant. `Remove` con 0 filas → `ErrWatchlistEntryNotFound`. |
 | `TransactionLog.Record` | `INSERT INTO aml_monitored_payments … ON CONFLICT (payment_id) DO NOTHING` | Dentro de `RunInTx` (tenant del evento). |
-| `TransactionLog.CountSince` / `SumAmountSince` | `SELECT COUNT(*)` / `COALESCE(SUM(amount),0) FROM aml_monitored_payments WHERE tenant_id=$1 [AND currency=$2] AND captured_at >= $n` | Proyección propia: Compliance ya no lee la tabla `payments`. |
+| `TransactionLog.CountInWindow` / `SumAmountInWindow` | `SELECT COUNT(*)` / `COALESCE(SUM(amount),0) FROM aml_monitored_payments WHERE tenant_id=$1 [AND currency=$2] AND captured_at > $since AND captured_at <= $until` | Ventana deslizante sobre la proyección propia. |
+| `AlertRepository.SaveUnlessRecent` | `pg_advisory_xact_lock(...)` + `EXISTS (… alert_type=$2 AND starts_with(subject,$3) AND created_at > $4)` + `INSERT` | Cooldown de reglas de ventana; reciente → `ErrDuplicateAlert` (no-op). |
 
 Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 
@@ -668,7 +681,6 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 | 1 | Hold solo por match exacto | Matches parciales (80/90) y reglas transaccionales no bloquean, aunque sean `high`; dependen de la revisión manual. Un payout iniciado antes del hold no se cancela. | Medio |
 | 2 | Provisión de analistas fuera de banda | No hay endpoint para dar de alta usuarios `compliance_officer` (igual que `platform_support`). Four-eyes requiere al menos dos. | Operativo |
 | 3 | Sin fuzzy/fonético | El matching por tokens cubre orden, acentos y puntuación, pero no errores de tipeo, transliteraciones ("Petrov"/"Petroff") ni abreviaturas. La réplica SQL de `NormalizeName` en 000018 solo cubre acentos latinos comunes. | Medio |
-| 4 | Ventanas fijas | Velocity/volumen se deduplican por bucket fijo (`Truncate`); un pico que cruza el borde genera dos alertas. `captured_at` de la proyección es la hora de procesamiento, no la del evento original. | Bajo |
 | 5 | Proyección sin retención | `aml_monitored_payments` crece sin purga; solo se consulta la última ventana. | Operativo |
 | 6 | Carga de listas oficiales | No hay proceso de importación OFAC/EU/UN; la watchlist se carga entrada por entrada por API. | Operativo |
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/compliance/application"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
@@ -89,10 +90,22 @@ func (c *EventConsumer) handlePayment(ctx context.Context, msg *eventbus.Message
 		Amount:        p.Amount,
 		Currency:      p.Currency,
 		PaymentMethod: p.PaymentMethod,
+		CapturedAt:    occurredAt(msg),
 	}); err != nil {
 		c.logger.Error("compliance: transaction monitoring failed",
 			"payment_id", p.PaymentID, "error", err)
 		return err
 	}
 	return nil
+}
+
+// occurredAt es la hora real del evento (header occurred-at, que el relay del
+// outbox toma de la tx que capturó el pago). Cero si falta o es inválido: el
+// caso de uso cae entonces al reloj.
+func occurredAt(msg *eventbus.Message) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, msg.Headers[eventbus.HeaderOccurredAt])
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
 }

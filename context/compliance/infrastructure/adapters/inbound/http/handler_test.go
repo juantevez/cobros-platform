@@ -39,6 +39,9 @@ func newAlertRepo() *fakeAlertRepo {
 }
 
 func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error { return nil }
+func (r *fakeAlertRepo) SaveUnlessRecent(ctx context.Context, a *domain.Alert, p string, since time.Time) error {
+	return nil
+}
 func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error {
 	r.updated = append(r.updated, a)
 	return r.updateErr
