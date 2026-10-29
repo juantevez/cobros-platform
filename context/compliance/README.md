@@ -55,7 +55,10 @@ DELETE es baja lógica, `removed_at`) y, para listas completas,
 (alta/cambio/baja, atómico, con `dry_run`). La semilla de ejemplo es solo para desarrollo
 (`make seed-dev`). El match es por tokens completos sobre el nombre normalizado
 (`NormalizeName`: sin acentos ni puntuación, minúsculas, espacios colapsados) y
-se puntúa con `MatchScore` (exacto 100, contiguo 90, reordenado 80).
+se puntúa con `MatchScore` (exacto 100, contiguo 90, reordenado 80); si no
+hay match por tokens, se prueba el matching difuso (typos y transliteraciones:
+Damerau-Levenshtein + clave fonética, preseleccionado con `pg_trgm`) → 70,
+riesgo medio, nunca hold.
 
 ## Reglas de ventana: proyección propia
 

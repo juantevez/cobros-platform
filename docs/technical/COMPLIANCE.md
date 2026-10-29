@@ -4,7 +4,10 @@
 > **Migraciones:** [`000014_compliance_init`](../../migrations/000014_compliance_init.up.sql),
 > [`000018_compliance_hardening`](../../migrations/000018_compliance_hardening.up.sql),
 > [`000019_compliance_four_eyes`](../../migrations/000019_compliance_four_eyes.up.sql),
-> [`000020_compliance_holds`](../../migrations/000020_compliance_holds.up.sql)
+> [`000020_compliance_holds`](../../migrations/000020_compliance_holds.up.sql),
+> [`000021_aml_projection_purge`](../../migrations/000021_aml_projection_purge.up.sql),
+> [`000022_watchlist_feed_ingest`](../../migrations/000022_watchlist_feed_ingest.up.sql),
+> [`000023_watchlist_fuzzy`](../../migrations/000023_watchlist_fuzzy.up.sql)
 > **Stream NATS:** `COMPLIANCE` (`compliance.>`)
 
 ---
@@ -35,9 +38,8 @@ El contexto es **escritura reactiva + revisión/gestión**:
 - Listas oficiales reales: la watchlist es una tabla propia cargada por API
   (`compliance_officer`/`platform_support`); no se integra con OFAC/EU/UN. La
   semilla de ejemplo es solo para desarrollo (`make seed-dev`).
-- Fuzzy matching / similitud fonética: el match es **por tokens completos**
-  sobre nombres normalizados sin acentos ni puntuación (§8.2); no tolera errores
-  de tipeo ni transliteraciones.
+- Alias/AKA y matching por fecha de nacimiento o documento: el screening
+  compara solo nombres (§8.2).
 
 ---
 
@@ -203,7 +205,8 @@ Archivo: [domain/vo.go](../../context/compliance/domain/vo.go),
 | `RiskLevel` | `low`, `medium`, `high`. |
 | `AlertStatus` | `open`, `pending_second_approval`, `cleared`, `confirmed`. `ParseStatusFilter` valida el filtro de listado (`""` = sin filtro). |
 | `NormalizeName(s)` | NFD + descarta diacríticos, minúsculas, todo lo que no sea letra/dígito → espacio, espacios colapsados (`"Pérez-Gómez, S.A."` → `"perez gomez s a"`). Se usa al cargar la watchlist y al evaluar. Idempotente. La migración 000018 replica la regla en SQL. |
-| `MatchScore(entry, name)` | Por tokens completos: igualdad → 100, secuencia contigua → 90, todos los tokens en otro orden/intercalados → 80, si falta alguno → 0. |
+| `MatchScore(entry, name)` | Por tokens completos: igualdad → 100, secuencia contigua → 90, todos los tokens en otro orden/intercalados → 80. Si no, **difuso** (`domain/fuzzy.go`) → 70; si no, 0. |
+| Matching difuso | Cada token de la entrada debe coincidir con un token distinto del nombre: igual, a distancia Damerau-Levenshtein ≤ 1 (≤ 2 si ambos tienen ≥ 8 letras), o con la misma clave fonética (v/b/w/f, z/s, c/k/q, ll/y, ph/f, sh/ch, h muda, sin vocales internas). Tokens de < 4 letras solo exactos; entradas de un solo token nunca matchean difuso. Score 70 = `medium`: alerta con four-eyes, **nunca hold**. |
 | `NewWatchlistEntry(...)` | Valida `list_type ∈ {sanctions, pep}` y que el nombre conserve tokens tras normalizar; recorta espacios y pasa `country` a mayúsculas. |
 | `RiskFromScore(score)` | `≥90 → high`, `≥60 → medium`, resto `low`. |
 | `Match` | `{Entry WatchlistEntry, Score int}` — resultado del screening. |
@@ -679,7 +682,7 @@ idempotente).
 | `AlertRepository.Update` | `UPDATE aml_alerts SET status, note, resolved_at, resolved_by, proposed_*, approval_note WHERE id=$1 AND status=$2` (`$2` = estado previo) | Concurrencia optimista: 0 filas → `ErrAlertNotOpen`. |
 | `AlertRepository.FindByID` | `SELECT … WHERE id=$1` | `pgx.ErrNoRows` → `ErrAlertNotFound`. Corre con las variables RLS del ctx (`RunWithAppTenant`): operador en la API. |
 | `AlertRepository.List` | `[WHERE [tenant_id=$1] [AND status=$n]] ORDER BY created_at DESC LIMIT $n` | Cross-tenant con operador; con filtro de tenant fija además `app.current_tenant`. |
-| `WatchlistRepository.Screen` | `… WHERE removed_at IS NULL AND string_to_array(normalized_name,' ') <@ string_to_array($1,' ')` | Prefiltro por **conjunto de tokens** (GIN); el score lo asigna `domain.MatchScore`. |
+| `WatchlistRepository.Screen` | `… WHERE removed_at IS NULL AND (string_to_array(normalized_name,' ') <@ string_to_array($1,' ') OR normalized_name %> $2 OR …)` | Preselección por **conjunto de tokens** (GIN sobre el array) **o difusa**: la entrada contiene algo parecido a algún token (≥ 4 letras) del nombre, con `pg_trgm.word_similarity_threshold = 0.5` fijado localmente en la tx (GIN trigram, migración 000023). Red amplia: el puntaje y el descarte final los decide `domain.MatchScore`. ~5-10 ms con 50k entradas. |
 | `WatchlistRepository.ListActiveBySource` | `… WHERE removed_at IS NULL AND source=$1 AND external_ref IS NOT NULL` | Base del delta del import. Usa la tx del contexto (import atómico), igual que `Add`/`Remove`/`List`. |
 | `WatchlistRepository.Add/Remove/List` | `INSERT …` / `UPDATE … SET removed_at WHERE id=$1 AND removed_at IS NULL` / `SELECT … WHERE removed_at IS NULL ORDER BY full_name LIMIT $1` | Pool directo, sin tenant. `Remove` con 0 filas → `ErrWatchlistEntryNotFound`. |
 | `TransactionLog.Record` | `INSERT INTO aml_monitored_payments … ON CONFLICT (payment_id) DO NOTHING` | Dentro de `RunInTx` (tenant del evento). |
@@ -695,7 +698,14 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 | `Vladimir Petrov Holdings S.A.` | 90 (secuencia contigua) |
 | `Petrov, Vladimir` / `Vladimir Ivanovich Petrov` | 80 (tokens reordenados/intercalados → `medium`) |
 | `Vladímir Petróv` | 100 (acentos normalizados) |
-| `Vladimir Petrovsky` | sin match (token distinto) |
+| `Wladimir Petroff Holdings S.A.` / `Vladimir Petrof` | 70 (difuso: transliteración / typo) |
+| `Vladimir Petrovsky` | sin match (3 ediciones, clave fonética distinta) |
+
+Otros ejemplos difusos (score 70): `Mohamed Al Rashid` ↔ `Muhammad Al Rashid`,
+`Gonsales Martines` ↔ `Gonzalez Martinez`, `Kim Jong Traiding Co` ↔
+`Kim Jong Trading Co`. Calibrado contra PostgreSQL 16: `similarity` (simétrica)
+descarta razones sociales largas ("wladimir petroff holdings s a" = 0.31), por
+eso la preselección usa `word_similarity` por token.
 
 ---
 
@@ -738,8 +748,8 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
-| 1 | Hold solo por match exacto | Matches parciales (80/90) y reglas transaccionales no bloquean, aunque sean `high`; dependen de la revisión manual. Un payout iniciado antes del hold no se cancela. | Medio |
-| 3 | Sin fuzzy/fonético | El matching por tokens cubre orden, acentos y puntuación, pero no errores de tipeo, transliteraciones ("Petrov"/"Petroff") ni abreviaturas. La réplica SQL de `NormalizeName` en 000018 solo cubre acentos latinos comunes. | Medio |
+| 1 | **Riesgo aceptado** — Hold solo por match exacto | Decisión de diseño: matches parciales (90/80/70) y reglas transaccionales no bloquean aunque sean `high`, porque un bloqueo automático por homónimos frenaría comercios legítimos; quedan para revisión four-eyes. Un payout que ya estaba corriendo cuando se pone el hold no se cancela: el desembolso es sincrónico dentro del request, así que la ventana es de segundos y no deja payouts pendientes que el hold pueda frenar. | Aceptado |
+| 3 | Fonética simplificada, sin alias | La clave fonética está pensada para español y transliteraciones latinas de nombres rusos/árabes; no cubre otros alfabetos ni alias/AKA de las listas. La réplica SQL de `NormalizeName` (000018) solo cubre acentos latinos comunes. | Bajo |
 | 6 | Feeds oficiales en formato propio | La ingesta acepta un CSV propio: los archivos de OFAC/EU/UN hay que convertirlos a ese formato. No hay descarga automática programada. | Operativo |
 
 ---
@@ -748,7 +758,7 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 
 | Capa | Archivos | Tipo |
 |---|---|---|
-| Dominio | `domain/alert_test.go`, `events_test.go`, `vo_test.go`, `watchlist_test.go` | Unitarios: FSM four-eyes completo (propuesta, aprobación, rechazo, mismo analista), eventos `sanction.*` (solo lista sanciones, score 100), parseo de VOs, `NormalizeName`, `RiskFromScore`. |
+| Dominio | `domain/alert_test.go`, `events_test.go`, `vo_test.go`, `watchlist_test.go`, `fuzzy_test.go` | Unitarios: FSM four-eyes completo, eventos `sanction.*`, parseo de VOs, `NormalizeName`, `MatchScore` (tokens y difuso, positivos y negativos), clave fonética, Damerau-Levenshtein, `PlanWatchlistSync`. |
 | Aplicación | `application/screen_application_test.go`, `monitor_transaction_test.go`, `resolve_alert_test.go`, `queries_test.go` (+ `mocks_test.go`) | Unitarios con puertos en memoria/fake: mejor match y desempate a favor de sanciones, reglas de umbral/velocity/volumen, revisión cross-tenant, `UPDATE` condicional sobre el estado previo, idempotencia, mappers. |
 | HTTP inbound | `inbound/http/handler_test.go` | Handlers Gin con `httptest`: flujo four-eyes extremo a extremo, mapeo de errores, cada ruta detrás de su guard, middleware `platformOperator` (verifica `set_config('app.platform_operator','on')` con pgxmock). |
 | NATS inbound | `inbound/nats/event_consumer_test.go` | Configs de consumers (stream/filtro/MaxDeliver) y handlers con payloads válidos/malformados y errores nak/ack. |
@@ -764,7 +774,9 @@ Enforcement fuera de este BC: `context/auth/.../nats/compliance_consumer_test.go
 `context/payment/.../tenant/gate_test.go`, `context/payout/.../tenant/gate_test.go`.
 
 No hay tests de integración contra PostgreSQL real en este BC (todo mock). Las
-migraciones 000018 a 000020 se validaron up → down → up contra PostgreSQL 16;
+migraciones 000018 a 000023 se validaron up → down → up contra PostgreSQL 16;
+el import (delta, reimport idempotente) y el screening difuso (50k entradas,
+5-10 ms) se probaron contra PostgreSQL real;
 en 000019/000020 además se verificó RLS con un rol sin `BYPASSRLS` (tenant ve solo lo
 suyo, operador ve todo, sin variables 0 filas) y la semántica de place/release
 fuera de orden.
@@ -778,7 +790,8 @@ context/compliance/
 ├── domain/
 │   ├── alert.go          # Agregado Alert + FSM four-eyes + AlertSnapshot
 │   ├── vo.go             # IDs, AlertType, RiskLevel, AlertStatus, ParseDisposition, ParseStatusFilter
-│   ├── watchlist.go      # WatchlistEntry, NewWatchlistEntry, Match, NormalizeName, MatchScore, RiskFromScore
+│   ├── watchlist.go      # WatchlistEntry, NewWatchlistEntry, Match, NormalizeName, MatchScore, RiskFromScore, PlanWatchlistSync
+│   ├── fuzzy.go          # matching difuso: Damerau-Levenshtein, clave fonética, FuzzyCandidateTokens
 │   ├── events.go         # alert.{raised,resolved,review_proposed,proposal_rejected} + sanction.{matched,cleared,confirmed}
 │   └── errors.go         # errores sentinela
 ├── application/
@@ -788,10 +801,13 @@ context/compliance/
 │   ├── screen_application.go
 │   ├── monitor_transaction.go  # MonitoringRules + DefaultMonitoringRules + riskScoreForAmount
 │   ├── resolve_alert.go  # Resolve / ApproveProposal / RejectProposal (reviewer compartido)
+│   ├── import_watchlist.go   # ImportWatchlist: validación del feed + delta atómico
+│   ├── purge_projection.go   # ProjectionPurger (retención de aml_monitored_payments)
 │   └── raise.go          # helper tx: Save + Publish, idempotente ante ErrDuplicateAlert
 └── infrastructure/adapters/
     ├── inbound/
-    │   ├── http/handler.go            # ComplianceHandler + RouteGuards + platformOperator + RegisterRoutes (8 rutas)
+    │   ├── http/handler.go            # ComplianceHandler + RouteGuards + platformOperator + RegisterRoutes (9 rutas)
+    │   ├── http/watchlist_csv.go      # parser del feed CSV
     │   └── nats/event_consumer.go     # consumers ONBOARDING + PAYMENT
     └── outbound/postgres/
         ├── alert_repo.go              # AlertRepository (RLS-aware en tx)

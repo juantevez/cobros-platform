@@ -81,10 +81,22 @@ const (
 	ScoreTokenMatch   = 80  // todos los tokens de la entrada aparecen, en otro orden
 )
 
-// MatchScore compara una entrada normalizada contra un nombre normalizado
-// por tokens completos (no por substrings): "ivan sokolov" no coincide con
-// "ivan sokolovsky". Retorna 0 si no hay coincidencia.
+// MatchScore compara una entrada normalizada contra un nombre normalizado.
+// Primero por tokens completos (no por substrings: "ivan sokolov" no coincide
+// exacto con "ivan sokolovsky"); si no hay coincidencia por tokens, prueba el
+// matching difuso (ScoreFuzzyMatch, ver fuzzy.go). Retorna 0 si no hay
+// coincidencia.
 func MatchScore(entryNorm, nameNorm string) int {
+	if score := tokenMatchScore(entryNorm, nameNorm); score > 0 {
+		return score
+	}
+	if fuzzyTokensMatch(entryNorm, nameNorm) {
+		return ScoreFuzzyMatch
+	}
+	return 0
+}
+
+func tokenMatchScore(entryNorm, nameNorm string) int {
 	if entryNorm == "" || nameNorm == "" {
 		return 0
 	}
