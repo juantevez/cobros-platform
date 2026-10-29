@@ -65,6 +65,7 @@ type fakeWatchlist struct {
 	removeErr error
 	added     []domain.WatchlistEntry
 	removed   []string
+	active    []domain.WatchlistEntry
 }
 
 func (w *fakeWatchlist) Screen(ctx context.Context, n string) ([]domain.Match, error) {
@@ -83,6 +84,9 @@ func (w *fakeWatchlist) Remove(ctx context.Context, id string, at time.Time) err
 	}
 	w.removed = append(w.removed, id)
 	return nil
+}
+func (w *fakeWatchlist) ListActiveBySource(ctx context.Context, source string) ([]domain.WatchlistEntry, error) {
+	return w.active, nil
 }
 func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.WatchlistEntry, error) {
 	return w.entries, w.listErr
@@ -113,6 +117,7 @@ func newHandler(r *fakeAlertRepo, w *fakeWatchlist) *ComplianceHandler {
 			Add:    application.NewAddWatchlistEntryUseCase(w, fixedClock{}),
 			Remove: application.NewRemoveWatchlistEntryUseCase(w, fixedClock{}),
 			List:   application.NewListWatchlistUseCase(w),
+			Import: application.NewImportWatchlistUseCase(w, fakeTx{}, fixedClock{}),
 		},
 	)
 }
@@ -559,6 +564,7 @@ func TestRegisterRoutes(t *testing.T) {
 			{http.MethodGet, "/api/v1/compliance/watchlist", ""},
 			{http.MethodPost, "/api/v1/compliance/watchlist", `{"full_name":"x","list_type":"pep"}`},
 			{http.MethodDelete, "/api/v1/compliance/watchlist/" + id, ""},
+			{http.MethodPost, "/api/v1/compliance/watchlist/import?source=OFAC", "external_ref,full_name,list_type\n1,x,pep\n"},
 		}
 		for _, rt := range routes {
 			rec := httptest.NewRecorder()

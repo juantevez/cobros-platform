@@ -132,7 +132,7 @@ func (uc *ListWatchlistUseCase) Execute(ctx context.Context, limit int) ([]Watch
 func toWatchlistEntryView(e domain.WatchlistEntry) WatchlistEntryView {
 	return WatchlistEntryView{
 		ID: e.ID, FullName: e.FullName, ListType: e.ListType,
-		Country: e.Country, Source: e.Source,
+		Country: e.Country, Source: e.Source, ExternalRef: e.ExternalRef,
 	}
 }
 

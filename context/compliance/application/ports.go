@@ -49,6 +49,9 @@ type WatchlistRepository interface {
 	// estaba dada de baja retorna domain.ErrWatchlistEntryNotFound.
 	Remove(ctx context.Context, id string, removedAt time.Time) error
 	List(ctx context.Context, limit int) ([]domain.WatchlistEntry, error)
+	// ListActiveBySource retorna las entradas vigentes de la fuente que vienen
+	// de un feed (external_ref no vacío).
+	ListActiveBySource(ctx context.Context, source string) ([]domain.WatchlistEntry, error)
 }
 
 // MonitoredPayment es la proyección propia de un pago capturado, construida a

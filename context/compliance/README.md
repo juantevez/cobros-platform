@@ -47,9 +47,12 @@ lo trata como no-op (sin publicar de nuevo).
 ## Watchlist
 
 `aml_watchlist` es una lista **global** (no multi-tenant, sin RLS): se hace
-screening de todos los comercios contra ella. Se gestiona solo con rol
-`platform_support` por `GET/POST/DELETE /api/v1/compliance/watchlist` (el DELETE
-es baja lógica, `removed_at`). La semilla de ejemplo es solo para desarrollo
+screening de todos los comercios contra ella. La gestionan `compliance_officer`
+y `platform_support` por `GET/POST/DELETE /api/v1/compliance/watchlist` (el
+DELETE es baja lógica, `removed_at`) y, para listas completas,
+`POST /api/v1/compliance/watchlist/import?source=OFAC` con un CSV
+(`external_ref,full_name,list_type,country`) que sincroniza la fuente
+(alta/cambio/baja, atómico, con `dry_run`). La semilla de ejemplo es solo para desarrollo
 (`make seed-dev`). El match es por tokens completos sobre el nombre normalizado
 (`NormalizeName`: sin acentos ni puntuación, minúsculas, espacios colapsados) y
 se puntúa con `MatchScore` (exacto 100, contiguo 90, reordenado 80).

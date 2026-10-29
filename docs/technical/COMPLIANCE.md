@@ -244,6 +244,7 @@ Paquetes: [application/](../../context/compliance/application/)
 | `GetAlertUseCase` | `queries.go` | HTTP | `AlertView` de cualquier comercio | — |
 | `AddWatchlistEntryUseCase` | `queries.go` | HTTP (`compliance_officer`/`platform_support`) | Valida y crea entrada en `aml_watchlist` (global); retorna la vista | — |
 | `RemoveWatchlistEntryUseCase` | `queries.go` | HTTP (`compliance_officer`/`platform_support`) | Baja lógica (`removed_at`) | — |
+| `ImportWatchlistUseCase` | `import_watchlist.go` | HTTP (`compliance_officer`/`platform_support`) | Sincroniza una fuente con un feed (alta/reemplazo/baja), atómico, con `dry_run` | — |
 | `ListWatchlistUseCase` | `queries.go` | HTTP | `[]WatchlistEntryView` (limit default 100, máx 500) | — |
 
 Puertos ([application/ports.go](../../context/compliance/application/ports.go)):
@@ -378,6 +379,7 @@ el middleware `platformOperator` marca el contexto con
 | `GET` | `/compliance/watchlist?limit=` | Lista global de vigilancia (vigentes) | `compliance_officer`, `platform_support` | `200 {watchlist, count}` |
 | `POST` | `/compliance/watchlist` | Agregar entrada global | `compliance_officer`, `platform_support` | `201 WatchlistEntryView` |
 | `DELETE` | `/compliance/watchlist/:entryID` | Dar de baja una entrada | `compliance_officer`, `platform_support` | `204` |
+| `POST` | `/compliance/watchlist/import?source=&dry_run=` | Sincronizar una fuente completa con un feed CSV (§6.5) | `compliance_officer`, `platform_support` | `200 ImportWatchlistResult` |
 
 Parámetros de query: `limit` de `alerts` default 50 (≤0 o >200 → 50); el de
 `watchlist` default 100 (≤0 o >500 → 100). `status` acepta
@@ -446,6 +448,41 @@ respuesta `201` incluye la entrada creada (`id`, para darla de baja).
 Soft delete (`removed_at = now`): la entrada deja de participar del screening y
 del listado, pero la fila se conserva para que las alertas pasadas sigan siendo
 trazables. Inexistente, ya dada de baja o ID no UUID → `404`.
+
+### 6.5 Ingesta de feeds — `POST /compliance/watchlist/import`
+
+```
+POST /api/v1/compliance/watchlist/import?source=OFAC&dry_run=true
+Content-Type: text/csv
+
+external_ref,full_name,list_type,country
+SDN-36,Vladimir Petrov,sanctions,RU
+SDN-41,"Sokolov, Ivan",sanctions,RU
+```
+
+- **Formato**: CSV UTF-8 con encabezado; columnas en cualquier orden;
+  `external_ref`, `full_name` y `list_type` requeridas, `country` opcional. Se
+  tolera BOM. Máximo 32 MB (`413` si se excede).
+- **Semántica**: el feed **reemplaza a la fuente** (`source`, en mayúsculas).
+  `domain.PlanWatchlistSync` calcula el delta contra las entradas vigentes de
+  esa fuente con `external_ref`:
+  - `external_ref` nuevo → alta;
+  - existente con nombre/lista/país distintos → baja de la versión vieja + alta
+    de la nueva (las alertas pasadas siguen apuntando a la versión que las
+    disparó);
+  - vigente que el feed ya no trae → baja (`removed_at`).
+
+  Las entradas manuales (sin `external_ref`) no se tocan.
+- **Atómico**: todo en una tx. Cualquier fila inválida (ref vacía o duplicada,
+  `list_type` inválido, nombre sin letras) aborta el import completo →
+  `422 {"error", "problems": ["line 5: …", …]}` (hasta 20). Un feed sin filas
+  se rechaza: aplicarlo daría de baja la fuente entera. CSV mal formado → `400`.
+- **`dry_run=true`**: calcula y devuelve el resumen sin escribir.
+- **Respuesta**: `{"source","dry_run","added","updated","removed","unchanged"}`.
+  Reimportar el mismo archivo da todo `unchanged`.
+
+Unicidad: `uq_aml_watchlist_source_ref (source, external_ref)` parcial sobre
+las vigentes (migración 000022).
 
 ---
 
@@ -643,6 +680,7 @@ idempotente).
 | `AlertRepository.FindByID` | `SELECT … WHERE id=$1` | `pgx.ErrNoRows` → `ErrAlertNotFound`. Corre con las variables RLS del ctx (`RunWithAppTenant`): operador en la API. |
 | `AlertRepository.List` | `[WHERE [tenant_id=$1] [AND status=$n]] ORDER BY created_at DESC LIMIT $n` | Cross-tenant con operador; con filtro de tenant fija además `app.current_tenant`. |
 | `WatchlistRepository.Screen` | `… WHERE removed_at IS NULL AND string_to_array(normalized_name,' ') <@ string_to_array($1,' ')` | Prefiltro por **conjunto de tokens** (GIN); el score lo asigna `domain.MatchScore`. |
+| `WatchlistRepository.ListActiveBySource` | `… WHERE removed_at IS NULL AND source=$1 AND external_ref IS NOT NULL` | Base del delta del import. Usa la tx del contexto (import atómico), igual que `Add`/`Remove`/`List`. |
 | `WatchlistRepository.Add/Remove/List` | `INSERT …` / `UPDATE … SET removed_at WHERE id=$1 AND removed_at IS NULL` / `SELECT … WHERE removed_at IS NULL ORDER BY full_name LIMIT $1` | Pool directo, sin tenant. `Remove` con 0 filas → `ErrWatchlistEntryNotFound`. |
 | `TransactionLog.Record` | `INSERT INTO aml_monitored_payments … ON CONFLICT (payment_id) DO NOTHING` | Dentro de `RunInTx` (tenant del evento). |
 | `TransactionLog.CountInWindow` / `SumAmountInWindow` | `SELECT COUNT(*)` / `COALESCE(SUM(amount),0) FROM aml_monitored_payments WHERE tenant_id=$1 [AND currency=$2] AND captured_at > $since AND captured_at <= $until` | Ventana deslizante sobre la proyección propia. |
@@ -702,7 +740,7 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 |---|---|---|---|
 | 1 | Hold solo por match exacto | Matches parciales (80/90) y reglas transaccionales no bloquean, aunque sean `high`; dependen de la revisión manual. Un payout iniciado antes del hold no se cancela. | Medio |
 | 3 | Sin fuzzy/fonético | El matching por tokens cubre orden, acentos y puntuación, pero no errores de tipeo, transliteraciones ("Petrov"/"Petroff") ni abreviaturas. La réplica SQL de `NormalizeName` en 000018 solo cubre acentos latinos comunes. | Medio |
-| 6 | Carga de listas oficiales | No hay proceso de importación OFAC/EU/UN; la watchlist se carga entrada por entrada por API. | Operativo |
+| 6 | Feeds oficiales en formato propio | La ingesta acepta un CSV propio: los archivos de OFAC/EU/UN hay que convertirlos a ese formato. No hay descarga automática programada. | Operativo |
 
 ---
 

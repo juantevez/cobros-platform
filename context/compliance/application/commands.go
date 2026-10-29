@@ -97,4 +97,6 @@ type WatchlistEntryView struct {
 	ListType string `json:"list_type"`
 	Country  string `json:"country,omitempty"`
 	Source   string `json:"source,omitempty"`
+	// ExternalRef: id en el feed de origen (vacío = carga manual).
+	ExternalRef string `json:"external_ref,omitempty"`
 }

@@ -11,9 +11,9 @@ import (
 	"github.com/juantevez/cobros-platform/context/compliance/domain"
 )
 
-var watchlistCols = []string{"id", "full_name", "list_type", "country", "source"}
+var screenCols = []string{"id", "full_name", "list_type", "country", "source", "normalized_name"}
 
-var screenCols = append(append([]string{}, watchlistCols...), "normalized_name")
+var watchlistCols = []string{"id", "full_name", "list_type", "country", "source", "external_ref"}
 
 func TestWatchlistRepository_Screen(t *testing.T) {
 	t.Run("empty name short-circuits without query", func(t *testing.T) {
@@ -86,7 +86,7 @@ func TestWatchlistRepository_Add(t *testing.T) {
 		mock := newMock(t)
 		repo := NewWatchlistRepository(mock)
 		mock.ExpectExec("INSERT INTO aml_watchlist").
-			WithArgs("wl-1", "Juan Perez", "juan perez", "pep", "AR", "local", now).
+			WithArgs("wl-1", "Juan Perez", "juan perez", "pep", "AR", "local", pgxmock.AnyArg(), now).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		if err := repo.Add(context.Background(), entry, "juan perez", now); err != nil {
@@ -148,8 +148,8 @@ func TestWatchlistRepository_List(t *testing.T) {
 		mock := newMock(t)
 		repo := NewWatchlistRepository(mock)
 		rows := pgxmock.NewRows(watchlistCols).
-			AddRow("1", "Alice", "sanctions", "US", "OFAC").
-			AddRow("2", "Bob", "pep", "UK", "EU")
+			AddRow("1", "Alice", "sanctions", "US", "OFAC", "").
+			AddRow("2", "Bob", "pep", "UK", "EU", "ref-2")
 		mock.ExpectQuery("FROM aml_watchlist WHERE removed_at IS NULL\\s+ORDER BY full_name LIMIT \\$1").WithArgs(100).WillReturnRows(rows)
 
 		out, err := repo.List(context.Background(), 100)
@@ -179,4 +179,37 @@ func TestWatchlistRepository_List(t *testing.T) {
 			t.Fatal("expected scan error")
 		}
 	})
+}
+
+func TestWatchlistRepository_ListActiveBySource(t *testing.T) {
+	mock := newMock(t)
+	repo := NewWatchlistRepository(mock)
+	rows := pgxmock.NewRows(watchlistCols).AddRow("1", "Vladimir Petrov", "sanctions", "RU", "OFAC", "SDN-36")
+	mock.ExpectQuery(`WHERE removed_at IS NULL AND source = \$1 AND external_ref IS NOT NULL`).
+		WithArgs("OFAC").WillReturnRows(rows)
+
+	out, err := repo.ListActiveBySource(context.Background(), "OFAC")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].ExternalRef != "SDN-36" || out[0].Source != "OFAC" {
+		t.Errorf("unexpected entries: %+v", out)
+	}
+}
+
+func TestWatchlistRepository_AddPersistsExternalRef(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	mock := newMock(t)
+	ref := "SDN-36"
+	mock.ExpectExec("INSERT INTO aml_watchlist .*external_ref").
+		WithArgs("wl-1", "Vladimir Petrov", "vladimir petrov", "sanctions", "RU", "OFAC", &ref, now).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	entry := domain.WatchlistEntry{ID: "wl-1", FullName: "Vladimir Petrov", ListType: "sanctions",
+		Country: "RU", Source: "OFAC", ExternalRef: ref}
+	if err := NewWatchlistRepository(mock).Add(context.Background(), entry, "vladimir petrov", now); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
+	}
 }

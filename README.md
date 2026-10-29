@@ -281,6 +281,7 @@ POST   /api/v1/compliance/alerts/:alertID/reject       Rechazar propuesta      [
 GET    /api/v1/compliance/watchlist                    Listar watchlist        [JWT + compliance_officer|platform_support]
 POST   /api/v1/compliance/watchlist                    Agregar entrada         [JWT + compliance_officer|platform_support]
 DELETE /api/v1/compliance/watchlist/:entryID           Dar de baja entrada     [JWT + compliance_officer|platform_support]
+POST   /api/v1/compliance/watchlist/import?source=&dry_run=  Sincronizar fuente (CSV) [JWT + compliance_officer|platform_support]
 ```
 
 ---

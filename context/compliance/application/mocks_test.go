@@ -107,6 +107,8 @@ type fakeWatchlist struct {
 
 	added         []domain.WatchlistEntry
 	removed       []string
+	active        []domain.WatchlistEntry // vigentes de la fuente (ListActiveBySource)
+	gotSource     string
 	gotNormAdd    string
 	gotNormScreen string
 }
@@ -126,6 +128,11 @@ func (w *fakeWatchlist) Add(ctx context.Context, entry domain.WatchlistEntry, no
 	}
 	w.added = append(w.added, entry)
 	return nil
+}
+
+func (w *fakeWatchlist) ListActiveBySource(ctx context.Context, source string) ([]domain.WatchlistEntry, error) {
+	w.gotSource = source
+	return w.active, w.listErr
 }
 
 func (w *fakeWatchlist) Remove(ctx context.Context, id string, removedAt time.Time) error {

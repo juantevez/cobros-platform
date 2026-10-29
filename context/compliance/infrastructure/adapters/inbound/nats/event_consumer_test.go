@@ -30,6 +30,9 @@ func (w *fakeWatchlist) Add(ctx context.Context, e domain.WatchlistEntry, n stri
 	return nil
 }
 func (w *fakeWatchlist) Remove(ctx context.Context, id string, at time.Time) error { return nil }
+func (w *fakeWatchlist) ListActiveBySource(ctx context.Context, source string) ([]domain.WatchlistEntry, error) {
+	return nil, nil
+}
 func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.WatchlistEntry, error) {
 	return nil, nil
 }

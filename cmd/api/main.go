@@ -386,6 +386,7 @@ func main() {
 			Add:    complianceapp.NewAddWatchlistEntryUseCase(watchlistRepo, clock),
 			Remove: complianceapp.NewRemoveWatchlistEntryUseCase(watchlistRepo, clock),
 			List:   complianceapp.NewListWatchlistUseCase(watchlistRepo),
+			Import: complianceapp.NewImportWatchlistUseCase(watchlistRepo, txManager, clock),
 		},
 	), compliancehttp.RouteGuards{
 		// La plataforma revisa a los comercios: ningún rol de tenant accede.
