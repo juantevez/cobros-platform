@@ -1,5 +1,7 @@
 package application
 
+import "time"
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 // ScreenApplicationCmd dispara el screening de un onboarding contra la watchlist.
@@ -16,6 +18,9 @@ type MonitorTransactionCmd struct {
 	Amount        int64
 	Currency      string
 	PaymentMethod string
+	// CapturedAt es la hora real de la captura (header occurred-at del
+	// evento). Cero = se usa el reloj (hora de procesamiento).
+	CapturedAt time.Time
 }
 
 // ResolveAlertCmd es la disposición del primer analista de cumplimiento.
@@ -92,4 +97,6 @@ type WatchlistEntryView struct {
 	ListType string `json:"list_type"`
 	Country  string `json:"country,omitempty"`
 	Source   string `json:"source,omitempty"`
+	// ExternalRef: id en el feed de origen (vacío = carga manual).
+	ExternalRef string `json:"external_ref,omitempty"`
 }

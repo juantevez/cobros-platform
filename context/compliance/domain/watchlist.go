@@ -20,6 +20,9 @@ type WatchlistEntry struct {
 	ListType string // "sanctions" | "pep"
 	Country  string
 	Source   string // OFAC, EU, UN, ...
+	// ExternalRef es el identificador de la entrada en el feed de origen
+	// (único por fuente entre las vigentes). Vacío = carga manual.
+	ExternalRef string
 }
 
 // NewWatchlistEntry valida y construye una entrada. El nombre debe conservar
@@ -78,10 +81,22 @@ const (
 	ScoreTokenMatch   = 80  // todos los tokens de la entrada aparecen, en otro orden
 )
 
-// MatchScore compara una entrada normalizada contra un nombre normalizado
-// por tokens completos (no por substrings): "ivan sokolov" no coincide con
-// "ivan sokolovsky". Retorna 0 si no hay coincidencia.
+// MatchScore compara una entrada normalizada contra un nombre normalizado.
+// Primero por tokens completos (no por substrings: "ivan sokolov" no coincide
+// exacto con "ivan sokolovsky"); si no hay coincidencia por tokens, prueba el
+// matching difuso (ScoreFuzzyMatch, ver fuzzy.go). Retorna 0 si no hay
+// coincidencia.
 func MatchScore(entryNorm, nameNorm string) int {
+	if score := tokenMatchScore(entryNorm, nameNorm); score > 0 {
+		return score
+	}
+	if fuzzyTokensMatch(entryNorm, nameNorm) {
+		return ScoreFuzzyMatch
+	}
+	return 0
+}
+
+func tokenMatchScore(entryNorm, nameNorm string) int {
 	if entryNorm == "" || nameNorm == "" {
 		return 0
 	}
@@ -113,4 +128,52 @@ func RiskFromScore(score int) RiskLevel {
 	default:
 		return RiskLow
 	}
+}
+
+// ── Sincronización de una fuente (ingesta de feeds) ───────────────────────────
+
+// SyncPlan es el delta entre las entradas vigentes de una fuente y un feed.
+type SyncPlan struct {
+	ToAdd     []WatchlistEntry // external_ref nuevo
+	ToReplace []Replacement    // external_ref existente con datos distintos
+	ToRemove  []WatchlistEntry // vigentes que el feed ya no trae
+	Unchanged int
+}
+
+// Replacement da de baja la versión vigente y crea la nueva: las alertas
+// pasadas siguen siendo trazables a la versión que las disparó.
+type Replacement struct {
+	Old WatchlistEntry
+	New WatchlistEntry
+}
+
+// PlanWatchlistSync calcula el delta de una fuente. `current` son las
+// entradas vigentes con external_ref de esa fuente; `incoming`, las del feed
+// (ya validadas, con external_ref único). Las entradas cargadas a mano (sin
+// external_ref) no participan: el feed no las conoce.
+func PlanWatchlistSync(current, incoming []WatchlistEntry) SyncPlan {
+	byRef := make(map[string]WatchlistEntry, len(current))
+	for _, e := range current {
+		byRef[e.ExternalRef] = e
+	}
+	var plan SyncPlan
+	seen := make(map[string]bool, len(incoming))
+	for _, in := range incoming {
+		seen[in.ExternalRef] = true
+		old, ok := byRef[in.ExternalRef]
+		switch {
+		case !ok:
+			plan.ToAdd = append(plan.ToAdd, in)
+		case old.FullName != in.FullName || old.ListType != in.ListType || old.Country != in.Country:
+			plan.ToReplace = append(plan.ToReplace, Replacement{Old: old, New: in})
+		default:
+			plan.Unchanged++
+		}
+	}
+	for _, e := range current {
+		if !seen[e.ExternalRef] {
+			plan.ToRemove = append(plan.ToRemove, e)
+		}
+	}
+	return plan
 }

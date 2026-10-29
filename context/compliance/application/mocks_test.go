@@ -38,6 +38,10 @@ type fakeAlertRepo struct {
 	gotTenantFilter string
 	gotLimit        int
 	gotFrom         domain.AlertStatus
+
+	recent           bool // cooldown activo para SaveUnlessRecent
+	gotPrefix        []string
+	gotCooldownSince time.Time
 }
 
 func newAlertRepo() *fakeAlertRepo {
@@ -51,6 +55,16 @@ func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error {
 	r.saved = append(r.saved, a)
 	r.byID[a.ID()] = a
 	return nil
+}
+
+// SaveUnlessRecent simula el cooldown: con recent=true responde
+// ErrDuplicateAlert (hay una alerta reciente del mismo tipo).
+func (r *fakeAlertRepo) SaveUnlessRecent(ctx context.Context, a *domain.Alert, prefix string, since time.Time) error {
+	r.gotPrefix, r.gotCooldownSince = append(r.gotPrefix, prefix), since
+	if r.recent {
+		return domain.ErrDuplicateAlert
+	}
+	return r.Save(ctx, a)
 }
 
 func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error {
@@ -93,6 +107,8 @@ type fakeWatchlist struct {
 
 	added         []domain.WatchlistEntry
 	removed       []string
+	active        []domain.WatchlistEntry // vigentes de la fuente (ListActiveBySource)
+	gotSource     string
 	gotNormAdd    string
 	gotNormScreen string
 }
@@ -112,6 +128,11 @@ func (w *fakeWatchlist) Add(ctx context.Context, entry domain.WatchlistEntry, no
 	}
 	w.added = append(w.added, entry)
 	return nil
+}
+
+func (w *fakeWatchlist) ListActiveBySource(ctx context.Context, source string) ([]domain.WatchlistEntry, error) {
+	w.gotSource = source
+	return w.active, w.listErr
 }
 
 func (w *fakeWatchlist) Remove(ctx context.Context, id string, removedAt time.Time) error {
@@ -138,8 +159,13 @@ type fakeTxLog struct {
 
 	recorded    []MonitoredPayment
 	gotSince    time.Time
+	gotUntil    time.Time
 	gotCurrency string
 	sumCalls    int
+
+	purgeBatches []int // filas borradas por llamada sucesiva
+	purgeErr     error
+	purgeBefore  []time.Time
 }
 
 func (l *fakeTxLog) Record(ctx context.Context, p MonitoredPayment) error {
@@ -150,21 +176,34 @@ func (l *fakeTxLog) Record(ctx context.Context, p MonitoredPayment) error {
 	return nil
 }
 
-func (l *fakeTxLog) CountSince(ctx context.Context, tenantID string, since time.Time) (int, error) {
-	l.gotSince = since
+func (l *fakeTxLog) CountInWindow(ctx context.Context, tenantID string, since, until time.Time) (int, error) {
+	l.gotSince, l.gotUntil = since, until
 	if l.countErr != nil {
 		return 0, l.countErr
 	}
 	return l.count, nil
 }
 
-func (l *fakeTxLog) SumAmountSince(ctx context.Context, tenantID, currency string, since time.Time) (int64, error) {
+func (l *fakeTxLog) SumAmountInWindow(ctx context.Context, tenantID, currency string, since, until time.Time) (int64, error) {
 	l.sumCalls++
 	l.gotCurrency = currency
 	if l.sumErr != nil {
 		return 0, l.sumErr
 	}
 	return l.sum, nil
+}
+
+func (l *fakeTxLog) PurgeBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	l.purgeBefore = append(l.purgeBefore, before)
+	if l.purgeErr != nil {
+		return 0, l.purgeErr
+	}
+	if len(l.purgeBatches) == 0 {
+		return 0, nil
+	}
+	n := l.purgeBatches[0]
+	l.purgeBatches = l.purgeBatches[1:]
+	return n, nil
 }
 
 type fakePublisher struct {

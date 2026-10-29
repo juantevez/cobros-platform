@@ -30,6 +30,9 @@ func (w *fakeWatchlist) Add(ctx context.Context, e domain.WatchlistEntry, n stri
 	return nil
 }
 func (w *fakeWatchlist) Remove(ctx context.Context, id string, at time.Time) error { return nil }
+func (w *fakeWatchlist) ListActiveBySource(ctx context.Context, source string) ([]domain.WatchlistEntry, error) {
+	return nil, nil
+}
 func (w *fakeWatchlist) List(ctx context.Context, limit int) ([]domain.WatchlistEntry, error) {
 	return nil, nil
 }
@@ -49,6 +52,9 @@ func (r *fakeAlertRepo) Save(ctx context.Context, a *domain.Alert) error {
 	r.saved = append(r.saved, a)
 	return nil
 }
+func (r *fakeAlertRepo) SaveUnlessRecent(ctx context.Context, a *domain.Alert, p string, since time.Time) error {
+	return r.Save(ctx, a)
+}
 func (r *fakeAlertRepo) Update(ctx context.Context, a *domain.Alert, from domain.AlertStatus) error {
 	return nil
 }
@@ -60,15 +66,22 @@ func (r *fakeAlertRepo) List(ctx context.Context, f application.AlertFilter, l i
 }
 
 type fakeTxLog struct {
-	count int
-	err   error
+	count    int
+	err      error
+	recorded []application.MonitoredPayment
 }
 
-func (l *fakeTxLog) Record(ctx context.Context, p application.MonitoredPayment) error { return nil }
-func (l *fakeTxLog) CountSince(ctx context.Context, tenantID string, since time.Time) (int, error) {
+func (l *fakeTxLog) Record(ctx context.Context, p application.MonitoredPayment) error {
+	l.recorded = append(l.recorded, p)
+	return nil
+}
+func (l *fakeTxLog) CountInWindow(ctx context.Context, tenantID string, since, until time.Time) (int, error) {
 	return l.count, l.err
 }
-func (l *fakeTxLog) SumAmountSince(ctx context.Context, tenantID, currency string, since time.Time) (int64, error) {
+func (l *fakeTxLog) PurgeBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return 0, nil
+}
+func (l *fakeTxLog) SumAmountInWindow(ctx context.Context, tenantID, currency string, since, until time.Time) (int64, error) {
 	return 0, l.err
 }
 
@@ -210,6 +223,35 @@ func TestHandlePayment(t *testing.T) {
 		}
 		if r.ctxTenant != tid {
 			t.Errorf("tenant in ctx = %q, want %q (RLS)", r.ctxTenant, tid)
+		}
+	})
+
+	t.Run("occurred-at header becomes the capture time", func(t *testing.T) {
+		tl := &fakeTxLog{}
+		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, tl)
+		msg := &eventbus.Message{
+			Payload: []byte(`{"payment_id":"p","tenant_id":"` + tid + `","amount":1,"currency":"ARS"}`),
+			Headers: map[string]string{eventbus.HeaderOccurredAt: "2026-10-28T09:15:00.5Z"},
+		}
+		if err := c.handlePayment(context.Background(), msg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := time.Date(2026, 10, 28, 9, 15, 0, 500_000_000, time.UTC)
+		if len(tl.recorded) != 1 || !tl.recorded[0].CapturedAt.Equal(want) {
+			t.Errorf("captured_at = %+v, want %v", tl.recorded, want)
+		}
+	})
+
+	t.Run("missing or invalid header falls back to the clock", func(t *testing.T) {
+		tl := &fakeTxLog{}
+		c, _ := newConsumer(&fakeWatchlist{}, &fakeAlertRepo{}, tl)
+		msg := &eventbus.Message{
+			Payload: []byte(`{"payment_id":"p","tenant_id":"` + tid + `","amount":1}`),
+			Headers: map[string]string{eventbus.HeaderOccurredAt: "ayer"},
+		}
+		_ = c.handlePayment(context.Background(), msg)
+		if !tl.recorded[0].CapturedAt.Equal(fixedClock{}.Now()) {
+			t.Errorf("captured_at = %v, want clock", tl.recorded[0].CapturedAt)
 		}
 	})
 

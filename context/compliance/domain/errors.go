@@ -25,6 +25,9 @@ var (
 	ErrInvalidWatchlistName = errors.New("compliance: watchlist full_name must contain letters or digits")
 	// ErrWatchlistEntryNotFound indica que la entrada no existe o ya fue dada de baja.
 	ErrWatchlistEntryNotFound = errors.New("compliance: watchlist entry not found")
+	// ErrInvalidWatchlistFeed indica un feed de watchlist inválido (formato,
+	// filas inválidas, refs duplicadas o vacío). El import se aborta completo.
+	ErrInvalidWatchlistFeed = errors.New("compliance: invalid watchlist feed")
 	// ErrInvalidStatusFilter indica un filtro de estado desconocido al listar alertas.
 	ErrInvalidStatusFilter = errors.New("compliance: invalid status filter (use open|pending_second_approval|cleared|confirmed)")
 )

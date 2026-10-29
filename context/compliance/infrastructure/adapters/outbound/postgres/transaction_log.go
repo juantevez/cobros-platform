@@ -34,28 +34,57 @@ func (l *TransactionLog) Record(ctx context.Context, p application.MonitoredPaym
 	return nil
 }
 
-func (l *TransactionLog) CountSince(ctx context.Context, tenantID string, since time.Time) (int, error) {
+// CountInWindow cuenta los pagos con since < captured_at <= until (ventana
+// deslizante que termina en la hora del evento evaluado).
+func (l *TransactionLog) CountInWindow(ctx context.Context, tenantID string, since, until time.Time) (int, error) {
 	var count int
 	err := l.queryRow(ctx, tenantID, `
 		SELECT COUNT(*) FROM aml_monitored_payments
-		WHERE tenant_id = $1 AND captured_at >= $2`,
-		[]any{tenantID, since}, &count)
+		WHERE tenant_id = $1 AND captured_at > $2 AND captured_at <= $3`,
+		[]any{tenantID, since, until}, &count)
 	if err != nil {
-		return 0, fmt.Errorf("compliance log: count since: %w", err)
+		return 0, fmt.Errorf("compliance log: count in window: %w", err)
 	}
 	return count, nil
 }
 
-func (l *TransactionLog) SumAmountSince(ctx context.Context, tenantID, currency string, since time.Time) (int64, error) {
+func (l *TransactionLog) SumAmountInWindow(ctx context.Context, tenantID, currency string, since, until time.Time) (int64, error) {
 	var total int64
 	err := l.queryRow(ctx, tenantID, `
 		SELECT COALESCE(SUM(amount), 0) FROM aml_monitored_payments
-		WHERE tenant_id = $1 AND currency = $2 AND captured_at >= $3`,
-		[]any{tenantID, currency, since}, &total)
+		WHERE tenant_id = $1 AND currency = $2 AND captured_at > $3 AND captured_at <= $4`,
+		[]any{tenantID, currency, since, until}, &total)
 	if err != nil {
-		return 0, fmt.Errorf("compliance log: sum since: %w", err)
+		return 0, fmt.Errorf("compliance log: sum in window: %w", err)
 	}
 	return total, nil
+}
+
+// PurgeBefore borra un lote de pagos vencidos de todos los tenants. Corre
+// como operador de plataforma (política RLS aml_monitored_payments_platform_operator):
+// sin tenant en el contexto, la política por tenant no vería ninguna fila.
+func (l *TransactionLog) PurgeBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	var deleted int
+	ctx = pkgpostgres.WithPlatformOperator(ctx)
+	err := pkgpostgres.RunWithAppTenant(ctx, l.pool, func(ctx context.Context) error {
+		tag, err := pkgpostgres.ConnFromContext(ctx, l.pool).Exec(ctx, `
+			DELETE FROM aml_monitored_payments
+			WHERE payment_id IN (
+				SELECT payment_id FROM aml_monitored_payments
+				WHERE captured_at < $1
+				LIMIT $2)`,
+			before, limit,
+		)
+		if err != nil {
+			return err
+		}
+		deleted = int(tag.RowsAffected())
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("compliance log: purge: %w", err)
+	}
+	return deleted, nil
 }
 
 // queryRow corre una lectura escalar con app.current_tenant fijado (RLS).

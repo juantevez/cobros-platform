@@ -26,6 +26,7 @@ type ComplianceHandler struct {
 	addEntry       *application.AddWatchlistEntryUseCase
 	removeEntry    *application.RemoveWatchlistEntryUseCase
 	listWatchlist  *application.ListWatchlistUseCase
+	importFeed     *application.ImportWatchlistUseCase
 }
 
 // AlertUseCases agrupa los casos de uso de consulta y revisión de alertas.
@@ -42,6 +43,7 @@ type WatchlistUseCases struct {
 	Add    *application.AddWatchlistEntryUseCase
 	Remove *application.RemoveWatchlistEntryUseCase
 	List   *application.ListWatchlistUseCase
+	Import *application.ImportWatchlistUseCase
 }
 
 func NewComplianceHandler(alerts AlertUseCases, watchlist WatchlistUseCases) *ComplianceHandler {
@@ -49,6 +51,7 @@ func NewComplianceHandler(alerts AlertUseCases, watchlist WatchlistUseCases) *Co
 		listAlerts: alerts.List, getAlert: alerts.Get, resolveAlert: alerts.Resolve,
 		approveAlert: alerts.Approve, rejectProposal: alerts.RejectProposal,
 		addEntry: watchlist.Add, removeEntry: watchlist.Remove, listWatchlist: watchlist.List,
+		importFeed: watchlist.Import,
 	}
 }
 
@@ -247,6 +250,43 @@ func (h *ComplianceHandler) RemoveWatchlistEntry(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// maxFeedBytes acota el tamaño del CSV de un import (las listas oficiales
+// completas rondan pocos MB).
+const maxFeedBytes = 32 << 20
+
+// ImportWatchlist sincroniza una fuente de la watchlist con un feed CSV.
+// Con dry_run=true solo calcula el delta.
+//
+//	POST /api/v1/compliance/watchlist/import?source=OFAC&dry_run=true   (body: text/csv)
+func (h *ComplianceHandler) ImportWatchlist(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxFeedBytes)
+	rows, err := parseWatchlistCSV(c.Request.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "feed too large"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	dryRun, _ := strconv.ParseBool(c.DefaultQuery("dry_run", "false"))
+
+	res, err := h.importFeed.Execute(c.Request.Context(), application.ImportWatchlistCmd{
+		Source: c.Query("source"), Rows: rows, DryRun: dryRun,
+	})
+	if err != nil {
+		var feedErr *application.FeedError
+		if errors.As(err, &feedErr) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": domain.ErrInvalidWatchlistFeed.Error(), "problems": feedErr.Problems})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
 // ── Autorización por ruta ─────────────────────────────────────────────────────
 
 // RouteGuards autoriza cada operación de Compliance. Se inyectan desde el
@@ -256,7 +296,7 @@ type RouteGuards struct {
 	ReadAlerts      gin.HandlerFunc // GET /alerts, /alerts/:id              (compliance_officer, platform_support)
 	ReviewAlerts    gin.HandlerFunc // POST /alerts/:id/{resolve,approve,reject} (compliance_officer)
 	ReadWatchlist   gin.HandlerFunc // GET /watchlist                        (compliance_officer, platform_support)
-	ManageWatchlist gin.HandlerFunc // POST/DELETE /watchlist                (compliance_officer, platform_support)
+	ManageWatchlist gin.HandlerFunc // POST/DELETE /watchlist, POST /watchlist/import (compliance_officer, platform_support)
 }
 
 // platformOperator marca la request como acción de operador de plataforma:
@@ -286,6 +326,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *ComplianceHandler, guards RouteGuard
 		comp.POST("/alerts/:alertID/reject", guards.ReviewAlerts, platformOperator, h.RejectAlertProposal)
 		comp.GET("/watchlist", guards.ReadWatchlist, h.ListWatchlist)
 		comp.POST("/watchlist", guards.ManageWatchlist, h.AddWatchlistEntry)
+		comp.POST("/watchlist/import", guards.ManageWatchlist, h.ImportWatchlist)
 		comp.DELETE("/watchlist/:entryID", guards.ManageWatchlist, h.RemoveWatchlistEntry)
 	}
 }

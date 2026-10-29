@@ -119,3 +119,40 @@ func TestNewWatchlistEntry(t *testing.T) {
 		}
 	})
 }
+
+func TestPlanWatchlistSync(t *testing.T) {
+	e := func(ref, name, list, country string) WatchlistEntry {
+		return WatchlistEntry{ID: "id-" + ref, ExternalRef: ref, FullName: name, ListType: list, Country: country, Source: "OFAC"}
+	}
+	current := []WatchlistEntry{
+		e("1", "Vladimir Petrov", "sanctions", "RU"),
+		e("2", "Ivan Sokolov", "sanctions", "RU"),
+		e("3", "Global Shell", "pep", "PA"),
+	}
+	incoming := []WatchlistEntry{
+		e("1", "Vladimir Petrov", "sanctions", "RU"),  // sin cambios
+		e("2", "Ivan Sokolov", "sanctions", "BY"),     // cambió el país
+		e("4", "Kim Jong Trading", "sanctions", "KP"), // nueva
+	}
+
+	plan := PlanWatchlistSync(current, incoming)
+	if plan.Unchanged != 1 {
+		t.Errorf("unchanged = %d, want 1", plan.Unchanged)
+	}
+	if len(plan.ToAdd) != 1 || plan.ToAdd[0].ExternalRef != "4" {
+		t.Errorf("toAdd = %+v", plan.ToAdd)
+	}
+	if len(plan.ToReplace) != 1 || plan.ToReplace[0].Old.ID != "id-2" || plan.ToReplace[0].New.Country != "BY" {
+		t.Errorf("toReplace = %+v", plan.ToReplace)
+	}
+	if len(plan.ToRemove) != 1 || plan.ToRemove[0].ExternalRef != "3" {
+		t.Errorf("toRemove = %+v", plan.ToRemove)
+	}
+
+	t.Run("identical feed is a no-op", func(t *testing.T) {
+		p := PlanWatchlistSync(current, current)
+		if p.Unchanged != 3 || len(p.ToAdd)+len(p.ToReplace)+len(p.ToRemove) != 0 {
+			t.Errorf("unexpected plan: %+v", p)
+		}
+	})
+}

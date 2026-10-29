@@ -4,7 +4,10 @@
 > **Migraciones:** [`000014_compliance_init`](../../migrations/000014_compliance_init.up.sql),
 > [`000018_compliance_hardening`](../../migrations/000018_compliance_hardening.up.sql),
 > [`000019_compliance_four_eyes`](../../migrations/000019_compliance_four_eyes.up.sql),
-> [`000020_compliance_holds`](../../migrations/000020_compliance_holds.up.sql)
+> [`000020_compliance_holds`](../../migrations/000020_compliance_holds.up.sql),
+> [`000021_aml_projection_purge`](../../migrations/000021_aml_projection_purge.up.sql),
+> [`000022_watchlist_feed_ingest`](../../migrations/000022_watchlist_feed_ingest.up.sql),
+> [`000023_watchlist_fuzzy`](../../migrations/000023_watchlist_fuzzy.up.sql)
 > **Stream NATS:** `COMPLIANCE` (`compliance.>`)
 
 ---
@@ -35,9 +38,8 @@ El contexto es **escritura reactiva + revisión/gestión**:
 - Listas oficiales reales: la watchlist es una tabla propia cargada por API
   (`compliance_officer`/`platform_support`); no se integra con OFAC/EU/UN. La
   semilla de ejemplo es solo para desarrollo (`make seed-dev`).
-- Fuzzy matching / similitud fonética: el match es **por tokens completos**
-  sobre nombres normalizados sin acentos ni puntuación (§8.2); no tolera errores
-  de tipeo ni transliteraciones.
+- Alias/AKA y matching por fecha de nacimiento o documento: el screening
+  compara solo nombres (§8.2).
 
 ---
 
@@ -53,7 +55,7 @@ El contexto es **escritura reactiva + revisión/gestión**:
 | **Watchlist** (`WatchlistEntry`) | Entrada de la lista de vigilancia **global** de la plataforma (sanciones o PEP). |
 | **Screening** | Comparar la razón social de un onboarding contra la watchlist. Match → alerta `sanctions_match`. |
 | **Monitoreo transaccional** | Evaluar un pago capturado contra las reglas de umbral, velocity y volumen. |
-| **Subject** | Lo que disparó la alerta: `legal_name` (screening), `payment_id` (umbral) o el bucket de ventana (`velocity:<inicio>`, `volume:<moneda>:<inicio>`). Parte de la clave de idempotencia. |
+| **Subject** | Lo que disparó la alerta: `legal_name` (screening), `payment_id` (umbral) o el pago que cruzó una regla de ventana (`velocity:<payment_id>`, `volume:<moneda>:<payment_id>`). Parte de la clave de idempotencia. |
 | **Score** | Puntaje 0..100 de confianza/severidad; mapea a `RiskLevel` (≥90 high, ≥60 medium, resto low). |
 | **Proyección de pagos** | `aml_monitored_payments`: copia propia de cada `payment.captured.v1`, sobre la que cuentan las reglas de ventana. |
 | **Disposition** | Decisión sobre una alerta: `cleared` (falso positivo) o `confirmed` (verdadero positivo). En alertas four-eyes, la del primer analista es una **propuesta**. |
@@ -118,7 +120,7 @@ Archivo: [domain/alert.go](../../context/compliance/domain/alert.go)
 | `alertType` | `AlertType` | `sanctions_match` \| `transaction_threshold` \| `transaction_velocity` \| `transaction_volume`. |
 | `riskLevel` | `RiskLevel` | `low` \| `medium` \| `high`. |
 | `status` | `AlertStatus` | `open` \| `pending_second_approval` \| `cleared` \| `confirmed`. |
-| `subject` | `string` | `legal_name`, `payment_id` o bucket de ventana (§5.2). Clave de idempotencia junto a `(tenant, tipo)`. |
+| `subject` | `string` | `legal_name` o `payment_id` (con prefijo `velocity:`/`volume:<moneda>:` en reglas de ventana, §5.2). Clave de idempotencia junto a `(tenant, tipo)`. |
 | `score` | `int` | 0..100. |
 | `details` | `map[string]string` | Contexto (lista matched, monto, ventana, etc.). Se persiste como JSONB. |
 | `note` | `string` | Nota del analista que dispone o propone (viaja en `Resolve`). Se limpia si la propuesta se rechaza. |
@@ -203,7 +205,8 @@ Archivo: [domain/vo.go](../../context/compliance/domain/vo.go),
 | `RiskLevel` | `low`, `medium`, `high`. |
 | `AlertStatus` | `open`, `pending_second_approval`, `cleared`, `confirmed`. `ParseStatusFilter` valida el filtro de listado (`""` = sin filtro). |
 | `NormalizeName(s)` | NFD + descarta diacríticos, minúsculas, todo lo que no sea letra/dígito → espacio, espacios colapsados (`"Pérez-Gómez, S.A."` → `"perez gomez s a"`). Se usa al cargar la watchlist y al evaluar. Idempotente. La migración 000018 replica la regla en SQL. |
-| `MatchScore(entry, name)` | Por tokens completos: igualdad → 100, secuencia contigua → 90, todos los tokens en otro orden/intercalados → 80, si falta alguno → 0. |
+| `MatchScore(entry, name)` | Por tokens completos: igualdad → 100, secuencia contigua → 90, todos los tokens en otro orden/intercalados → 80. Si no, **difuso** (`domain/fuzzy.go`) → 70; si no, 0. |
+| Matching difuso | Cada token de la entrada debe coincidir con un token distinto del nombre: igual, a distancia Damerau-Levenshtein ≤ 1 (≤ 2 si ambos tienen ≥ 8 letras), o con la misma clave fonética (v/b/w/f, z/s, c/k/q, ll/y, ph/f, sh/ch, h muda, sin vocales internas). Tokens de < 4 letras solo exactos; entradas de un solo token nunca matchean difuso. Score 70 = `medium`: alerta con four-eyes, **nunca hold**. |
 | `NewWatchlistEntry(...)` | Valida `list_type ∈ {sanctions, pep}` y que el nombre conserve tokens tras normalizar; recorta espacios y pasa `country` a mayúsculas. |
 | `RiskFromScore(score)` | `≥90 → high`, `≥60 → medium`, resto `low`. |
 | `Match` | `{Entry WatchlistEntry, Score int}` — resultado del screening. |
@@ -244,6 +247,7 @@ Paquetes: [application/](../../context/compliance/application/)
 | `GetAlertUseCase` | `queries.go` | HTTP | `AlertView` de cualquier comercio | — |
 | `AddWatchlistEntryUseCase` | `queries.go` | HTTP (`compliance_officer`/`platform_support`) | Valida y crea entrada en `aml_watchlist` (global); retorna la vista | — |
 | `RemoveWatchlistEntryUseCase` | `queries.go` | HTTP (`compliance_officer`/`platform_support`) | Baja lógica (`removed_at`) | — |
+| `ImportWatchlistUseCase` | `import_watchlist.go` | HTTP (`compliance_officer`/`platform_support`) | Sincroniza una fuente con un feed (alta/reemplazo/baja), atómico, con `dry_run` | — |
 | `ListWatchlistUseCase` | `queries.go` | HTTP | `[]WatchlistEntryView` (limit default 100, máx 500) | — |
 
 Puertos ([application/ports.go](../../context/compliance/application/ports.go)):
@@ -271,22 +275,34 @@ Una sola alerta por aplicación aunque haya múltiples coincidencias.
 Reglas configurables vía `MonitoringRules` (inyectado desde `cmd/worker` con
 `DefaultMonitoringRules()`):
 
+**Hora del evento.** Todas las reglas se evalúan en `at` = hora real de la
+captura: el header `occurred-at` del mensaje, que el relay del outbox toma de
+la tx de Payment que capturó el pago. Si falta o es inválido, `at =
+clock.Now()`. Las alertas de monitoreo nacen con `created_at = at`, y procesar
+un backlog no altera las ventanas.
+
 Antes de evaluar, el pago se registra en `aml_monitored_payments`
 (`TransactionLog.Record`, `ON CONFLICT (payment_id) DO NOTHING`) con
-`captured_at = clock.Now()`. Las reglas de ventana cuentan sobre esa proyección.
+`captured_at = at`. Las reglas de ventana cuentan sobre esa proyección.
 
 | Regla | Condición | Alerta | Subject | Riesgo | Score |
 |---|---|---|---|---|---|
 | Umbral | `Amount ≥ ThresholdAmount` (default `1_000_000` centavos = $10.000) | `transaction_threshold` | `payment_id` | `medium` | `riskScoreForAmount`: `60 + (amount/threshold)*10`, tope 100; umbral ≤ 0 → 80 |
-| Velocity | `CountSince(now − VelocityWindow) ≥ VelocityCount` (default 10 pagos / 10 min, todas las monedas) | `transaction_velocity` | `velocity:<bucket>` | `high` | 90 fijo |
-| Volumen | `SumAmountSince(moneda del pago, now − VelocityWindow) ≥ VolumeAmount` (default `5_000_000` = $50.000; `0` desactiva) | `transaction_volume` | `volume:<moneda>:<bucket>` | `high` | `riskScoreForAmount(total, VolumeAmount)` |
+| Velocity | `CountInWindow(at − VelocityWindow, at) ≥ VelocityCount` (default 10 pagos / 10 min, todas las monedas) | `transaction_velocity` | `velocity:<payment_id>` | `high` | 90 fijo |
+| Volumen | `SumAmountInWindow(moneda del pago, at − VelocityWindow, at) ≥ VolumeAmount` (default `5_000_000` = $50.000; `0` desactiva) | `transaction_volume` | `volume:<moneda>:<payment_id>` | `high` | `riskScoreForAmount(total, VolumeAmount)` |
 
-`<bucket>` = `now.Truncate(VelocityWindow)` en RFC3339 (ventanas fijas). Como el
-subject es el bucket y no el pago, la unicidad `(tenant, tipo, subject)` deja
-**una sola alerta por tenant y ventana** para velocity/volumen: los pagos
-siguientes del mismo pico chocan con la constraint y son no-op. Una ráfaga que
-cruza el borde de dos buckets puede generar dos alertas. `VelocityWindow ≤ 0`
-desactiva ambas reglas de ventana.
+**Ventana deslizante** `(at − VelocityWindow, at]`: no hay buckets de reloj, así
+que una ráfaga se mide igual sin importar dónde caiga.
+
+**Cooldown** en lugar de bucket: `AlertRepository.SaveUnlessRecent` no inserta
+una alerta de velocity (o de volumen en esa moneda) si el tenant ya tiene otra
+del mismo tipo creada dentro de la ventana; un pico sostenido genera **una
+sola alerta**, y una nueva solo después de una ventana completa sin alertas.
+Dentro de la tx toma `pg_advisory_xact_lock(hashtextextended('aml_window:<tenant>:<prefijo>'))`
+antes de chequear, así dos pagos concurrentes del mismo tenant no duplican la
+alerta. Las re-entregas del mismo pago siguen siendo no-op por la unicidad
+`(tenant, tipo, subject)`. `VelocityWindow ≤ 0` desactiva ambas reglas de
+ventana.
 
 Detalles persistidos: threshold → `{payment_id, amount, currency, threshold,
 payment_method}`; velocity → `{payment_id, count, window, window_start,
@@ -366,6 +382,7 @@ el middleware `platformOperator` marca el contexto con
 | `GET` | `/compliance/watchlist?limit=` | Lista global de vigilancia (vigentes) | `compliance_officer`, `platform_support` | `200 {watchlist, count}` |
 | `POST` | `/compliance/watchlist` | Agregar entrada global | `compliance_officer`, `platform_support` | `201 WatchlistEntryView` |
 | `DELETE` | `/compliance/watchlist/:entryID` | Dar de baja una entrada | `compliance_officer`, `platform_support` | `204` |
+| `POST` | `/compliance/watchlist/import?source=&dry_run=` | Sincronizar una fuente completa con un feed CSV (§6.5) | `compliance_officer`, `platform_support` | `200 ImportWatchlistResult` |
 
 Parámetros de query: `limit` de `alerts` default 50 (≤0 o >200 → 50); el de
 `watchlist` default 100 (≤0 o >500 → 100). `status` acepta
@@ -434,6 +451,41 @@ respuesta `201` incluye la entrada creada (`id`, para darla de baja).
 Soft delete (`removed_at = now`): la entrada deja de participar del screening y
 del listado, pero la fila se conserva para que las alertas pasadas sigan siendo
 trazables. Inexistente, ya dada de baja o ID no UUID → `404`.
+
+### 6.5 Ingesta de feeds — `POST /compliance/watchlist/import`
+
+```
+POST /api/v1/compliance/watchlist/import?source=OFAC&dry_run=true
+Content-Type: text/csv
+
+external_ref,full_name,list_type,country
+SDN-36,Vladimir Petrov,sanctions,RU
+SDN-41,"Sokolov, Ivan",sanctions,RU
+```
+
+- **Formato**: CSV UTF-8 con encabezado; columnas en cualquier orden;
+  `external_ref`, `full_name` y `list_type` requeridas, `country` opcional. Se
+  tolera BOM. Máximo 32 MB (`413` si se excede).
+- **Semántica**: el feed **reemplaza a la fuente** (`source`, en mayúsculas).
+  `domain.PlanWatchlistSync` calcula el delta contra las entradas vigentes de
+  esa fuente con `external_ref`:
+  - `external_ref` nuevo → alta;
+  - existente con nombre/lista/país distintos → baja de la versión vieja + alta
+    de la nueva (las alertas pasadas siguen apuntando a la versión que las
+    disparó);
+  - vigente que el feed ya no trae → baja (`removed_at`).
+
+  Las entradas manuales (sin `external_ref`) no se tocan.
+- **Atómico**: todo en una tx. Cualquier fila inválida (ref vacía o duplicada,
+  `list_type` inválido, nombre sin letras) aborta el import completo →
+  `422 {"error", "problems": ["line 5: …", …]}` (hasta 20). Un feed sin filas
+  se rechaza: aplicarlo daría de baja la fuente entera. CSV mal formado → `400`.
+- **`dry_run=true`**: calcula y devuelve el resumen sin escribir.
+- **Respuesta**: `{"source","dry_run","added","updated","removed","unchanged"}`.
+  Reimportar el mismo archivo da todo `unchanged`.
+
+Unicidad: `uq_aml_watchlist_source_ref (source, external_ref)` parcial sobre
+las vigentes (migración 000022).
 
 ---
 
@@ -600,6 +652,16 @@ RLS: `aml_alerts` y `aml_monitored_payments`, con policy
 una tx previa). `aml_alerts` suma `aml_alerts_platform_operator` para la
 revisión cross-tenant (§9). `aml_watchlist` es global, sin RLS.
 
+**Retención de la proyección** (migración 000021): `ProjectionPurger`
+([application/purge_projection.go](../../context/compliance/application/purge_projection.go))
+corre en `cmd/worker` cada `DefaultPurgeInterval` (1 h, y una vez al arrancar)
+y borra en lotes de 5.000 los pagos con `captured_at` anterior a
+`DefaultProjectionRetention` (7 días). La retención nunca es menor que la
+ventana de las reglas. Como corre sin tenant, usa la política RLS
+`aml_monitored_payments_platform_operator`; con un rol sin `BYPASSRLS` la
+política por tenant no vería filas. **`aml_alerts` no se purga**: las alertas
+se conservan por exigencia normativa.
+
 Enforcement (contexto Auth, migración 000020): `tenant_compliance_holds
 (tenant_id FK tenants ON DELETE CASCADE, alert_id, placed_at, released_at)`,
 PK `(tenant_id, alert_id)`, índice parcial de holds vigentes. Sin RLS, como
@@ -620,10 +682,13 @@ idempotente).
 | `AlertRepository.Update` | `UPDATE aml_alerts SET status, note, resolved_at, resolved_by, proposed_*, approval_note WHERE id=$1 AND status=$2` (`$2` = estado previo) | Concurrencia optimista: 0 filas → `ErrAlertNotOpen`. |
 | `AlertRepository.FindByID` | `SELECT … WHERE id=$1` | `pgx.ErrNoRows` → `ErrAlertNotFound`. Corre con las variables RLS del ctx (`RunWithAppTenant`): operador en la API. |
 | `AlertRepository.List` | `[WHERE [tenant_id=$1] [AND status=$n]] ORDER BY created_at DESC LIMIT $n` | Cross-tenant con operador; con filtro de tenant fija además `app.current_tenant`. |
-| `WatchlistRepository.Screen` | `… WHERE removed_at IS NULL AND string_to_array(normalized_name,' ') <@ string_to_array($1,' ')` | Prefiltro por **conjunto de tokens** (GIN); el score lo asigna `domain.MatchScore`. |
+| `WatchlistRepository.Screen` | `… WHERE removed_at IS NULL AND (string_to_array(normalized_name,' ') <@ string_to_array($1,' ') OR normalized_name %> $2 OR …)` | Preselección por **conjunto de tokens** (GIN sobre el array) **o difusa**: la entrada contiene algo parecido a algún token (≥ 4 letras) del nombre, con `pg_trgm.word_similarity_threshold = 0.5` fijado localmente en la tx (GIN trigram, migración 000023). Red amplia: el puntaje y el descarte final los decide `domain.MatchScore`. ~5-10 ms con 50k entradas. |
+| `WatchlistRepository.ListActiveBySource` | `… WHERE removed_at IS NULL AND source=$1 AND external_ref IS NOT NULL` | Base del delta del import. Usa la tx del contexto (import atómico), igual que `Add`/`Remove`/`List`. |
 | `WatchlistRepository.Add/Remove/List` | `INSERT …` / `UPDATE … SET removed_at WHERE id=$1 AND removed_at IS NULL` / `SELECT … WHERE removed_at IS NULL ORDER BY full_name LIMIT $1` | Pool directo, sin tenant. `Remove` con 0 filas → `ErrWatchlistEntryNotFound`. |
 | `TransactionLog.Record` | `INSERT INTO aml_monitored_payments … ON CONFLICT (payment_id) DO NOTHING` | Dentro de `RunInTx` (tenant del evento). |
-| `TransactionLog.CountSince` / `SumAmountSince` | `SELECT COUNT(*)` / `COALESCE(SUM(amount),0) FROM aml_monitored_payments WHERE tenant_id=$1 [AND currency=$2] AND captured_at >= $n` | Proyección propia: Compliance ya no lee la tabla `payments`. |
+| `TransactionLog.CountInWindow` / `SumAmountInWindow` | `SELECT COUNT(*)` / `COALESCE(SUM(amount),0) FROM aml_monitored_payments WHERE tenant_id=$1 [AND currency=$2] AND captured_at > $since AND captured_at <= $until` | Ventana deslizante sobre la proyección propia. |
+| `TransactionLog.PurgeBefore` | `DELETE … WHERE payment_id IN (SELECT … WHERE captured_at < $1 LIMIT $2)` | Purga por lotes como operador de plataforma (índice `captured_at`). |
+| `AlertRepository.SaveUnlessRecent` | `pg_advisory_xact_lock(...)` + `EXISTS (… alert_type=$2 AND starts_with(subject,$3) AND created_at > $4)` + `INSERT` | Cooldown de reglas de ventana; reciente → `ErrDuplicateAlert` (no-op). |
 
 Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 
@@ -633,12 +698,30 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 | `Vladimir Petrov Holdings S.A.` | 90 (secuencia contigua) |
 | `Petrov, Vladimir` / `Vladimir Ivanovich Petrov` | 80 (tokens reordenados/intercalados → `medium`) |
 | `Vladímir Petróv` | 100 (acentos normalizados) |
-| `Vladimir Petrovsky` | sin match (token distinto) |
+| `Wladimir Petroff Holdings S.A.` / `Vladimir Petrof` | 70 (difuso: transliteración / typo) |
+| `Vladimir Petrovsky` | sin match (3 ediciones, clave fonética distinta) |
+
+Otros ejemplos difusos (score 70): `Mohamed Al Rashid` ↔ `Muhammad Al Rashid`,
+`Gonsales Martines` ↔ `Gonzalez Martinez`, `Kim Jong Traiding Co` ↔
+`Kim Jong Trading Co`. Calibrado contra PostgreSQL 16: `similarity` (simétrica)
+descarta razones sociales largas ("wladimir petroff holdings s a" = 0.31), por
+eso la preselección usa `word_similarity` por token.
 
 ---
 
 ## 9. Seguridad y multi-tenancy
 
+- **Alta de analistas**: los usuarios `compliance_officer` (y `platform_support`)
+  se crean con el CLI [`cmd/provision`](../../cmd/provision/main.go), nunca por
+  HTTP, en el tenant de la propia plataforma. Four-eyes requiere al menos dos:
+
+  ```bash
+  PROVISION_PASSWORD=... make provision TENANT=<uuid-tenant-plataforma> EMAIL=ana@plataforma.com
+  PROVISION_PASSWORD=... make provision TENANT=<uuid-tenant-plataforma> EMAIL=beto@plataforma.com
+  ```
+
+  La contraseña va por entorno (`PROVISION_PASSWORD`) o por stdin
+  (`-password-stdin`), nunca como argumento.
 - **La plataforma revisa a los comercios.** Alertas y watchlist son de uso
   interno: `compliance_officer` revisa (y es el único que dispone),
   `platform_support` puede leer y gestionar la watchlist. Ningún rol de tenant
@@ -665,12 +748,9 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
-| 1 | Hold solo por match exacto | Matches parciales (80/90) y reglas transaccionales no bloquean, aunque sean `high`; dependen de la revisión manual. Un payout iniciado antes del hold no se cancela. | Medio |
-| 2 | Provisión de analistas fuera de banda | No hay endpoint para dar de alta usuarios `compliance_officer` (igual que `platform_support`). Four-eyes requiere al menos dos. | Operativo |
-| 3 | Sin fuzzy/fonético | El matching por tokens cubre orden, acentos y puntuación, pero no errores de tipeo, transliteraciones ("Petrov"/"Petroff") ni abreviaturas. La réplica SQL de `NormalizeName` en 000018 solo cubre acentos latinos comunes. | Medio |
-| 4 | Ventanas fijas | Velocity/volumen se deduplican por bucket fijo (`Truncate`); un pico que cruza el borde genera dos alertas. `captured_at` de la proyección es la hora de procesamiento, no la del evento original. | Bajo |
-| 5 | Proyección sin retención | `aml_monitored_payments` crece sin purga; solo se consulta la última ventana. | Operativo |
-| 6 | Carga de listas oficiales | No hay proceso de importación OFAC/EU/UN; la watchlist se carga entrada por entrada por API. | Operativo |
+| 1 | **Riesgo aceptado** — Hold solo por match exacto | Decisión de diseño: matches parciales (90/80/70) y reglas transaccionales no bloquean aunque sean `high`, porque un bloqueo automático por homónimos frenaría comercios legítimos; quedan para revisión four-eyes. Un payout que ya estaba corriendo cuando se pone el hold no se cancela: el desembolso es sincrónico dentro del request, así que la ventana es de segundos y no deja payouts pendientes que el hold pueda frenar. | Aceptado |
+| 3 | Fonética simplificada, sin alias | La clave fonética está pensada para español y transliteraciones latinas de nombres rusos/árabes; no cubre otros alfabetos ni alias/AKA de las listas. La réplica SQL de `NormalizeName` (000018) solo cubre acentos latinos comunes. | Bajo |
+| 6 | Feeds oficiales en formato propio | La ingesta acepta un CSV propio: los archivos de OFAC/EU/UN hay que convertirlos a ese formato. No hay descarga automática programada. | Operativo |
 
 ---
 
@@ -678,7 +758,7 @@ Ejemplos del screening por tokens (entrada `"vladimir petrov"`):
 
 | Capa | Archivos | Tipo |
 |---|---|---|
-| Dominio | `domain/alert_test.go`, `events_test.go`, `vo_test.go`, `watchlist_test.go` | Unitarios: FSM four-eyes completo (propuesta, aprobación, rechazo, mismo analista), eventos `sanction.*` (solo lista sanciones, score 100), parseo de VOs, `NormalizeName`, `RiskFromScore`. |
+| Dominio | `domain/alert_test.go`, `events_test.go`, `vo_test.go`, `watchlist_test.go`, `fuzzy_test.go` | Unitarios: FSM four-eyes completo, eventos `sanction.*`, parseo de VOs, `NormalizeName`, `MatchScore` (tokens y difuso, positivos y negativos), clave fonética, Damerau-Levenshtein, `PlanWatchlistSync`. |
 | Aplicación | `application/screen_application_test.go`, `monitor_transaction_test.go`, `resolve_alert_test.go`, `queries_test.go` (+ `mocks_test.go`) | Unitarios con puertos en memoria/fake: mejor match y desempate a favor de sanciones, reglas de umbral/velocity/volumen, revisión cross-tenant, `UPDATE` condicional sobre el estado previo, idempotencia, mappers. |
 | HTTP inbound | `inbound/http/handler_test.go` | Handlers Gin con `httptest`: flujo four-eyes extremo a extremo, mapeo de errores, cada ruta detrás de su guard, middleware `platformOperator` (verifica `set_config('app.platform_operator','on')` con pgxmock). |
 | NATS inbound | `inbound/nats/event_consumer_test.go` | Configs de consumers (stream/filtro/MaxDeliver) y handlers con payloads válidos/malformados y errores nak/ack. |
@@ -694,7 +774,9 @@ Enforcement fuera de este BC: `context/auth/.../nats/compliance_consumer_test.go
 `context/payment/.../tenant/gate_test.go`, `context/payout/.../tenant/gate_test.go`.
 
 No hay tests de integración contra PostgreSQL real en este BC (todo mock). Las
-migraciones 000018 a 000020 se validaron up → down → up contra PostgreSQL 16;
+migraciones 000018 a 000023 se validaron up → down → up contra PostgreSQL 16;
+el import (delta, reimport idempotente) y el screening difuso (50k entradas,
+5-10 ms) se probaron contra PostgreSQL real;
 en 000019/000020 además se verificó RLS con un rol sin `BYPASSRLS` (tenant ve solo lo
 suyo, operador ve todo, sin variables 0 filas) y la semántica de place/release
 fuera de orden.
@@ -708,7 +790,8 @@ context/compliance/
 ├── domain/
 │   ├── alert.go          # Agregado Alert + FSM four-eyes + AlertSnapshot
 │   ├── vo.go             # IDs, AlertType, RiskLevel, AlertStatus, ParseDisposition, ParseStatusFilter
-│   ├── watchlist.go      # WatchlistEntry, NewWatchlistEntry, Match, NormalizeName, MatchScore, RiskFromScore
+│   ├── watchlist.go      # WatchlistEntry, NewWatchlistEntry, Match, NormalizeName, MatchScore, RiskFromScore, PlanWatchlistSync
+│   ├── fuzzy.go          # matching difuso: Damerau-Levenshtein, clave fonética, FuzzyCandidateTokens
 │   ├── events.go         # alert.{raised,resolved,review_proposed,proposal_rejected} + sanction.{matched,cleared,confirmed}
 │   └── errors.go         # errores sentinela
 ├── application/
@@ -718,10 +801,13 @@ context/compliance/
 │   ├── screen_application.go
 │   ├── monitor_transaction.go  # MonitoringRules + DefaultMonitoringRules + riskScoreForAmount
 │   ├── resolve_alert.go  # Resolve / ApproveProposal / RejectProposal (reviewer compartido)
+│   ├── import_watchlist.go   # ImportWatchlist: validación del feed + delta atómico
+│   ├── purge_projection.go   # ProjectionPurger (retención de aml_monitored_payments)
 │   └── raise.go          # helper tx: Save + Publish, idempotente ante ErrDuplicateAlert
 └── infrastructure/adapters/
     ├── inbound/
-    │   ├── http/handler.go            # ComplianceHandler + RouteGuards + platformOperator + RegisterRoutes (8 rutas)
+    │   ├── http/handler.go            # ComplianceHandler + RouteGuards + platformOperator + RegisterRoutes (9 rutas)
+    │   ├── http/watchlist_csv.go      # parser del feed CSV
     │   └── nats/event_consumer.go     # consumers ONBOARDING + PAYMENT
     └── outbound/postgres/
         ├── alert_repo.go              # AlertRepository (RLS-aware en tx)

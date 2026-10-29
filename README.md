@@ -261,10 +261,10 @@ Screening contra listas de vigilancia y monitoreo transaccional. Consume eventos
 
 **Reglas del MVP:**
 
-- **Screening** — al recibir `onboarding.application.submitted.v1`, compara el `legal_name` contra `aml_watchlist` (tokens completos, sin acentos ni puntuación). Match → alerta `sanctions_match`.
+- **Screening** — al recibir `onboarding.application.submitted.v1`, compara el `legal_name` contra `aml_watchlist` (tokens completos, sin acentos ni puntuación; y difuso para typos/transliteraciones con `pg_trgm`). Match → alerta `sanctions_match`.
 - **Umbral** — `payment.captured.v1` con `amount ≥ 10.000,00` → alerta `transaction_threshold`.
-- **Velocity** — ≥ 10 pagos capturados del tenant en 10 min → alerta `transaction_velocity` (una por ventana).
-- **Volumen** — ≥ 50.000,00 acumulados por moneda en la ventana → alerta `transaction_volume` (una por ventana y moneda).
+- **Velocity** — ≥ 10 pagos capturados del tenant en 10 min → alerta `transaction_velocity` (ventana deslizante con cooldown: una alerta por pico).
+- **Volumen** — ≥ 50.000,00 acumulados por moneda en la ventana → alerta `transaction_volume` (ídem, por moneda).
 
 Las reglas de ventana cuentan sobre una proyección propia (`aml_monitored_payments`), no sobre la tabla `payments`.
 
@@ -281,6 +281,7 @@ POST   /api/v1/compliance/alerts/:alertID/reject       Rechazar propuesta      [
 GET    /api/v1/compliance/watchlist                    Listar watchlist        [JWT + compliance_officer|platform_support]
 POST   /api/v1/compliance/watchlist                    Agregar entrada         [JWT + compliance_officer|platform_support]
 DELETE /api/v1/compliance/watchlist/:entryID           Dar de baja entrada     [JWT + compliance_officer|platform_support]
+POST   /api/v1/compliance/watchlist/import?source=&dry_run=  Sincronizar fuente (CSV) [JWT + compliance_officer|platform_support]
 ```
 
 ---
