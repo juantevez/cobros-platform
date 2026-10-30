@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 func TestEntryRepo_SaveAndFindByID(t *testing.T) {
@@ -104,4 +106,40 @@ func TestEntryRepo_DuplicateIdempotencyKey(t *testing.T) {
 		t.Fatalf("expected ErrEntryAlreadyExists, got %v", err)
 	}
 	_ = ctx
+}
+
+// Los postings se cargan en el orden en que se registraron (antes, por UUID).
+func TestEntryRepo_PreservesPostingOrder(t *testing.T) {
+	pool := requireDB(t)
+	tenantID := testTenantID(t)
+	a1 := seedAccount(t, pool, tenantID, domain.AccountTypeInTransit, "ARS")
+	a2 := seedAccount(t, pool, tenantID, domain.AccountTypeMerchantBalance, "ARS")
+	a3 := seedAccount(t, pool, tenantID, domain.AccountTypePlatformFees, "ARS")
+
+	entry, err := domain.NewJournalEntry(
+		domain.NewEntryID(), tenantID, "order-key", "orden", nil, time.Now().UTC(),
+		[]domain.PostingInput{
+			{AccountID: a1.ID(), Direction: domain.DirectionDebit, Amount: 100, Currency: "ARS"},
+			{AccountID: a2.ID(), Direction: domain.DirectionCredit, Amount: 70, Currency: "ARS"},
+			{AccountID: a3.ID(), Direction: domain.DirectionCredit, Amount: 30, Currency: "ARS"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build entry: %v", err)
+	}
+	entry.PullEvents()
+	if err := saveEntryTx(t, pool, tenantID, entry); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	ctx := pkgpostgres.WithTenantID(context.Background(), tenantID.String())
+	got, err := NewEntryRepository(pool).FindByID(ctx, entry.ID())
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	for i, p := range got.Postings() {
+		if p.ID() != entry.Postings()[i].ID() {
+			t.Fatalf("posting %d = %s, want %s", i, p.ID(), entry.Postings()[i].ID())
+		}
+	}
 }

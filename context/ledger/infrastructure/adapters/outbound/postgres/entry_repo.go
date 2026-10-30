@@ -58,11 +58,11 @@ func (r *pgEntryRepository) save(ctx context.Context, conn postgres.Conn, e *dom
 		return fmt.Errorf("entry repo: save entry: %w", err)
 	}
 
-	// Guardar los postings del entry.
-	for _, p := range e.Postings() {
+	// Guardar los postings del entry, con su posición para conservar el orden.
+	for i, p := range e.Postings() {
 		if _, err := conn.Exec(ctx, `
-			INSERT INTO postings (id, entry_id, tenant_id, account_id, direction, amount, currency)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			INSERT INTO postings (id, entry_id, tenant_id, account_id, direction, amount, currency, position)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			p.ID().String(),
 			e.ID().String(),
 			e.TenantID().String(),
@@ -70,6 +70,7 @@ func (r *pgEntryRepository) save(ctx context.Context, conn postgres.Conn, e *dom
 			p.Direction().String(),
 			p.Money().Amount(),
 			p.Money().Currency(),
+			i,
 		); err != nil {
 			return fmt.Errorf("entry repo: save posting %s: %w", p.ID(), err)
 		}
@@ -143,7 +144,7 @@ func (r *pgEntryRepository) scanEntryWithPostings(
 	// Cargar los postings del entry.
 	rows, err := conn.Query(ctx, `
 		SELECT id, account_id, direction, amount, currency
-		FROM postings WHERE entry_id = $1 ORDER BY id`,
+		FROM postings WHERE entry_id = $1 ORDER BY position`,
 		idStr,
 	)
 	if err != nil {
