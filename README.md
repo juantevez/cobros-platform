@@ -143,7 +143,7 @@ La documentación técnico-funcional de cada contexto (modelo, casos de uso, API
 | Payment Processing | Cobros contra PSP con evaluación de riesgo y comisión | [PAYMENT.md](docs/technical/PAYMENT.md) |
 | Payouts | Desembolsos del saldo del comercio a su banco | [PAYOUT.md](docs/technical/PAYOUT.md) |
 | Billing & Fees | Planes de tarifas, asignación por tenant y cálculo de comisión | [BILLING.md](docs/technical/BILLING.md) |
-| Reconciliation | Conciliación de registros internos contra fuentes externas, con gestión de discrepancias | *(pendiente)* |
+| Reconciliation | Conciliación de registros internos contra fuentes externas, con gestión de discrepancias | [RECONCILIATION.md](docs/technical/RECONCILIATION.md) |
 | Webhooks | Entrega de eventos a endpoints del comercio con reintentos | *(pendiente)* |
 | Notifications | Emails transaccionales con preferencias por tenant | [NOTIFICATION.md](docs/technical/NOTIFICATION.md) |
 | Disputes | Disputas y contracargos con impacto en Ledger | [DISPUTE.md](docs/technical/DISPUTE.md) |
