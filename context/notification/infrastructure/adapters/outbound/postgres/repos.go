@@ -25,8 +25,24 @@ func NewNotificationRepository(pool pkgpostgres.Conn) *pgNotificationRepository 
 	return &pgNotificationRepository{pool: pool}
 }
 
+// withTenant ejecuta fn con app.current_tenant fijado en la sesión (RLS):
+// las tablas de este contexto (y users/memberships de Auth, que lee el
+// ContactReader) aíslan por tenant con políticas RLS. Fuera de una
+// transacción, RunWithAppTenant abre una efímera para el SET LOCAL.
+func withTenant(ctx context.Context, pool pkgpostgres.Conn, tenantID string, fn func(context.Context, pkgpostgres.Conn) error) error {
+	ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, tenantID)
+	return pkgpostgres.RunWithAppTenant(ctx, pool, func(ctx context.Context) error {
+		return fn(ctx, pkgpostgres.ConnFromContext(ctx, pool))
+	})
+}
+
 func (r *pgNotificationRepository) Save(ctx context.Context, n *domain.Notification) error {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, n.TenantID().String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		return r.save(ctx, conn, n)
+	})
+}
+
+func (r *pgNotificationRepository) save(ctx context.Context, conn pkgpostgres.Conn, n *domain.Notification) error {
 	_, err := conn.Exec(ctx, `
 		INSERT INTO notifications
 			(id, tenant_id, event_type, channel, recipient_email,
@@ -58,15 +74,16 @@ func (r *pgNotificationRepository) ExistsByEventMsg(
 	if msgID == "" {
 		return false, nil
 	}
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
 	var exists bool
-	err := conn.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM notifications
-			WHERE tenant_id=$1 AND event_type=$2 AND nats_msg_id=$3
-		)`,
-		tenantID.String(), eventType, msgID,
-	).Scan(&exists)
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		return conn.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM notifications
+				WHERE tenant_id=$1 AND event_type=$2 AND nats_msg_id=$3
+			)`,
+			tenantID.String(), eventType, msgID,
+		).Scan(&exists)
+	})
 	if err != nil {
 		return false, fmt.Errorf("notification repo: exists by msg: %w", err)
 	}
@@ -74,7 +91,17 @@ func (r *pgNotificationRepository) ExistsByEventMsg(
 }
 
 func (r *pgNotificationRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Notification, error) {
-	rows, err := r.pool.Query(ctx, `
+	var notifs []*domain.Notification
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		var err error
+		notifs, err = r.list(ctx, conn, tenantID, limit)
+		return err
+	})
+	return notifs, err
+}
+
+func (r *pgNotificationRepository) list(ctx context.Context, conn pkgpostgres.Conn, tenantID domain.TenantID, limit int) ([]*domain.Notification, error) {
+	rows, err := conn.Query(ctx, `
 		SELECT id, tenant_id, event_type, channel, recipient_email,
 		       subject, status, COALESCE(error_msg,''), sent_at, created_at
 		FROM notifications
@@ -90,7 +117,7 @@ func (r *pgNotificationRepository) ListByTenant(ctx context.Context, tenantID do
 	var notifs []*domain.Notification
 	for rows.Next() {
 		var (
-			idStr, tenantIDStr, eventType, channelStr string
+			idStr, tenantIDStr, eventType, channelStr  string
 			recipientEmail, subject, statusStr, errMsg string
 			sentAt                                     *time.Time
 			createdAt                                  time.Time
@@ -120,8 +147,7 @@ func NewPreferenceRepository(pool pkgpostgres.Conn) *pgPreferenceRepository {
 
 // Upsert fija app.current_tenant en la sesión (RLS) antes de escribir.
 func (r *pgPreferenceRepository) Upsert(ctx context.Context, p *domain.NotificationPreference) error {
-	ctx = pkgpostgres.WithAppTenant(ctx, rlsTenantKey, p.TenantID().String())
-	return pkgpostgres.RunWithAppTenant(ctx, r.pool, func(ctx context.Context) error {
+	return withTenant(ctx, r.pool, p.TenantID().String(), func(ctx context.Context, _ pkgpostgres.Conn) error {
 		return r.upsert(ctx, p)
 	})
 }
@@ -148,18 +174,19 @@ func (r *pgPreferenceRepository) FindByTenantAndEvent(
 	tenantID domain.TenantID,
 	eventType string,
 ) (*domain.NotificationPreference, error) {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
 	var (
 		channelStr, recipientEmail string
 		enabled                    bool
 		updatedAt                  time.Time
 	)
-	err := conn.QueryRow(ctx, `
-		SELECT channel, enabled, COALESCE(recipient_email,''), updated_at
-		FROM notification_preferences
-		WHERE tenant_id=$1 AND event_type=$2 AND channel='email'`,
-		tenantID.String(), eventType,
-	).Scan(&channelStr, &enabled, &recipientEmail, &updatedAt)
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		return conn.QueryRow(ctx, `
+			SELECT channel, enabled, COALESCE(recipient_email,''), updated_at
+			FROM notification_preferences
+			WHERE tenant_id=$1 AND event_type=$2 AND channel='email'`,
+			tenantID.String(), eventType,
+		).Scan(&channelStr, &enabled, &recipientEmail, &updatedAt)
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrPreferenceNotFound
@@ -173,7 +200,17 @@ func (r *pgPreferenceRepository) FindByTenantAndEvent(
 }
 
 func (r *pgPreferenceRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID) ([]*domain.NotificationPreference, error) {
-	rows, err := r.pool.Query(ctx, `
+	var prefs []*domain.NotificationPreference
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		var err error
+		prefs, err = r.list(ctx, conn, tenantID)
+		return err
+	})
+	return prefs, err
+}
+
+func (r *pgPreferenceRepository) list(ctx context.Context, conn pkgpostgres.Conn, tenantID domain.TenantID) ([]*domain.NotificationPreference, error) {
+	rows, err := conn.Query(ctx, `
 		SELECT event_type, channel, enabled, COALESCE(recipient_email,''), updated_at
 		FROM notification_preferences
 		WHERE tenant_id=$1 ORDER BY event_type`,
@@ -209,17 +246,19 @@ func NewContactReader(pool pkgpostgres.Conn) *ContactReader { return &ContactRea
 
 func (r *ContactReader) GetTenantAdminEmail(ctx context.Context, tenantID string) (string, error) {
 	var email string
-	err := r.pool.QueryRow(ctx, `
-		SELECT u.email
-		FROM users u
-		JOIN memberships m ON m.user_id = u.id
-		WHERE m.tenant_id=$1
-		  AND m.role='admin'
-		  AND u.status='active'
-		ORDER BY m.created_at ASC
-		LIMIT 1`,
-		tenantID,
-	).Scan(&email)
+	err := withTenant(ctx, r.pool, tenantID, func(ctx context.Context, conn pkgpostgres.Conn) error {
+		return conn.QueryRow(ctx, `
+			SELECT u.email
+			FROM users u
+			JOIN memberships m ON m.user_id = u.id
+			WHERE m.tenant_id=$1
+			  AND m.role='admin'
+			  AND u.status='active'
+			ORDER BY m.created_at ASC
+			LIMIT 1`,
+			tenantID,
+		).Scan(&email)
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", domain.ErrNoRecipientEmail
