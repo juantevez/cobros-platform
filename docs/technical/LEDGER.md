@@ -260,7 +260,7 @@ C = crédito (suma al saldo), D = débito (resta del saldo), según `Apply`.
 
 ### 7.3 Lecturas directas de otros BCs
 
-[`payout/.../outbound/ledger/balance_checker.go`](../../context/payout/infrastructure/adapters/outbound/ledger/balance_checker.go) consulta `account_balances` ⨝ `ledger_accounts` (tipo `merchant_balance`) para validar el saldo antes de iniciar un payout: exige **saldo > 0 y ≥ monto**. Esto acopla Payout al esquema y a la **convención de signo** de Ledger.
+[`payout/.../outbound/ledger/balance_checker.go`](../../context/payout/infrastructure/adapters/outbound/ledger/balance_checker.go) consulta `account_balances` ⨝ `ledger_accounts` (tipo `merchant_balance`) para validar el saldo antes de iniciar un payout: exige **disponible > 0 y ≥ monto**. Como el débito de `payout.initiated.v1` llega de forma asíncrona, el disponible resta los payouts cuyo asiento (`ledger_entry_key`) todavía no está en `journal_entries`, salvo los fallidos. Lee con la conexión de la tx de Payout, que tiene el tenant fijado y el advisory lock. Esto acopla Payout al esquema y a la **convención de signo** de Ledger.
 
 ---
 
@@ -297,14 +297,14 @@ erDiagram
 
 | Tabla | Restricciones clave | RLS |
 |---|---|---|
-| `ledger_accounts` | `UNIQUE (tenant_id, type, currency)`; `CHECK type IN (…7 tipos)` desde la migración 000007 | Sí |
+| `ledger_accounts` | `UNIQUE (tenant_id, type, currency)`; `CHECK type IN (…7 tipos)` desde la migración 000007 | Sí (tenant + operador) |
 | `account_balances` | PK = `account_id`; `balance BIGINT` (puede ser negativo) | **No** (no tiene `tenant_id`) |
-| `journal_entries` | `UNIQUE (tenant_id, idempotency_key)`; índice `(tenant_id, created_at DESC)` | Sí |
-| `postings` | `amount > 0`; `direction IN ('debit','credit')`; FK a la cuenta (sin chequear el tenant) | Sí |
+| `journal_entries` | `UNIQUE (tenant_id, idempotency_key)`; índice `(tenant_id, created_at DESC)` | Sí (tenant + operador) |
+| `postings` | `amount > 0`; `direction IN ('debit','credit')`; FK a la cuenta (sin chequear el tenant) | Sí (tenant + operador) |
 
 **Trigger `trg_check_entry_balance`**: `CONSTRAINT TRIGGER … AFTER INSERT ON postings DEFERRABLE INITIALLY DEFERRED`. Al hacer COMMIT, por cada posting insertado recalcula Σ débitos y Σ créditos del asiento, y aborta la transacción si hay ≥ 2 postings y no balancean. Es la segunda línea de defensa, por si alguien inserta por fuera del dominio.
 
-Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDING.MD §10.2). Todo el aislamiento depende de las queries.
+**RLS** (migración 000037): cada tabla tiene dos políticas, aislamiento por `NULLIF(current_setting('app.current_tenant', true), '')::uuid` y operador de plataforma (`app.platform_operator = 'on'`, lectura cross-tenant). Los repos fijan el tenant en cada operación con `withTenant` ([rls.go](../../context/ledger/infrastructure/adapters/outbound/postgres/rls.go)): el del argumento, o el del caller en las búsquedas por ID. Dentro de una transacción lo fija el `TxManager` con el tenant del contexto; los consumers lo toman del payload. Sin tenant, las consultas devuelven 0 filas en lugar de fallar. Hoy la app conecta como owner y el RLS no filtra (ONBOARDING.MD §10.2), pero ya funciona con un rol sin `BYPASSRLS`.
 
 ---
 
@@ -320,15 +320,13 @@ Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDI
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Alta | Sobregiro por débito asíncrono | Payout serializa con un advisory lock la lectura del saldo y la creación del payout, pero el débito de `merchant_balance` llega después (outbox → consumer). Dos payouts seguidos antes de que corra el consumer leen el mismo saldo y ambos pasan. Se resuelve en Payout, descontando los payouts cuyo asiento aún no existe. |
-| 2 | Media | RLS sin tenant | Las políticas no usan `NULLIF` ni tienen política de operador, y ningún repo setea `app.current_tenant`. Hoy no filtra porque la app conecta como owner (ONBOARDING.MD §10.2); con un rol sin `BYPASSRLS`, toda query falla al castear `''` a `uuid`. |
-| 3 | Media | Idempotencia con carrera | Check-then-insert (§5.1): un duplicado concurrente → 500 en lugar de `was_existing`. Reusar una clave con otro contenido devuelve el asiento original sin avisar. `ErrEntryAlreadyExists` nunca se emite. |
-| 4 | Baja | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). |
-| 5 | Baja | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. |
-| 6 | Baja | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). |
-| 7 | Baja | `account_balances` sin `tenant_id` | Sin RLS propio: depende de que cada query haga join con `ledger_accounts` o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). |
-| 8 | Baja | Consumers poco estrictos | Una disputa con `outcome` desconocido se asienta como perdida. Un pago con neto ≤ 0 reintenta 5 veces un error permanente. Tras 5 fallos el mensaje se descarta sin registro. |
-| 9 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Un reembolso sale entero de `merchant_balance` (no se devuelven comisiones) y no hay reembolsos parciales. Sin control de sobregiro. Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
+| 1 | Media | Idempotencia con carrera | Check-then-insert (§5.1): un duplicado concurrente → 500 en lugar de `was_existing`. Reusar una clave con otro contenido devuelve el asiento original sin avisar. `ErrEntryAlreadyExists` nunca se emite. |
+| 2 | Baja | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). |
+| 3 | Baja | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. |
+| 4 | Baja | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). |
+| 5 | Baja | `account_balances` sin `tenant_id` | Sin RLS propio: depende de que cada query haga join con `ledger_accounts` o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). |
+| 6 | Baja | Consumers poco estrictos | Una disputa con `outcome` desconocido se asienta como perdida. Un pago con neto ≤ 0 reintenta 5 veces un error permanente. Tras 5 fallos el mensaje se descarta sin registro. |
+| 7 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Un reembolso sale entero de `merchant_balance` (no se devuelven comisiones) y no hay reembolsos parciales. Sin control de sobregiro. Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
 
 ---
 
@@ -339,7 +337,7 @@ Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDI
 | Dominio | `domain/*_test.go` | `Money`, invariantes de `JournalEntry`, `BuildReverse`, eventos. |
 | Aplicación | `application/*_test.go` | `CreateAccount` (incluye idempotencia y carrera), `PostEntry` (idempotencia, cuenta inexistente, cuenta de otro tenant, moneda distinta a la de la cuenta), `GetBalance` (aislamiento), `ReverseEntry`. |
 | HTTP | `inbound/http/*_test.go` | Handlers, router, `writeGuard` (403 en las escrituras; la lectura no se ve afectada), 404 cross-tenant y mapeo de errores. |
-| NATS | `inbound/nats/*_test.go` | Los 4 consumers con repos y casos de uso falsos, más redelivery y reintento parcial del consumer de Onboarding. `convention_test.go` encadena pago, reembolso, disputas y payouts y verifica el saldo de cada cuenta según `Apply`. |
+| NATS | `inbound/nats/*_test.go` | Los 4 consumers con repos y casos de uso falsos, más redelivery y reintento parcial del consumer de Onboarding. `convention_test.go` encadena pago, reembolso, disputas y payouts y verifica el saldo de cada cuenta según `Apply`, y que cada consumer ponga el tenant del payload en el contexto (RLS). |
 | Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`), incluido el mapeo de `23505` → `ErrAccountAlreadyExists`; se saltan si no hay DB. |
 
 ```bash
@@ -369,7 +367,7 @@ context/ledger/
 └── infrastructure/adapters/
     ├── inbound/http/  # router, account_handler, entry_handler, response
     ├── inbound/nats/  # onboarding, payment, payout, dispute consumers
-    └── outbound/postgres/  # account_repo, entry_repo, balance_repo
+    └── outbound/postgres/  # account_repo, entry_repo, balance_repo, rls (withTenant)
 ```
 
 Cableado:
