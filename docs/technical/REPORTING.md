@@ -2,8 +2,9 @@
 
 > **Bounded Context:** `context/reporting`
 > **Migraciones:** [`000013_reporting_init`](../../migrations/000013_reporting_init.up.sql),
-> [`000034_reporting_rls_nullif`](../../migrations/000034_reporting_rls_nullif.up.sql)
-> **Streams NATS consumidos:** `PAYMENT` (`payment.captured.>`), `LEDGER` (`ledger.entry.>`) — no publica eventos
+> [`000034_reporting_rls_nullif`](../../migrations/000034_reporting_rls_nullif.up.sql),
+> [`000035_reporting_payment_adjustments`](../../migrations/000035_reporting_payment_adjustments.up.sql)
+> **Streams NATS consumidos:** `PAYMENT` (`payment.>`), `LEDGER` (`ledger.entry.>`), `DISPUTE` (`dispute.resolved.>`) — no publica eventos
 > **Lee tablas de otros BCs:** `ledger_accounts` (Ledger)
 
 ---
@@ -16,7 +17,8 @@ agrega al momento de consultar.
 
 Responsabilidades:
 
-1. Proyectar cada pago capturado como un hecho (`report_payment_fact`).
+1. Proyectar cada pago capturado como un hecho (`report_payment_fact`), y cada reembolso y
+   contracargo como un ajuste (`report_payment_adjustment`).
 2. Proyectar cada posting de un asiento del Ledger, incluidas las reversas, como un movimiento
    (`report_ledger_movement`), con el tipo de cuenta denormalizado.
 3. Responder tres consultas del tenant autenticado: volumen transaccional por período, comisiones
@@ -24,7 +26,7 @@ Responsabilidades:
 
 ### Fuera de alcance (hoy)
 
-- Reembolsos, disputas, payouts y pagos fallidos: no se proyectan (ver §10).
+- Payouts y pagos fallidos: no se proyectan.
 - Reportes de plataforma (cross-tenant) y exportación (CSV, PDF).
 - Saldos a una fecha de corte: los saldos son siempre el acumulado total.
 
@@ -38,7 +40,8 @@ Responsabilidades:
 | **Proyección** | Traducción de un evento de dominio a hechos del read-model. |
 | **Bucket** | Intervalo de la serie de volumen: día, semana o mes (`date_trunc`). |
 | **Volumen** | Cantidad de pagos y monto bruto capturado, por bucket y moneda. |
-| **Revenue** | Monto bruto, comisión de la plataforma y comisión del PSP, por moneda y período. |
+| **Ajuste** | Dinero que sale de un pago ya capturado: un **reembolso** (`payment.refunded.v1`) o un **contracargo** (disputa perdida, aceptada o vencida). |
+| **Revenue** | Bruto capturado, comisiones, reembolsos, contracargos y neto (bruto − reembolsos − contracargos), por moneda y período. |
 | **Saldo** (*balance*) | Débitos, créditos y neto por tipo de cuenta y moneda, sumando todos los movimientos del tenant. |
 
 ---
@@ -47,24 +50,39 @@ Responsabilidades:
 
 ```mermaid
 flowchart TD
-    P[Payment: payment.captured.v1] --> C1[reporting-payment-consumer]
+    P[Payment: payment.captured.v1 y refunded.v1] --> C1[reporting-payment-consumer]
+    D[Dispute: dispute.resolved.v1] --> C3[reporting-dispute-consumer]
     L[Ledger: ledger.entry.posted.v1 y entry.reversed.v1] --> C2[reporting-ledger-consumer]
     C1 --> UC[ProjectEventsUseCase]
     C2 --> UC
+    C3 --> UC
     UC -->|tipo de cuenta por posting| AR[(ledger_accounts)]
     UC -->|INSERT ... ON CONFLICT DO NOTHING| F[(report_payment_fact)]
     UC -->|INSERT ... ON CONFLICT DO NOTHING| M[(report_ledger_movement)]
+    UC -->|INSERT ... ON CONFLICT DO NOTHING| A[(report_payment_adjustment)]
     API[GET /api/v1/reports/*] --> Q[GetReportsUseCase]
     Q -->|SUM, COUNT, date_trunc| F
+    Q -->|reembolsos y contracargos| A
     Q -->|SUM FILTER por dirección| M
 ```
 
-- **Escritura (worker):** dos consumers durables. Cada evento se traduce a hechos y se inserta
+- **Escritura (worker):** tres consumers durables. Cada evento se traduce a hechos y se inserta
   de forma idempotente.
 - **Reversas:** el Ledger no emite `entry.posted` para una reversa sino `ledger.entry.reversed.v1`,
   que trae los postings de la reversa (los del original con la dirección invertida). Se proyectan
   como cualquier asiento, bajo el `reverse_entry_id`, y compensan al original en los saldos.
 - **Lectura (API):** las métricas se calculan en cada consulta; no hay contadores precalculados.
+
+### Reembolsos y contracargos
+
+- **Reembolso:** total y único por pago (Payment pasa `captured` → `refunded` una sola vez), con
+  el monto del evento. Clave: el `payment_id`.
+- **Contracargo:** `dispute.resolved.v1` con resultado `lost`, `accepted` o `expired`. Clave: el
+  `dispute_id`. Una disputa ganada no mueve dinero y no genera hecho. Un resultado desconocido se
+  descarta como hecho inválido.
+- Cada ajuste cuenta en el período en que ocurrió: un reembolso de octubre de un pago de
+  septiembre resta en octubre.
+- Las comisiones no se ajustan: ningún contexto modela hoy la devolución de comisiones.
 
 ### Por qué hechos y no contadores
 
@@ -88,6 +106,7 @@ en el período correcto. Si el header falta o es inválido, se usa el reloj del 
 |---|---|---|---|
 | `PaymentFact` | `payment.captured.v1` | `payment_id` | `tenant_id`, `currency`, `amount` (bruto), `platform_fee`, `psp_fee`, `payment_method`, `captured_at` |
 | `LedgerMovement` | `ledger.entry.posted.v1` y `ledger.entry.reversed.v1`, un hecho por posting | `(entry_id, account_id, direction)` (en una reversa, `entry_id` = `reverse_entry_id`) | `tenant_id`, `account_type`, `currency`, `amount` (siempre > 0), `posted_at` |
+| `PaymentAdjustment` | `payment.refunded.v1` (`refund`), `dispute.resolved.v1` perdida/aceptada/vencida (`chargeback`) | `(kind, source_id)`: `payment_id` o `dispute_id` | `payment_id`, `tenant_id`, `currency`, `amount`, `occurred_at` |
 
 Montos en centavos.
 
@@ -96,7 +115,7 @@ Montos en centavos.
 | Vista | Campos |
 |---|---|
 | `VolumePoint` | `bucket`, `currency`, `payment_count`, `gross_amount` |
-| `RevenueSummary` | `currency`, `payment_count`, `gross_amount`, `platform_fees`, `psp_fees` |
+| `RevenueSummary` | `currency`, `payment_count`, `gross_amount`, `platform_fees`, `psp_fees`, `refund_count`, `refunded_amount`, `chargeback_count`, `chargeback_amount`, `net_amount` |
 | `TenantBalance` | `account_type`, `currency`, `debits`, `credits`, `net` = `debits - credits` |
 
 `Granularity`: `day` (default si viene vacío), `week`, `month`. `ParseGranularity` valida.
@@ -105,7 +124,7 @@ Montos en centavos.
 
 | Error | Uso |
 |---|---|
-| `ErrInvalidFact` | Evento sin `tenant_id` o sin ID. Es permanente: el consumer lo descarta (ack) y lo loguea. |
+| `ErrInvalidFact` | Evento sin `tenant_id` o sin ID, o disputa con resultado desconocido. Es permanente: el consumer lo descarta (ack) y lo loguea. |
 | `ErrInvalidRange` | `from` posterior a `to` → 400. |
 
 ---
@@ -116,8 +135,10 @@ Montos en centavos.
 |---|---|
 | `ProjectEventsUseCase.ProjectPaymentCaptured` | Valida `payment_id` y `tenant_id` y guarda el `PaymentFact`. |
 | `ProjectEventsUseCase.ProjectEntryPosted` | Valida `entry_id` y `tenant_id`; por cada posting con cuenta, busca el tipo de cuenta en `ledger_accounts` (con el tenant del evento) y guarda el `LedgerMovement`. Una cuenta inexistente se proyecta con tipo vacío. Lo usan los asientos y las reversas. |
-| `GetReportsUseCase.GetVolume` | Valida el rango y delega la serie agregada. |
-| `GetReportsUseCase.GetRevenue` | Valida el rango y delega el resumen por moneda. |
+| `ProjectEventsUseCase.ProjectPaymentRefunded` | Valida `payment_id` y `tenant_id` y guarda el ajuste `refund`. |
+| `ProjectEventsUseCase.ProjectDisputeResolved` | Valida IDs y tenant; si el resultado es `lost`/`accepted`/`expired` guarda el ajuste `chargeback`; si es `won`, nada. |
+| `GetReportsUseCase.GetVolume` | Valida el rango y delega la serie agregada (bruto capturado). |
+| `GetReportsUseCase.GetRevenue` | Valida el rango y delega el resumen por moneda: capturas del período y ajustes del período, unidos por moneda (una moneda con solo ajustes aparece con bruto cero). |
 | `GetReportsUseCase.GetBalances` | Delega los saldos del tenant (sin rango). |
 
 Los postings de un asiento se insertan uno por uno, sin transacción. Si uno falla, el evento se
@@ -129,12 +150,13 @@ reintenta completo; los que ya estaban se ignoran por la clave natural.
 
 Grupo `protected` (JWT) → `/api/v1/reports`. El tenant sale del token. Todas las rutas exigen el
 permiso `reports:read` (`RouteGuards.Read`, inyectado desde `cmd/api`; `RegisterRoutes` entra en
-pánico sin él): sin permiso → 403.
+pánico sin él): sin permiso → 403. Un token sin tenant (p. ej. un usuario de plataforma) → 403
+`tenant required`.
 
 | Método | Ruta | Respuesta | Códigos |
 |---|---|---|---|
 | `GET` | `/volume?from=&to=&granularity=day` | `{granularity, points:[VolumePoint]}` | 200 · 400 · 401 · 403 · 500 |
-| `GET` | `/revenue?from=&to=` | `{revenue:[RevenueSummary]}` | 200 · 400 · 401 · 403 · 500 |
+| `GET` | `/revenue?from=&to=` | `{revenue:[RevenueSummary]}` (bruto, comisiones, reembolsos, contracargos, neto) | 200 · 400 · 401 · 403 · 500 |
 | `GET` | `/balances` | `{balances:[TenantBalance]}` | 200 · 401 · 403 · 500 |
 
 - `from` y `to` en RFC3339, opcionales. Rango semiabierto `[from, to)`: períodos contiguos no
@@ -150,8 +172,9 @@ pánico sin él): sin permiso → 403.
 
 | Consumer | Stream | Filtro | Proyección |
 |---|---|---|---|
-| `reporting-payment-consumer` | `PAYMENT` | `payment.captured.>` | `payment.captured.v1` → `PaymentFact` |
+| `reporting-payment-consumer` | `PAYMENT` | `payment.>` | `payment.captured.v1` → `PaymentFact`; `payment.refunded.v1` → ajuste `refund` |
 | `reporting-ledger-consumer` | `LEDGER` | `ledger.entry.>` | `ledger.entry.posted.v1` y `ledger.entry.reversed.v1` → `LedgerMovement` por posting |
+| `reporting-dispute-consumer` | `DISPUTE` | `dispute.resolved.>` | `dispute.resolved.v1` perdida/aceptada/vencida → ajuste `chargeback` |
 
 `MaxDeliver: 5`. Semántica de ack:
 
@@ -159,7 +182,8 @@ pánico sin él): sin permiso → 403.
 |---|---|
 | Proyección OK, o hecho ya existente | ack |
 | Payload ilegible o sin `tenant_id` | ack, sin log |
-| `ErrInvalidFact` (falta el ID) | ack + warn |
+| `ErrInvalidFact` (falta el ID, resultado de disputa desconocido) | ack + warn |
+| Disputa ganada | ack, sin hecho |
 | Reversa sin postings (publicada antes de que el evento los llevara) | ack + warn: no se proyecta |
 | Error de base u otro transitorio | nak → reintento |
 | Otro subject del filtro | ack silencioso |
@@ -178,9 +202,10 @@ Migración `000013_reporting_init`:
 |---|---|---|
 | `report_payment_fact` | PK `payment_id` | `(tenant_id, captured_at)` |
 | `report_ledger_movement` | PK `(entry_id, account_id, direction)`; `CHECK direction IN ('debit','credit')` | `(tenant_id, account_type, currency)` |
+| `report_payment_adjustment` (`000035`) | PK `(kind, source_id)`; `CHECK kind IN ('refund','chargeback')` | `(tenant_id, occurred_at)` |
 
-Ambas tienen RLS por `tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid`
-(`000034`). Cada método de los repositorios y del `AccountReader` corre en una sesión con
+Las tres tienen RLS por `tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid`
+(`000034`, `000035`). Cada método de los repositorios y del `AccountReader` corre en una sesión con
 `app.current_tenant` fijado (`withTenant` → `RunWithAppTenant`): las escrituras con el tenant del
 hecho y las consultas con el del token.
 
@@ -201,14 +226,12 @@ hecho y las consultas con el del token.
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Signo del neto | `net = debits - credits`, al revés que el saldo del Ledger (`credits - debits`). El mismo saldo sale con signo opuesto en `/ledger` y en `/reports/balances`. No se puede alinear solo de este lado: la convención del propio Ledger es inconsistente (los consumers debitan `merchant_balance` cuando el comercio gana, ver [LEDGER.md §10.3](LEDGER.md)), y hoy el neto de Reporting es el que da positivo para el comercio. Se resuelve junto con ese punto. |
-| 2 | Media | Reembolsos y disputas | `payment.refunded.v1` y `dispute.*` no se proyectan: volumen y revenue siguen contando el bruto y las comisiones de pagos reembolsados o contracargados. |
-| 3 | Media | Sin tenant → 500 | El handler ignora si hay tenant en el contexto; con tenant vacío la consulta falla por UUID inválido y responde 500 en lugar de 401/403. |
-| 4 | Baja | Zona horaria | Los buckets de `day`/`week`/`month` se cortan en UTC; para un comercio en Argentina el "día" empieza a las 21:00. No hay parámetro de zona. |
-| 5 | Baja | Descartes silenciosos | Un payload ilegible o sin tenant se descarta sin log. Una cuenta que no se encuentra se proyecta con `account_type` vacío sin aviso, y su saldo aparece bajo un tipo vacío. |
-| 6 | Baja | Consultas sin tope | Sin `from`/`to` se agrega todo el histórico; con `granularity=day` sobre años, la serie no tiene límite de puntos. |
-| 7 | Baja | Comentarios desactualizados | La migración describe `captured_at`/`posted_at` como "momento de proyección"; hoy son la hora del evento. |
-| 8 | Producto | Alcance | Saldos sin fecha de corte. Sin métricas de payouts, pagos fallidos ni tasa de aprobación. Sin reportes de plataforma ni exportación. |
+| 1 | Media | Signo del neto | `net = debits - credits`; el saldo del Ledger es `credits - debits`, así que el mismo saldo sale con signo opuesto en `/ledger` y en `/reports/balances`. El neto de Reporting es coherente con cómo asientan los consumers del Ledger (sobre `merchant_balance`, un pago capturado es débito y un payout es crédito): el que está al revés es el saldo del Ledger, y por eso Payout rechazaría todo payout ([LEDGER.md §10.3](LEDGER.md)). Se resuelve en el Ledger; después Reporting expone el neto según la naturaleza de cada cuenta. |
+| 2 | Baja | Zona horaria | Los buckets de `day`/`week`/`month` se cortan en UTC; para un comercio en Argentina el "día" empieza a las 21:00. No hay parámetro de zona. |
+| 3 | Baja | Descartes silenciosos | Un payload ilegible o sin tenant se descarta sin log. Una cuenta que no se encuentra se proyecta con `account_type` vacío sin aviso, y su saldo aparece bajo un tipo vacío. |
+| 4 | Baja | Consultas sin tope | Sin `from`/`to` se agrega todo el histórico; con `granularity=day` sobre años, la serie no tiene límite de puntos. |
+| 5 | Baja | Comentarios desactualizados | La migración describe `captured_at`/`posted_at` como "momento de proyección"; hoy son la hora del evento. |
+| 6 | Producto | Alcance | Saldos sin fecha de corte. Sin métricas de payouts, pagos fallidos ni tasa de aprobación. Sin reportes de plataforma ni exportación. |
 
 ---
 
@@ -218,15 +241,16 @@ hecho y las consultas con el del token.
 
 | Paquete | Enfoque |
 |---|---|
-| `domain` | `ParseGranularity` (vacío → `day`, valores inválidos), contrato JSON de las vistas, errores. |
-| `application` | Proyección con fakes: validación de IDs, fecha del hecho desde el evento o el reloj, tipo de cuenta por posting con el tenant del evento, postings sin cuenta, errores del writer y del lector; consultas con validación de rango. |
-| `http` | Parseo de `from`/`to` y `granularity`, 400 por formato o rango, 500 sin detalle interno, guard en cada ruta y pánico sin guard. |
-| `nats` | Traducción de cada payload (incluida la reversa bajo `reverse_entry_id`), header `occurred-at`, ack/nak según el error, reversa sin postings, subjects ajenos. |
-| `postgres` | pgxmock: SQL idempotente de cada inserción y cada consulta dentro de la sesión RLS, error al fijar la sesión, armado del `WHERE` con rango semiabierto, agregaciones y cálculo del neto. |
+| `domain` | `ParseGranularity` (vacío → `day`, valores inválidos), contrato JSON de las vistas (incluidos ajustes y neto), tipos de ajuste, errores. |
+| `application` | Proyección con fakes: validación de IDs, fecha del hecho desde el evento o el reloj, tipo de cuenta por posting con el tenant del evento, postings sin cuenta, reembolsos, contracargos por resultado de disputa (y ganada sin hecho), errores del writer y del lector; consultas con validación de rango. |
+| `http` | Parseo de `from`/`to` y `granularity`, 400 por formato o rango, 403 sin tenant, 500 sin detalle interno, guard en cada ruta y pánico sin guard. |
+| `nats` | Traducción de cada payload (incluidos la reversa bajo `reverse_entry_id`, el reembolso y la disputa), configuración de los tres consumers, header `occurred-at`, ack/nak según el error, reversa sin postings, subjects ajenos. |
+| `postgres` | pgxmock: SQL idempotente de cada inserción y cada consulta dentro de la sesión RLS, error al fijar la sesión, armado del `WHERE` con rango semiabierto, revenue con capturas y ajustes por moneda, agregaciones y cálculo de los netos. |
 
 La RLS se verificó además contra Postgres con un rol sin `BYPASSRLS`: proyección de un pago (con
 re-entrega), un asiento y su reversa, tipo de cuenta resuelto, saldos compensados y aislamiento
-entre tenants. Esa prueba no está automatizada.
+entre tenants; y el revenue con reembolsos, contracargos (por período), re-entregas, disputa
+ganada y una moneda con solo ajustes. Esas pruebas no están automatizadas.
 
 ---
 
@@ -235,16 +259,16 @@ entre tenants. Esa prueba no está automatizada.
 ```
 context/reporting/
 ├── domain/
-│   ├── facts.go            # PaymentFact, LedgerMovement (hechos inmutables)
+│   ├── facts.go            # PaymentFact, LedgerMovement, PaymentAdjustment (hechos inmutables)
 │   ├── views.go            # Granularity, VolumePoint, RevenueSummary, TenantBalance
 │   └── errors.go           # ErrInvalidFact, ErrInvalidRange
 ├── application/
 │   ├── ports.go            # ProjectionWriter, AccountTypeReader, ReportReader, queries
-│   ├── project_events.go   # ProjectEventsUseCase (+ Clock)
+│   ├── project_events.go   # ProjectEventsUseCase: pagos, asientos, reembolsos, contracargos (+ Clock)
 │   └── get_reports.go      # GetReportsUseCase
 └── infrastructure/adapters/
     ├── inbound/http/handler.go          # 3 endpoints, RouteGuards, RegisterRoutes
-    ├── inbound/nats/event_consumer.go   # 2 consumers (pagos; asientos y reversas), payloads, ack/nak
+    ├── inbound/nats/event_consumer.go   # 3 consumers (pagos y reembolsos; asientos y reversas; disputas), ack/nak
     └── outbound/postgres/
         ├── projection_repo.go           # inserciones idempotentes
         ├── report_repo.go               # agregaciones (Volume, Revenue, Balances)
