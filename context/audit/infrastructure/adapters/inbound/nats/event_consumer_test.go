@@ -112,6 +112,7 @@ func TestMapEvent(t *testing.T) {
 		{"compliance.alert.review_proposed.v1", "compliance.alert.review_proposed", "aml_alert", "al-1", "system"},
 		{"compliance.sanction.matched.v1", "compliance.sanction.matched", "aml_alert", "al-1", "system"},
 		{"reconciliation.run.completed.v1", "reconciliation.run.completed", "reconciliation_run", "run-1", "system"},
+		{"reconciliation.discrepancy.resolved.v1", "reconciliation.discrepancy.resolved", "reconciliation_discrepancy", "disc-1", "op-1"},
 	}
 
 	payload := []byte(`{
@@ -119,6 +120,7 @@ func TestMapEvent(t *testing.T) {
 		"assigned_by":"admin-1","application_id":"app-1","payment_id":"pay-1","payout_id":"po-1",
 		"plan_id":"plan-1","tenant_plan_id":"tp-1","dispute_id":"dis-1","endpoint_id":"ep-1",
 		"alert_id":"al-1","run_id":"run-1","amount":1500,
+		"discrepancy_id":"disc-1","resolved_by":"op-1","status":"ignored",
 		"reverse_entry_id":"rev-1","original_entry_id":"ent-0"
 	}`)
 
@@ -144,6 +146,13 @@ func TestMapEvent(t *testing.T) {
 	t.Run("reversal keeps the original entry in metadata", func(t *testing.T) {
 		ev, _ := mapEvent(&eventbus.Message{Subject: "ledger.entry.reversed.v1", Payload: payload})
 		if ev.Metadata["original_entry_id"] != "ent-0" {
+			t.Errorf("metadata = %+v", ev.Metadata)
+		}
+	})
+
+	t.Run("discrepancy resolution keeps run and status in metadata", func(t *testing.T) {
+		ev, _ := mapEvent(&eventbus.Message{Subject: "reconciliation.discrepancy.resolved.v1", Payload: payload})
+		if ev.Metadata["run_id"] != "run-1" || ev.Metadata["status"] != "ignored" {
 			t.Errorf("metadata = %+v", ev.Metadata)
 		}
 	})

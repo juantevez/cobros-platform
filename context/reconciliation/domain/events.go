@@ -42,3 +42,19 @@ type ReconciliationCompletedEvent struct {
 func (e ReconciliationCompletedEvent) EventType() string {
 	return "reconciliation.run.completed.v1"
 }
+
+// DiscrepancyResolvedEvent se emite cuando un operador resuelve o ignora una
+// discrepancia (Status distingue resolved de ignored). Lo consume Audit.
+type DiscrepancyResolvedEvent struct {
+	baseEvent
+	DiscrepancyID string `json:"discrepancy_id"`
+	RunID         string `json:"run_id"`
+	TenantID      string `json:"tenant_id"`
+	Type          string `json:"type"`
+	Status        string `json:"status"`
+	ResolvedBy    string `json:"resolved_by"`
+}
+
+func (e DiscrepancyResolvedEvent) EventType() string {
+	return "reconciliation.discrepancy.resolved.v1"
+}

@@ -8,13 +8,16 @@ import (
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 )
 
-// ResolveDiscrepancyUseCase permite al operador resolver o ignorar una discrepancia.
+// ResolveDiscrepancyUseCase permite al operador resolver o ignorar una
+// discrepancia. El cambio y su evento se escriben en la misma transacción.
 type ResolveDiscrepancyUseCase struct {
 	discrepancyRepo DiscrepancyRepository
+	txManager       TxManager
+	publisher       EventPublisher
 }
 
-func NewResolveDiscrepancyUseCase(repo DiscrepancyRepository) *ResolveDiscrepancyUseCase {
-	return &ResolveDiscrepancyUseCase{discrepancyRepo: repo}
+func NewResolveDiscrepancyUseCase(repo DiscrepancyRepository, txManager TxManager, publisher EventPublisher) *ResolveDiscrepancyUseCase {
+	return &ResolveDiscrepancyUseCase{discrepancyRepo: repo, txManager: txManager, publisher: publisher}
 }
 
 func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDiscrepancyCmd) error {
@@ -49,7 +52,12 @@ func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDis
 		return fmt.Errorf("invalid action %q: must be 'resolve' or 'ignore'", cmd.Action)
 	}
 
-	return uc.discrepancyRepo.Update(ctx, d)
+	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.discrepancyRepo.Update(ctx, d); err != nil {
+			return err
+		}
+		return uc.publisher.Publish(ctx, d.PullEvents()...)
+	})
 }
 
 // ── GetReport ─────────────────────────────────────────────────────────────────

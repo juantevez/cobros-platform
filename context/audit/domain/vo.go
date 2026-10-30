@@ -67,6 +67,7 @@ const (
 	ResourceWebhookEndpoint   ResourceType = "webhook_endpoint"
 	ResourceAMLAlert          ResourceType = "aml_alert"
 	ResourceReconciliationRun ResourceType = "reconciliation_run"
+	ResourceDiscrepancy       ResourceType = "reconciliation_discrepancy"
 	ResourceEvent             ResourceType = "event" // evento sin mapeo (resource_id = event_id)
 )
 
@@ -76,7 +77,7 @@ func ParseResourceType(s string) (ResourceType, error) {
 	case ResourceTenant, ResourceUser, ResourceApiKey, ResourceEntry, ResourceAccount,
 		ResourceApplication, ResourcePayment, ResourcePayout, ResourceBillingPlan,
 		ResourceTenantPlan, ResourceDispute, ResourceWebhookEndpoint, ResourceAMLAlert,
-		ResourceReconciliationRun, ResourceEvent:
+		ResourceReconciliationRun, ResourceDiscrepancy, ResourceEvent:
 		return rt, nil
 	}
 	return "", fmt.Errorf("%w: %q", ErrInvalidResourceType, s)

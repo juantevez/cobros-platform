@@ -322,7 +322,7 @@ func main() {
 	startRun := reconciliationapp.NewStartReconciliationUseCase(runRepo)
 	processReport := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, reconcPub)
 	processInternal := reconciliationapp.NewProcessInternalUseCase(runRepo, discrepancyRepo, ledgerChecker, reconcPub)
-	resolveDisc := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo)
+	resolveDisc := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo, txManager, reconcPub)
 	getReport := reconciliationapp.NewGetReportUseCase(runRepo, discrepancyRepo)
 	listRuns := reconciliationapp.NewListRunsUseCase(runRepo)
 

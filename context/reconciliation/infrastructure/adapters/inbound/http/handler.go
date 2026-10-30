@@ -170,7 +170,8 @@ func (h *ReconciliationHandler) ProcessInternal(c *gin.Context) {
 	c.Status(http.StatusAccepted)
 }
 
-// ResolveDiscrepancy resuelve o ignora una discrepancia.
+// ResolveDiscrepancy resuelve o ignora una discrepancia. Queda firmada por el
+// usuario autenticado (actor del contexto), nunca por un dato del body.
 //
 //	POST /api/v1/reconciliation/discrepancies/:discrepancyID/resolve
 func (h *ReconciliationHandler) ResolveDiscrepancy(c *gin.Context) {
@@ -178,26 +179,28 @@ func (h *ReconciliationHandler) ResolveDiscrepancy(c *gin.Context) {
 	if !ok {
 		return
 	}
+
 	var req struct {
-		Action     string `json:"action"      binding:"required"` // "resolve" | "ignore"
-		ResolvedBy string `json:"resolved_by" binding:"required"`
-		Notes      string `json:"notes"`
+		Action string `json:"action" binding:"required"` // "resolve" | "ignore"
+		Notes  string `json:"notes"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
-	if err := h.resolveDisc.Execute(c.Request.Context(), application.ResolveDiscrepancyCmd{
+	ctx := c.Request.Context()
+	if err := h.resolveDisc.Execute(ctx, application.ResolveDiscrepancyCmd{
 		TenantID:      tenantID,
 		DiscrepancyID: c.Param("discrepancyID"),
 		Action:        req.Action,
-		ResolvedBy:    req.ResolvedBy,
+		ResolvedBy:    postgres.ActorFromContext(ctx),
 		Notes:         req.Notes,
 	}); err != nil {
 		respondError(c, err)
 		return
 	}
+
 	c.Status(http.StatusNoContent)
 }
 

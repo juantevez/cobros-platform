@@ -227,6 +227,26 @@ func (p *fakePublisher) Publish(ctx context.Context, events ...domain.Event) err
 	return nil
 }
 
+// fakeTx ejecuta fn directamente, o falla antes con err. Cuenta las
+// transacciones y si fn falló dentro de alguna (rollback).
+type fakeTx struct {
+	calls     int
+	rollbacks int
+	err       error
+}
+
+func (f *fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	f.calls++
+	if f.err != nil {
+		return f.err
+	}
+	if err := fn(ctx); err != nil {
+		f.rollbacks++
+		return err
+	}
+	return nil
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // pendingRun crea un run real en estado pending para el tenant dado.

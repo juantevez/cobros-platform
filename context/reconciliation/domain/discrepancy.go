@@ -23,6 +23,8 @@ type Discrepancy struct {
 	resolvedBy    string
 	resolvedAt    *time.Time
 	createdAt     time.Time
+
+	events []Event
 }
 
 // NewDiscrepancy crea una discrepancia encontrada durante la comparación.
@@ -75,6 +77,7 @@ func (d *Discrepancy) Resolve(resolvedBy, notes string) error {
 	d.resolvedBy = resolvedBy
 	d.notes = notes
 	d.resolvedAt = &now
+	d.recordResolution()
 	return nil
 }
 
@@ -88,7 +91,27 @@ func (d *Discrepancy) Ignore(resolvedBy, notes string) error {
 	d.resolvedBy = resolvedBy
 	d.notes = notes
 	d.resolvedAt = &now
+	d.recordResolution()
 	return nil
+}
+
+func (d *Discrepancy) recordResolution() {
+	d.events = append(d.events, DiscrepancyResolvedEvent{
+		baseEvent:     newBase(d.tenantID.String()),
+		DiscrepancyID: d.id.String(),
+		RunID:         d.runID.String(),
+		TenantID:      d.tenantID.String(),
+		Type:          d.discType.String(),
+		Status:        d.status.String(),
+		ResolvedBy:    d.resolvedBy,
+	})
+}
+
+// PullEvents retorna y limpia los eventos pendientes.
+func (d *Discrepancy) PullEvents() []Event {
+	evs := d.events
+	d.events = nil
+	return evs
 }
 
 // ── Getters ───────────────────────────────────────────────────────────────────

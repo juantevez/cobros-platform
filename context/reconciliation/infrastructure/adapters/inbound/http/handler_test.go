@@ -27,6 +27,9 @@ var errBoom = errors.New("boom")
 // testTenant es el tenant autenticado de los requests y dueño de los datos sembrados.
 var testTenant = uuid.NewString()
 
+// testActor es el usuario autenticado de los requests con tenant.
+var testActor = uuid.NewString()
+
 var (
 	periodFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	periodTo   = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -100,6 +103,10 @@ type fakePublisher struct{}
 
 func (fakePublisher) Publish(ctx context.Context, events ...domain.Event) error { return nil }
 
+type fakeTx struct{}
+
+func (fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 type env struct {
@@ -115,7 +122,7 @@ func newEnv(payments []application.SystemPayment, imbalance int64) *env {
 		application.NewStartReconciliationUseCase(runs),
 		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakePublisher{}),
 		application.NewProcessInternalUseCase(runs, discs, fakeLedger{imbalance}, fakePublisher{}),
-		application.NewResolveDiscrepancyUseCase(discs),
+		application.NewResolveDiscrepancyUseCase(discs, fakeTx{}, fakePublisher{}),
 		application.NewGetReportUseCase(runs, discs),
 		application.NewListRunsUseCase(runs),
 	)
@@ -139,7 +146,7 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 	c, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	if tenantID != "" {
-		req = req.WithContext(postgres.WithTenantID(req.Context(), tenantID))
+		req = req.WithContext(postgres.WithActor(postgres.WithTenantID(req.Context(), tenantID), testActor))
 	}
 	c.Request = req
 	c.Params = params
@@ -436,21 +443,22 @@ func TestProcessInternal(t *testing.T) {
 // ── ResolveDiscrepancy ────────────────────────────────────────────────────────
 
 func TestResolveDiscrepancy(t *testing.T) {
-	t.Run("resolves and returns 204", func(t *testing.T) {
+	t.Run("resolves as the authenticated user and returns 204", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		d := e.seedDiscrepancy()
 
+		// resolved_by en el body se ignora: firma el actor autenticado.
 		rec := doRequest(e.h.ResolveDiscrepancy, http.MethodPost, "/x",
-			`{"action":"ignore","resolved_by":"op-1","notes":"known"}`, testTenant, discParam(d.ID().String()))
+			`{"action":"ignore","resolved_by":"someone-else","notes":"known"}`, testTenant, discParam(d.ID().String()))
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body)
 		}
-		if d.Status() != domain.DiscrepancyIgnored || d.ResolvedBy() != "op-1" || d.Notes() != "known" {
+		if d.Status() != domain.DiscrepancyIgnored || d.ResolvedBy() != testActor || d.Notes() != "known" {
 			t.Errorf("status=%q by=%q notes=%q", d.Status(), d.ResolvedBy(), d.Notes())
 		}
 	})
 
-	for _, body := range []string{`{bad`, `{"resolved_by":"op"}`, `{"action":"resolve"}`} {
+	for _, body := range []string{`{bad`, `{"notes":"x"}`} {
 		t.Run("400 on "+body, func(t *testing.T) {
 			e := newEnv(nil, 0)
 			d := e.seedDiscrepancy()

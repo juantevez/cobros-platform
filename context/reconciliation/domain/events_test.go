@@ -13,6 +13,12 @@ func TestReconciliationCompletedEvent_EventType(t *testing.T) {
 	}
 }
 
+func TestDiscrepancyResolvedEvent_EventType(t *testing.T) {
+	if got := (DiscrepancyResolvedEvent{}).EventType(); got != "reconciliation.discrepancy.resolved.v1" {
+		t.Errorf("EventType() = %q", got)
+	}
+}
+
 func TestNewBase(t *testing.T) {
 	before := time.Now().UTC()
 	a := newBase("tenant-1")

@@ -67,6 +67,19 @@ func TestDiscrepancy_ResolveAndIgnore(t *testing.T) {
 			if d.ResolvedAt() == nil || d.ResolvedAt().Before(before) || d.ResolvedAt().Location() != time.UTC {
 				t.Errorf("resolvedAt = %v", d.ResolvedAt())
 			}
+
+			evs := d.PullEvents()
+			if len(evs) != 1 {
+				t.Fatalf("got %d events, want 1", len(evs))
+			}
+			ev := evs[0].(DiscrepancyResolvedEvent)
+			if ev.DiscrepancyID != d.ID().String() || ev.RunID != d.RunID().String() || ev.TenantID != d.TenantID().String() ||
+				ev.EventTenantID() != d.TenantID().String() || ev.Type != d.Type().String() || ev.Status != op.want.String() || ev.ResolvedBy != "op-1" {
+				t.Errorf("event = %+v", ev)
+			}
+			if len(d.PullEvents()) != 0 {
+				t.Error("PullEvents must clear the events")
+			}
 		})
 
 		for _, st := range []DiscrepancyStatus{DiscrepancyResolved, DiscrepancyIgnored} {
@@ -75,7 +88,7 @@ func TestDiscrepancy_ResolveAndIgnore(t *testing.T) {
 				if err := op.do(d, "op-2", "again"); !errors.Is(err, ErrDiscrepancyAlreadyResolved) {
 					t.Fatalf("expected ErrDiscrepancyAlreadyResolved, got %v", err)
 				}
-				if d.Status() != st || d.ResolvedBy() != "" || d.Notes() != "" || d.ResolvedAt() != nil {
+				if d.Status() != st || d.ResolvedBy() != "" || d.Notes() != "" || d.ResolvedAt() != nil || len(d.PullEvents()) != 0 {
 					t.Error("rejected operation must not change the discrepancy")
 				}
 			})
