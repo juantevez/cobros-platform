@@ -53,9 +53,10 @@ func (r *pgAccountRepository) save(ctx context.Context, conn postgres.Conn, a *d
 
 	// Inicializar el saldo en cero para la nueva cuenta.
 	_, err = conn.Exec(ctx, `
-		INSERT INTO account_balances (account_id, balance, updated_at)
-		VALUES ($1, 0, $2)`,
+		INSERT INTO account_balances (account_id, tenant_id, balance, updated_at)
+		VALUES ($1, $2, 0, $3)`,
 		a.ID().String(),
+		a.TenantID().String(),
 		time.Now().UTC(),
 	)
 	if err != nil {

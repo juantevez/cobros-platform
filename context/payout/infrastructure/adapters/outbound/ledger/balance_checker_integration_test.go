@@ -56,7 +56,7 @@ func TestBalanceChecker_SubtractsPayoutsNotYetInLedger(t *testing.T) {
 
 	mustExec(t, pool, `INSERT INTO ledger_accounts (id, tenant_id, type, currency, created_at)
 		VALUES ($1, $2, 'merchant_balance', 'ARS', $3)`, account, tenant, now)
-	mustExec(t, pool, `INSERT INTO account_balances (account_id, balance, updated_at) VALUES ($1, 1000, $2)`, account, now)
+	mustExec(t, pool, `INSERT INTO account_balances (account_id, tenant_id, balance, updated_at) VALUES ($1, $2, 1000, $3)`, account, tenant, now)
 
 	payout := func(amount int64, status, currency string) string {
 		id := uuid.NewString()
