@@ -43,25 +43,31 @@ func (r *PaymentReader) ReadByPeriod(
 
 	query += " ORDER BY created_at"
 
-	rows, err := r.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("payment reader: query: %w", err)
-	}
-	defer rows.Close()
-
 	var payments []application.SystemPayment
-	for rows.Next() {
-		var p application.SystemPayment
-		if err := rows.Scan(
-			&p.PaymentID, &p.PSPReference,
-			&p.Amount, &p.Currency,
-			&p.Status, &p.CapturedAt,
-		); err != nil {
-			return nil, fmt.Errorf("payment reader: scan: %w", err)
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		rows, err := conn.Query(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("payment reader: query: %w", err)
 		}
-		payments = append(payments, p)
+		defer rows.Close()
+
+		for rows.Next() {
+			var p application.SystemPayment
+			if err := rows.Scan(
+				&p.PaymentID, &p.PSPReference,
+				&p.Amount, &p.Currency,
+				&p.Status, &p.CapturedAt,
+			); err != nil {
+				return fmt.Errorf("payment reader: scan: %w", err)
+			}
+			payments = append(payments, p)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return payments, rows.Err()
+	return payments, nil
 }
 
 // LedgerChecker implementa application.LedgerChecker consultando
@@ -77,7 +83,8 @@ func NewLedgerChecker(pool pkgpostgres.Conn) *LedgerChecker {
 // CheckBalance calcula el imbalance del Ledger para el período.
 //
 // Un Ledger perfectamente balanceado tiene:
-//   sum(amount WHERE direction='credit') == sum(amount WHERE direction='debit')
+//
+//	sum(amount WHERE direction='credit') == sum(amount WHERE direction='debit')
 //
 // Retorna la diferencia (créditos - débitos). 0 = perfectamente balanceado.
 func (c *LedgerChecker) CheckBalance(
@@ -100,8 +107,14 @@ func (c *LedgerChecker) CheckBalance(
 	}
 
 	var imbalance int64
-	if err := c.pool.QueryRow(ctx, query, args...).Scan(&imbalance); err != nil {
-		return 0, fmt.Errorf("ledger checker: %w", err)
+	err := withTenant(ctx, c.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		if err := conn.QueryRow(ctx, query, args...).Scan(&imbalance); err != nil {
+			return fmt.Errorf("ledger checker: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return imbalance, nil
 }

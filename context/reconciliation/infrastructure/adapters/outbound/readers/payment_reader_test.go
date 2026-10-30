@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/application"
@@ -22,6 +23,12 @@ var (
 )
 
 var paymentCols = []string{"id", "psp_reference", "amount", "currency", "status", "captured_at"}
+
+// expectSession espera la tx efímera que fija app.current_tenant (RLS).
+func expectSession(mock pgxmock.PgxPoolIface, tenant string) {
+	mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	mock.ExpectExec("set_config").WithArgs("app.current_tenant", tenant).WillReturnResult(pgxmock.NewResult("SELECT", 1))
+}
 
 func newMock(t *testing.T) pgxmock.PgxPoolIface {
 	t.Helper()
@@ -39,11 +46,13 @@ func TestPaymentReader_ReadByPeriod(t *testing.T) {
 
 	t.Run("filters by tenant and maps rows", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock, tenant)
 		mock.ExpectQuery("WHERE created_at >= \\$1 AND created_at < \\$2 AND tenant_id=\\$3 ORDER BY created_at").
 			WithArgs(testFrom, testTo, tenant).
 			WillReturnRows(pgxmock.NewRows(paymentCols).
 				AddRow("pay-1", "PSP-1", int64(100), "ARS", "captured", &captured).
 				AddRow("pay-2", "", int64(50), "ARS", "failed", (*time.Time)(nil)))
+		mock.ExpectCommit()
 
 		got, err := NewPaymentReader(mock).ReadByPeriod(context.Background(), domain.TenantID(tenant), testFrom, testTo)
 		if err != nil {
@@ -119,8 +128,10 @@ func TestLedgerChecker_CheckBalance(t *testing.T) {
 
 	t.Run("returns imbalance for tenant", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock, tenant)
 		mock.ExpectQuery("FROM postings p.*AND je.tenant_id=\\$3").WithArgs(testFrom, testTo, tenant).
 			WillReturnRows(pgxmock.NewRows([]string{"imbalance"}).AddRow(int64(-250)))
+		mock.ExpectCommit()
 
 		got, err := NewLedgerChecker(mock).CheckBalance(context.Background(), domain.TenantID(tenant), testFrom, testTo)
 		if err != nil || got != -250 {
@@ -154,4 +165,30 @@ func TestLedgerChecker_CheckBalance(t *testing.T) {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
+}
+
+func TestReaders_SessionSetupError(t *testing.T) {
+	tenant := uuid.NewString()
+	failingSession := func(t *testing.T) pgxmock.PgxPoolIface {
+		mock := newMock(t)
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(anyArgs(2)...).WillReturnError(errBoom)
+		mock.ExpectRollback()
+		return mock
+	}
+
+	if _, err := NewPaymentReader(failingSession(t)).ReadByPeriod(context.Background(), domain.TenantID(tenant), testFrom, testTo); !errors.Is(err, errBoom) {
+		t.Errorf("payment reader: expected errBoom, got %v", err)
+	}
+	if _, err := NewLedgerChecker(failingSession(t)).CheckBalance(context.Background(), domain.TenantID(tenant), testFrom, testTo); !errors.Is(err, errBoom) {
+		t.Errorf("ledger checker: expected errBoom, got %v", err)
+	}
+}
+
+func anyArgs(n int) []any {
+	out := make([]any, n)
+	for i := range out {
+		out[i] = pgxmock.AnyArg()
+	}
+	return out
 }

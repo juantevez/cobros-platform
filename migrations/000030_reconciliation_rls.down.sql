@@ -1,0 +1,8 @@
+-- migrations/000030_reconciliation_rls.down.sql
+DROP POLICY reconciliation_discrepancies_platform_operator ON reconciliation_discrepancies;
+DROP POLICY reconciliation_discrepancies_isolation ON reconciliation_discrepancies;
+ALTER TABLE reconciliation_discrepancies DISABLE ROW LEVEL SECURITY;
+
+DROP POLICY reconciliation_runs_platform_operator ON reconciliation_runs;
+DROP POLICY reconciliation_runs_isolation ON reconciliation_runs;
+ALTER TABLE reconciliation_runs DISABLE ROW LEVEL SECURITY;
