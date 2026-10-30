@@ -13,6 +13,7 @@ import (
 type ProjectionWriter interface {
 	SavePaymentFact(ctx context.Context, f domain.PaymentFact) error
 	SaveLedgerMovement(ctx context.Context, m domain.LedgerMovement) error
+	SavePaymentAdjustment(ctx context.Context, a domain.PaymentAdjustment) error
 }
 
 // AccountTypeReader resuelve el tipo de una cuenta contable a partir de su ID.

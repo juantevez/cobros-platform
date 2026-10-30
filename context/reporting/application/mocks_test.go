@@ -25,6 +25,16 @@ type fakeWriter struct {
 	movementErr   error
 	errOnMovement int
 	movementCalls int
+	adjustments   []domain.PaymentAdjustment
+	adjustmentErr error
+}
+
+func (w *fakeWriter) SavePaymentAdjustment(ctx context.Context, a domain.PaymentAdjustment) error {
+	if w.adjustmentErr != nil {
+		return w.adjustmentErr
+	}
+	w.adjustments = append(w.adjustments, a)
+	return nil
 }
 
 func (w *fakeWriter) SavePaymentFact(ctx context.Context, f domain.PaymentFact) error {

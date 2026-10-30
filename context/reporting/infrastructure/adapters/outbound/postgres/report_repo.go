@@ -58,22 +58,41 @@ func (r *ReportRepository) Volume(ctx context.Context, q application.VolumeQuery
 	return out, nil
 }
 
-// Revenue agrega las comisiones cobradas por período, por moneda.
+// Revenue agrega por moneda lo capturado en el período (bruto y comisiones)
+// y los reembolsos y contracargos que ocurrieron en el período. Una moneda
+// que solo tiene ajustes aparece igual, con bruto cero.
 func (r *ReportRepository) Revenue(ctx context.Context, q application.RevenueQuery) ([]domain.RevenueSummary, error) {
 	args := []any{q.TenantID}
-	where := "tenant_id = $1"
-	where = appendTimeBounds(where, &args, q.From, q.To, "captured_at")
+	paymentsWhere := appendTimeBounds("tenant_id = $1", &args, q.From, q.To, "captured_at")
+	adjustmentsWhere := appendTimeBounds("tenant_id = $1", &args, q.From, q.To, "occurred_at")
 
 	sql := fmt.Sprintf(`
+		WITH p AS (
+			SELECT currency,
+			       COUNT(*)          AS payment_count,
+			       SUM(amount)       AS gross_amount,
+			       SUM(platform_fee) AS platform_fees,
+			       SUM(psp_fee)      AS psp_fees
+			FROM report_payment_fact
+			WHERE %s
+			GROUP BY currency
+		), a AS (
+			SELECT currency,
+			       COUNT(*) FILTER (WHERE kind = 'refund')                  AS refund_count,
+			       COALESCE(SUM(amount) FILTER (WHERE kind = 'refund'), 0)     AS refunded_amount,
+			       COUNT(*) FILTER (WHERE kind = 'chargeback')              AS chargeback_count,
+			       COALESCE(SUM(amount) FILTER (WHERE kind = 'chargeback'), 0) AS chargeback_amount
+			FROM report_payment_adjustment
+			WHERE %s
+			GROUP BY currency
+		)
 		SELECT currency,
-		       COUNT(*)                       AS payment_count,
-		       COALESCE(SUM(amount), 0)       AS gross_amount,
-		       COALESCE(SUM(platform_fee), 0) AS platform_fees,
-		       COALESCE(SUM(psp_fee), 0)      AS psp_fees
-		FROM report_payment_fact
-		WHERE %s
-		GROUP BY currency
-		ORDER BY currency`, where)
+		       COALESCE(p.payment_count, 0), COALESCE(p.gross_amount, 0),
+		       COALESCE(p.platform_fees, 0), COALESCE(p.psp_fees, 0),
+		       COALESCE(a.refund_count, 0), COALESCE(a.refunded_amount, 0),
+		       COALESCE(a.chargeback_count, 0), COALESCE(a.chargeback_amount, 0)
+		FROM p FULL OUTER JOIN a USING (currency)
+		ORDER BY currency`, paymentsWhere, adjustmentsWhere)
 
 	var out []domain.RevenueSummary
 	err := withTenant(ctx, r.pool, q.TenantID, func(ctx context.Context, conn pkgpostgres.Conn) error {
@@ -85,9 +104,13 @@ func (r *ReportRepository) Revenue(ctx context.Context, q application.RevenueQue
 
 		for rows.Next() {
 			var s domain.RevenueSummary
-			if err := rows.Scan(&s.Currency, &s.PaymentCount, &s.GrossAmount, &s.PlatformFees, &s.PSPFees); err != nil {
+			if err := rows.Scan(
+				&s.Currency, &s.PaymentCount, &s.GrossAmount, &s.PlatformFees, &s.PSPFees,
+				&s.RefundCount, &s.RefundedAmount, &s.ChargebackCount, &s.ChargebackAmount,
+			); err != nil {
 				return fmt.Errorf("reporting repo: revenue scan: %w", err)
 			}
+			s.NetAmount = s.GrossAmount - s.RefundedAmount - s.ChargebackAmount
 			out = append(out, s)
 		}
 		return rows.Err()

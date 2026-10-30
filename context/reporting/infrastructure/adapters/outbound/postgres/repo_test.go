@@ -295,22 +295,33 @@ func TestReportRepository_Volume(t *testing.T) {
 	})
 }
 
-var revenueCols = []string{"currency", "payment_count", "gross_amount", "platform_fees", "psp_fees"}
+var revenueCols = []string{"currency", "payment_count", "gross_amount", "platform_fees", "psp_fees",
+	"refund_count", "refunded_amount", "chargeback_count", "chargeback_amount"}
 
 func TestReportRepository_Revenue(t *testing.T) {
-	t.Run("aggregates fees by currency", func(t *testing.T) {
+	t.Run("combines captures and adjustments by currency with net", func(t *testing.T) {
 		mock := newMock(t)
 		expectSession(mock, tenantA)
-		mock.ExpectQuery("FROM report_payment_fact\\s+WHERE tenant_id = \\$1 AND captured_at >= \\$2\\s+GROUP BY currency").
-			WithArgs(tenantA, testFrom).
-			WillReturnRows(pgxmock.NewRows(revenueCols).AddRow("ARS", int64(2), int64(1000), int64(30), int64(15)))
+		// Cada lado filtra su propia columna de fecha con su propio par de
+		// parámetros; el tenant es $1 en ambos.
+		mock.ExpectQuery("FROM report_payment_fact\\s+WHERE tenant_id = \\$1 AND captured_at >= \\$2 AND captured_at < \\$3.*" +
+			"FROM report_payment_adjustment\\s+WHERE tenant_id = \\$1 AND occurred_at >= \\$4 AND occurred_at < \\$5.*" +
+			"FULL OUTER JOIN a USING \\(currency\\)").
+			WithArgs(tenantA, testFrom, testTo, testFrom, testTo).
+			WillReturnRows(pgxmock.NewRows(revenueCols).
+				AddRow("ARS", int64(2), int64(1000), int64(30), int64(15), int64(1), int64(400), int64(1), int64(100)).
+				AddRow("USD", int64(0), int64(0), int64(0), int64(0), int64(1), int64(50), int64(0), int64(0)))
 
 		mock.ExpectCommit()
-		got, err := NewReportRepository(mock).Revenue(context.Background(), application.RevenueQuery{TenantID: tenantA, From: testFrom})
+		got, err := NewReportRepository(mock).Revenue(context.Background(), application.RevenueQuery{TenantID: tenantA, From: testFrom, To: testTo})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := []domain.RevenueSummary{{Currency: "ARS", PaymentCount: 2, GrossAmount: 1000, PlatformFees: 30, PSPFees: 15}}
+		want := []domain.RevenueSummary{
+			{Currency: "ARS", PaymentCount: 2, GrossAmount: 1000, PlatformFees: 30, PSPFees: 15,
+				RefundCount: 1, RefundedAmount: 400, ChargebackCount: 1, ChargebackAmount: 100, NetAmount: 500},
+			{Currency: "USD", RefundCount: 1, RefundedAmount: 50, NetAmount: -50},
+		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %+v, want %+v", got, want)
 		}
@@ -335,7 +346,7 @@ func TestReportRepository_Revenue(t *testing.T) {
 		mock := newMock(t)
 		expectSession(mock, tenantA)
 		mock.ExpectQuery("FROM report_payment_fact").WithArgs(tenantA).
-			WillReturnRows(pgxmock.NewRows(revenueCols).AddRow("ARS", "x", int64(1), int64(1), int64(1)))
+			WillReturnRows(pgxmock.NewRows(revenueCols).AddRow("ARS", "x", int64(1), int64(1), int64(1), int64(0), int64(0), int64(0), int64(0)))
 
 		mock.ExpectRollback()
 		_, err := NewReportRepository(mock).Revenue(context.Background(), application.RevenueQuery{TenantID: tenantA})
@@ -348,7 +359,7 @@ func TestReportRepository_Revenue(t *testing.T) {
 		mock := newMock(t)
 		expectSession(mock, tenantA)
 		mock.ExpectQuery("FROM report_payment_fact").WithArgs(tenantA).
-			WillReturnRows(pgxmock.NewRows(revenueCols).AddRow("ARS", int64(1), int64(1), int64(1), int64(1)).RowError(0, errBoom))
+			WillReturnRows(pgxmock.NewRows(revenueCols).AddRow("ARS", int64(1), int64(1), int64(1), int64(1), int64(0), int64(0), int64(0), int64(0)).RowError(0, errBoom))
 
 		mock.ExpectRollback()
 		_, err := NewReportRepository(mock).Revenue(context.Background(), application.RevenueQuery{TenantID: tenantA})
@@ -480,4 +491,37 @@ func TestRepositories_WithoutTenantRunWithoutSession(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("expectations: %v", err)
 	}
+}
+
+func TestProjectionRepository_SavePaymentAdjustment(t *testing.T) {
+	a := domain.PaymentAdjustment{Kind: domain.AdjustmentChargeback, SourceID: "dis-1", PaymentID: "pay-1",
+		TenantID: tenantA, Currency: "ARS", Amount: 700, OccurredAt: testFrom}
+
+	t.Run("inserts idempotently by kind and source", func(t *testing.T) {
+		mock := newMock(t)
+		expectSession(mock, tenantA)
+		mock.ExpectExec("INSERT INTO report_payment_adjustment.*ON CONFLICT \\(kind, source_id\\) DO NOTHING").
+			WithArgs("chargeback", "dis-1", "pay-1", tenantA, "ARS", int64(700), testFrom).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit()
+
+		if err := NewProjectionRepository(mock).SavePaymentAdjustment(context.Background(), a); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("exec error is wrapped", func(t *testing.T) {
+		mock := newMock(t)
+		expectSession(mock, tenantA)
+		mock.ExpectExec("INSERT INTO report_payment_adjustment").WithArgs(anyArgs(7)...).WillReturnError(errBoom)
+		mock.ExpectRollback()
+
+		err := NewProjectionRepository(mock).SavePaymentAdjustment(context.Background(), a)
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "save payment adjustment") {
+			t.Fatalf("expected wrapped errBoom, got %v", err)
+		}
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,4 +234,112 @@ func TestProjectEventsUseCase_ProjectEntryPosted(t *testing.T) {
 			t.Errorf("calls=%d saved=%d, want 2/1", w.movementCalls, len(w.movements))
 		}
 	})
+}
+
+func TestProjectPaymentRefunded(t *testing.T) {
+	ctx := context.Background()
+	occurred := time.Date(2026, 9, 20, 15, 0, 0, 0, time.FixedZone("ART", -3*3600))
+
+	t.Run("projects the refund keyed by payment", func(t *testing.T) {
+		w := &fakeWriter{}
+		err := newProjector(w, &fakeAccounts{}).ProjectPaymentRefunded(ctx, PaymentRefundedCmd{
+			PaymentID: "pay-1", TenantID: tenantA, Currency: "ARS", Amount: 1000, OccurredAt: occurred,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := domain.PaymentAdjustment{Kind: domain.AdjustmentRefund, SourceID: "pay-1", PaymentID: "pay-1",
+			TenantID: tenantA, Currency: "ARS", Amount: 1000, OccurredAt: occurred.UTC()}
+		if len(w.adjustments) != 1 || w.adjustments[0] != want {
+			t.Errorf("adjustments = %+v\nwant %+v", w.adjustments, want)
+		}
+	})
+
+	t.Run("without event time uses the clock", func(t *testing.T) {
+		w := &fakeWriter{}
+		_ = newProjector(w, &fakeAccounts{}).ProjectPaymentRefunded(ctx, PaymentRefundedCmd{PaymentID: "p", TenantID: tenantA, Amount: 1})
+		if !w.adjustments[0].OccurredAt.Equal(testNow) {
+			t.Errorf("OccurredAt = %v, want clock", w.adjustments[0].OccurredAt)
+		}
+	})
+
+	for name, cmd := range map[string]PaymentRefundedCmd{
+		"missing payment": {TenantID: tenantA, Amount: 1},
+		"missing tenant":  {PaymentID: "p", Amount: 1},
+	} {
+		t.Run(name+" is an invalid fact", func(t *testing.T) {
+			w := &fakeWriter{}
+			if err := newProjector(w, &fakeAccounts{}).ProjectPaymentRefunded(ctx, cmd); !errors.Is(err, domain.ErrInvalidFact) {
+				t.Fatalf("expected ErrInvalidFact, got %v", err)
+			}
+			if len(w.adjustments) != 0 {
+				t.Error("nothing should be saved")
+			}
+		})
+	}
+
+	t.Run("writer error is returned", func(t *testing.T) {
+		w := &fakeWriter{adjustmentErr: errBoom}
+		if err := newProjector(w, &fakeAccounts{}).ProjectPaymentRefunded(ctx, PaymentRefundedCmd{PaymentID: "p", TenantID: tenantA}); !errors.Is(err, errBoom) {
+			t.Fatalf("expected errBoom, got %v", err)
+		}
+	})
+}
+
+func TestProjectDisputeResolved(t *testing.T) {
+	ctx := context.Background()
+	base := DisputeResolvedCmd{DisputeID: "dis-1", PaymentID: "pay-1", TenantID: tenantA, Currency: "ARS", Amount: 700, OccurredAt: testNow}
+
+	for _, outcome := range []string{"lost", "accepted", "expired"} {
+		t.Run(outcome+" dispute is a chargeback keyed by dispute", func(t *testing.T) {
+			w := &fakeWriter{}
+			cmd := base
+			cmd.Outcome = outcome
+			if err := newProjector(w, &fakeAccounts{}).ProjectDisputeResolved(ctx, cmd); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			want := domain.PaymentAdjustment{Kind: domain.AdjustmentChargeback, SourceID: "dis-1", PaymentID: "pay-1",
+				TenantID: tenantA, Currency: "ARS", Amount: 700, OccurredAt: testNow}
+			if len(w.adjustments) != 1 || w.adjustments[0] != want {
+				t.Errorf("adjustments = %+v\nwant %+v", w.adjustments, want)
+			}
+		})
+	}
+
+	t.Run("won dispute moves no money", func(t *testing.T) {
+		w := &fakeWriter{adjustmentErr: errBoom}
+		cmd := base
+		cmd.Outcome = "won"
+		if err := newProjector(w, &fakeAccounts{}).ProjectDisputeResolved(ctx, cmd); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("unknown outcome is an invalid fact", func(t *testing.T) {
+		w := &fakeWriter{}
+		cmd := base
+		cmd.Outcome = "pending"
+		err := newProjector(w, &fakeAccounts{}).ProjectDisputeResolved(ctx, cmd)
+		if !errors.Is(err, domain.ErrInvalidFact) || !strings.Contains(err.Error(), `"pending"`) {
+			t.Fatalf("expected ErrInvalidFact naming the outcome, got %v", err)
+		}
+		if len(w.adjustments) != 0 {
+			t.Error("nothing should be saved")
+		}
+	})
+
+	for name, mutate := range map[string]func(*DisputeResolvedCmd){
+		"missing dispute": func(c *DisputeResolvedCmd) { c.DisputeID = "" },
+		"missing payment": func(c *DisputeResolvedCmd) { c.PaymentID = "" },
+		"missing tenant":  func(c *DisputeResolvedCmd) { c.TenantID = "" },
+	} {
+		t.Run(name+" is an invalid fact", func(t *testing.T) {
+			cmd := base
+			cmd.Outcome = "lost"
+			mutate(&cmd)
+			if err := newProjector(&fakeWriter{}, &fakeAccounts{}).ProjectDisputeResolved(ctx, cmd); !errors.Is(err, domain.ErrInvalidFact) {
+				t.Fatalf("expected ErrInvalidFact, got %v", err)
+			}
+		})
+	}
 }

@@ -54,3 +54,22 @@ func (r *ProjectionRepository) SaveLedgerMovement(ctx context.Context, m domain.
 		return nil
 	})
 }
+
+// SavePaymentAdjustment inserta un reembolso o contracargo. Idempotente por
+// (kind, source_id).
+func (r *ProjectionRepository) SavePaymentAdjustment(ctx context.Context, a domain.PaymentAdjustment) error {
+	return withTenant(ctx, r.pool, a.TenantID, func(ctx context.Context, conn pkgpostgres.Conn) error {
+		_, err := conn.Exec(ctx, `
+			INSERT INTO report_payment_adjustment
+				(kind, source_id, payment_id, tenant_id, currency, amount, occurred_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
+			ON CONFLICT (kind, source_id) DO NOTHING`,
+			a.Kind.String(), a.SourceID, a.PaymentID, a.TenantID,
+			a.Currency, a.Amount, a.OccurredAt,
+		)
+		if err != nil {
+			return fmt.Errorf("reporting repo: save payment adjustment: %w", err)
+		}
+		return nil
+	})
+}

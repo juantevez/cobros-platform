@@ -14,8 +14,9 @@ import (
 
 // EventConsumer proyecta eventos de otros contextos en el read-model de reporting.
 //
-// Consume dos fuentes:
-//   - PAYMENT (payment.captured.v1)  → volumen y revenue
+// Consume tres fuentes:
+//   - PAYMENT (payment.captured.v1, payment.refunded.v1) → volumen y revenue
+//   - DISPUTE (dispute.resolved.v1) → contracargos en el revenue
 //   - LEDGER  (ledger.entry.posted.v1 y ledger.entry.reversed.v1) → balances
 //     por comercio. La reversa no emite entry.posted: sus movimientos vienen
 //     en el propio evento de reversa.
@@ -36,7 +37,14 @@ func NewEventConsumer(
 func (c *EventConsumer) StartPaymentConsumer(ctx context.Context) error {
 	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
 		Stream: "PAYMENT", Name: "reporting-payment-consumer",
-		FilterSubject: "payment.captured.>", MaxDeliver: 5,
+		FilterSubject: "payment.>", MaxDeliver: 5,
+	}, c.handle)
+}
+
+func (c *EventConsumer) StartDisputeConsumer(ctx context.Context) error {
+	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
+		Stream: "DISPUTE", Name: "reporting-dispute-consumer",
+		FilterSubject: "dispute.resolved.>", MaxDeliver: 5,
 	}, c.handle)
 }
 
@@ -56,6 +64,24 @@ type paymentCaptured struct {
 	PlatformFee   int64  `json:"platform_fee"`
 	PSPFee        int64  `json:"psp_fee"`
 	PaymentMethod string `json:"payment_method"`
+}
+
+// paymentRefunded refleja el payload de payment.refunded.v1.
+type paymentRefunded struct {
+	PaymentID    string `json:"payment_id"`
+	TenantID     string `json:"tenant_id"`
+	RefundAmount int64  `json:"refund_amount"`
+	Currency     string `json:"currency"`
+}
+
+// disputeResolved refleja el payload de dispute.resolved.v1.
+type disputeResolved struct {
+	DisputeID string `json:"dispute_id"`
+	PaymentID string `json:"payment_id"`
+	TenantID  string `json:"tenant_id"`
+	Amount    int64  `json:"amount"`
+	Currency  string `json:"currency"`
+	Outcome   string `json:"outcome"`
 }
 
 // posting refleja un posting de los eventos de asiento del ledger.
@@ -85,6 +111,10 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 	switch msg.Subject {
 	case "payment.captured.v1":
 		return c.handlePaymentCaptured(ctx, msg)
+	case "payment.refunded.v1":
+		return c.handlePaymentRefunded(ctx, msg)
+	case "dispute.resolved.v1":
+		return c.handleDisputeResolved(ctx, msg)
 	case "ledger.entry.posted.v1":
 		return c.handleEntryPosted(ctx, msg)
 	case "ledger.entry.reversed.v1":
@@ -110,6 +140,42 @@ func (c *EventConsumer) handlePaymentCaptured(ctx context.Context, msg *eventbus
 		OccurredAt:    occurredAt(msg),
 	}); err != nil {
 		return c.projectionFailed(err, "payment_id", p.PaymentID)
+	}
+	return nil
+}
+
+func (c *EventConsumer) handlePaymentRefunded(ctx context.Context, msg *eventbus.Message) error {
+	var p paymentRefunded
+	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.TenantID == "" {
+		return nil
+	}
+	if err := c.project.ProjectPaymentRefunded(ctx, application.PaymentRefundedCmd{
+		PaymentID:  p.PaymentID,
+		TenantID:   p.TenantID,
+		Currency:   p.Currency,
+		Amount:     p.RefundAmount,
+		OccurredAt: occurredAt(msg),
+	}); err != nil {
+		return c.projectionFailed(err, "payment_id", p.PaymentID)
+	}
+	return nil
+}
+
+func (c *EventConsumer) handleDisputeResolved(ctx context.Context, msg *eventbus.Message) error {
+	var d disputeResolved
+	if err := json.Unmarshal(msg.Payload, &d); err != nil || d.TenantID == "" {
+		return nil
+	}
+	if err := c.project.ProjectDisputeResolved(ctx, application.DisputeResolvedCmd{
+		DisputeID:  d.DisputeID,
+		PaymentID:  d.PaymentID,
+		TenantID:   d.TenantID,
+		Currency:   d.Currency,
+		Amount:     d.Amount,
+		Outcome:    d.Outcome,
+		OccurredAt: occurredAt(msg),
+	}); err != nil {
+		return c.projectionFailed(err, "dispute_id", d.DisputeID)
 	}
 	return nil
 }
