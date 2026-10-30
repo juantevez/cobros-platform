@@ -48,7 +48,7 @@ func (r *fakeRunRepo) Save(ctx context.Context, run *domain.ReconciliationRun) e
 	r.byID[run.ID()] = run
 	return nil
 }
-func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun, from domain.RunStatus) error {
+func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun) error {
 	return nil
 }
 func (r *fakeRunRepo) FindByID(ctx context.Context, id domain.RunID) (*domain.ReconciliationRun, error) {
@@ -393,7 +393,7 @@ func TestUploadReport(t *testing.T) {
 	t.Run("already processed run returns 409", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		run := e.seedRun(domain.TypePayment)
-		_ = run.Start()
+		_ = run.Start(time.Now())
 		rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", csv, testTenant, runParam(run.ID().String()))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", rec.Code)
@@ -449,7 +449,7 @@ func TestProcessInternal(t *testing.T) {
 	t.Run("already processed run returns 409", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		run := e.seedRun(domain.TypeInternal)
-		_ = run.Start()
+		_ = run.Start(time.Now())
 		_ = run.Complete(1, 1, 0, time.Now())
 		rec := doRequest(e.h.ProcessInternal, http.MethodPost, "/x", "", testTenant, runParam(run.ID().String()))
 		if rec.Code != http.StatusConflict {

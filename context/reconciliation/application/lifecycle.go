@@ -18,18 +18,17 @@ type lifecycle struct {
 }
 
 // claim verifica que la operación corresponda al tipo del run y lo pasa a
-// running con un UPDATE condicionado al estado leído: de dos procesos
-// concurrentes sobre el mismo run, solo uno lo toma (el otro recibe
-// ErrRunAlreadyRunning).
+// running (o retoma uno abandonado) con un UPDATE condicionado a la versión
+// leída: de dos procesos concurrentes sobre el mismo run, solo uno lo toma
+// (el otro recibe ErrRunAlreadyRunning).
 func (l lifecycle) claim(ctx context.Context, run *domain.ReconciliationRun, want domain.ReconciliationType) error {
 	if run.Type() != want {
 		return fmt.Errorf("%w: run %s is %q, operation requires %q", domain.ErrRunTypeMismatch, run.ID(), run.Type(), want)
 	}
-	from := run.Status()
-	if err := run.Start(); err != nil {
+	if err := run.Start(l.clock.Now()); err != nil {
 		return err
 	}
-	if err := l.runs.Update(ctx, run, from); err != nil {
+	if err := l.runs.Update(ctx, run); err != nil {
 		return fmt.Errorf("claim run: %w", err)
 	}
 	return nil
@@ -53,13 +52,13 @@ func (l lifecycle) complete(
 		if err := run.Complete(total, matched, len(discrepancies), l.clock.Now()); err != nil {
 			return err
 		}
-		if err := l.runs.Update(ctx, run, domain.RunStatusRunning); err != nil {
+		if err := l.runs.Update(ctx, run); err != nil {
 			return fmt.Errorf("update run completed: %w", err)
 		}
 		return l.pub.Publish(ctx, run.PullEvents()...)
 	})
 	if err != nil {
-		*run = before // la tx no confirmó: en la base el run sigue running
+		*run = before // la tx no confirmó: en la base el run sigue running (y en esa versión)
 		return l.fail(ctx, run, err)
 	}
 	return nil
@@ -73,7 +72,7 @@ func (l lifecycle) fail(ctx context.Context, run *domain.ReconciliationRun, caus
 		if err := run.Fail(cause.Error(), l.clock.Now()); err != nil {
 			return err
 		}
-		if err := l.runs.Update(ctx, run, domain.RunStatusRunning); err != nil {
+		if err := l.runs.Update(ctx, run); err != nil {
 			return err
 		}
 		return l.pub.Publish(ctx, run.PullEvents()...)

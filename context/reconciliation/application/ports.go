@@ -15,9 +15,10 @@ type TxManager interface {
 // RunRepository persiste y recupera ReconciliationRuns.
 type RunRepository interface {
 	Save(ctx context.Context, r *domain.ReconciliationRun) error
-	// Update persiste el run solo si en la base sigue en el estado from; si
-	// otro proceso lo cambió antes, devuelve domain.ErrRunAlreadyRunning.
-	Update(ctx context.Context, r *domain.ReconciliationRun, from domain.RunStatus) error
+	// Update persiste el run solo si en la base sigue en la versión leída
+	// (optimistic locking) y la incrementa; si otro proceso lo cambió antes,
+	// devuelve domain.ErrRunAlreadyRunning.
+	Update(ctx context.Context, r *domain.ReconciliationRun) error
 	FindByID(ctx context.Context, id domain.RunID) (*domain.ReconciliationRun, error)
 	List(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.ReconciliationRun, error)
 }

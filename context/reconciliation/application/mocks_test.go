@@ -36,7 +36,7 @@ type fakeRunRepo struct {
 	byID        map[domain.RunID]*domain.ReconciliationRun
 	saved       []*domain.ReconciliationRun
 	updates     []domain.RunStatus
-	froms       []domain.RunStatus // estado esperado en cada Update
+	versions    []int64 // versión leída en cada Update
 	list        []*domain.ReconciliationRun
 	saveErr     error
 	updateErr   error
@@ -66,12 +66,13 @@ func (r *fakeRunRepo) Save(ctx context.Context, run *domain.ReconciliationRun) e
 	return nil
 }
 
-func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun, from domain.RunStatus) error {
+func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun) error {
 	r.updates = append(r.updates, run.Status())
-	r.froms = append(r.froms, from)
+	r.versions = append(r.versions, run.Version())
 	if r.updateErr != nil && (r.updateErrAt == 0 || r.updateErrAt == len(r.updates)) {
 		return r.updateErr
 	}
+	run.MarkVersionPersisted()
 	return nil
 }
 
@@ -268,7 +269,7 @@ func pendingRun(tenantID string, t domain.ReconciliationType) *domain.Reconcilia
 func runWithStatus(st domain.RunStatus) *domain.ReconciliationRun {
 	return domain.ReconstituteRun(
 		domain.NewRunID(), domain.TenantID(tenantA), domain.TypePayment, st,
-		periodFrom, periodTo, 0, 0, 0, "", periodTo, nil,
+		periodFrom, periodTo, 0, 0, 0, "", periodTo, nil, &testNow, 0,
 	)
 }
 

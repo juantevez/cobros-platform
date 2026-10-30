@@ -24,8 +24,13 @@ func newTestRun(t *testing.T) *ReconciliationRun {
 	return r
 }
 
+// runWithStatus reconstruye un run en st, tomado a testNow (vigente).
 func runWithStatus(st RunStatus) *ReconciliationRun {
-	return ReconstituteRun(NewRunID(), testTenant, TypePayment, st, testFrom, testTo, 0, 0, 0, "", testFrom, nil)
+	return ReconstituteRun(NewRunID(), testTenant, TypePayment, st, testFrom, testTo, 0, 0, 0, "", testFrom, nil, &testNow, 0)
+}
+
+func runningSince(startedAt *time.Time) *ReconciliationRun {
+	return ReconstituteRun(NewRunID(), testTenant, TypePayment, RunStatusRunning, testFrom, testTo, 0, 0, 0, "", testFrom, nil, startedAt, 0)
 }
 
 func TestNewReconciliationRun(t *testing.T) {
@@ -86,20 +91,61 @@ func TestNewReconciliationRun(t *testing.T) {
 func TestReconciliationRun_Start(t *testing.T) {
 	t.Run("from pending", func(t *testing.T) {
 		r := newTestRun(t)
-		if err := r.Start(); err != nil {
+		if err := r.Start(testNow); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if r.Status() != RunStatusRunning {
 			t.Errorf("status = %q, want running", r.Status())
+		}
+		if r.StartedAt() == nil || !r.StartedAt().Equal(testNow) || r.StartedAt().Location() != time.UTC {
+			t.Errorf("startedAt = %v, want %v in UTC", r.StartedAt(), testNow)
 		}
 		if len(r.PullEvents()) != 0 {
 			t.Error("Start should not emit events")
 		}
 	})
 
+	t.Run("abandoned running run can be taken over", func(t *testing.T) {
+		old := testNow.Add(-RunStaleAfter)
+		for name, r := range map[string]*ReconciliationRun{
+			"lease expired":          runningSince(&old),
+			"no record of the claim": runningSince(nil),
+		} {
+			if !r.IsStale(testNow) {
+				t.Errorf("%s: should be stale", name)
+			}
+			if err := r.Start(testNow); err != nil {
+				t.Fatalf("%s: unexpected error: %v", name, err)
+			}
+			if !r.StartedAt().Equal(testNow) || r.IsStale(testNow) {
+				t.Errorf("%s: claim not renewed: startedAt=%v", name, r.StartedAt())
+			}
+		}
+	})
+
+	t.Run("running run within its lease is not stale", func(t *testing.T) {
+		recent := testNow.Add(-RunStaleAfter + time.Second)
+		r := runningSince(&recent)
+		if r.IsStale(testNow) {
+			t.Error("should not be stale")
+		}
+		if err := r.Start(testNow); !errors.Is(err, ErrRunAlreadyRunning) {
+			t.Fatalf("expected ErrRunAlreadyRunning, got %v", err)
+		}
+	})
+
+	t.Run("only running runs can be stale", func(t *testing.T) {
+		for _, st := range []RunStatus{RunStatusPending, RunStatusCompleted, RunStatusFailed} {
+			r := ReconstituteRun(NewRunID(), testTenant, TypePayment, st, testFrom, testTo, 0, 0, 0, "", testFrom, nil, nil, 0)
+			if r.IsStale(testNow.Add(24 * time.Hour)) {
+				t.Errorf("%s run reported as stale", st)
+			}
+		}
+	})
+
 	t.Run("from failed clears the previous failure", func(t *testing.T) {
-		r := ReconstituteRun(NewRunID(), testTenant, TypePayment, RunStatusFailed, testFrom, testTo, 0, 0, 0, "boom", testFrom, &testTo)
-		if err := r.Start(); err != nil {
+		r := ReconstituteRun(NewRunID(), testTenant, TypePayment, RunStatusFailed, testFrom, testTo, 0, 0, 0, "boom", testFrom, &testTo, nil, 0)
+		if err := r.Start(testNow); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if r.Status() != RunStatusRunning || r.ErrorMsg() != "" || r.CompletedAt() != nil {
@@ -110,7 +156,7 @@ func TestReconciliationRun_Start(t *testing.T) {
 	for _, st := range []RunStatus{RunStatusRunning, RunStatusCompleted} {
 		t.Run("rejected from "+st.String(), func(t *testing.T) {
 			r := runWithStatus(st)
-			if err := r.Start(); !errors.Is(err, ErrRunAlreadyRunning) {
+			if err := r.Start(testNow); !errors.Is(err, ErrRunAlreadyRunning) {
 				t.Fatalf("expected ErrRunAlreadyRunning, got %v", err)
 			}
 			if r.Status() != st {
@@ -123,7 +169,7 @@ func TestReconciliationRun_Start(t *testing.T) {
 func TestReconciliationRun_Complete(t *testing.T) {
 	t.Run("records results and emits completed event", func(t *testing.T) {
 		r := newTestRun(t)
-		_ = r.Start()
+		_ = r.Start(testNow)
 
 		if err := r.Complete(10, 7, 3, testNow); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -166,7 +212,7 @@ func TestReconciliationRun_Complete(t *testing.T) {
 
 	t.Run("global run emits event with empty tenant", func(t *testing.T) {
 		r, _ := NewReconciliationRun(NewRunID(), "", TypeInternal, testFrom, testTo, testNow)
-		_ = r.Start()
+		_ = r.Start(testNow)
 		_ = r.Complete(1, 1, 0, testNow)
 
 		ev := r.PullEvents()[0].(ReconciliationCompletedEvent)
@@ -191,7 +237,7 @@ func TestReconciliationRun_Complete(t *testing.T) {
 func TestReconciliationRun_Fail(t *testing.T) {
 	t.Run("records the reason, clears results and emits failed event", func(t *testing.T) {
 		r := newTestRun(t)
-		_ = r.Start()
+		_ = r.Start(testNow)
 
 		if err := r.Fail("read payments: boom", testNow); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -233,7 +279,7 @@ func TestReconciliationRun_Fail(t *testing.T) {
 
 func TestReconciliationRun_PullEvents(t *testing.T) {
 	r := newTestRun(t)
-	_ = r.Start()
+	_ = r.Start(testNow)
 	_ = r.Complete(1, 1, 0, testNow)
 
 	if len(r.PullEvents()) != 1 {
@@ -249,7 +295,8 @@ func TestReconstituteRun(t *testing.T) {
 	created := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
 	completed := created.Add(time.Hour)
 
-	r := ReconstituteRun(id, testTenant, TypeInternal, RunStatusFailed, testFrom, testTo, 5, 4, 1, "boom", created, &completed)
+	started := created.Add(time.Minute)
+	r := ReconstituteRun(id, testTenant, TypeInternal, RunStatusFailed, testFrom, testTo, 5, 4, 1, "boom", created, &completed, &started, 7)
 
 	if r.ID() != id || r.TenantID() != testTenant || r.Type() != TypeInternal || r.Status() != RunStatusFailed {
 		t.Error("identity/status not restored")
@@ -260,8 +307,15 @@ func TestReconstituteRun(t *testing.T) {
 	if r.TotalRecords() != 5 || r.MatchedCount() != 4 || r.DiscrepancyCount() != 1 || r.ErrorMsg() != "boom" {
 		t.Error("results not restored")
 	}
-	if !r.CreatedAt().Equal(created) || r.CompletedAt() != &completed {
+	if !r.CreatedAt().Equal(created) || r.CompletedAt() != &completed || r.StartedAt() != &started {
 		t.Error("timestamps not restored")
+	}
+	if r.Version() != 7 {
+		t.Errorf("version = %d, want 7", r.Version())
+	}
+	r.MarkVersionPersisted()
+	if r.Version() != 8 {
+		t.Errorf("version after persist = %d, want 8", r.Version())
 	}
 	if len(r.PullEvents()) != 0 {
 		t.Error("reconstitution must not emit events")

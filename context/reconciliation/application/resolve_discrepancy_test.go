@@ -166,7 +166,7 @@ func TestGetReportUseCase_Execute(t *testing.T) {
 
 	completedRun := domain.ReconstituteRun(
 		domain.NewRunID(), domain.TenantID(tenantA), domain.TypePayment, domain.RunStatusCompleted,
-		periodFrom, periodTo, 10, 8, 2, "", created, &completed,
+		periodFrom, periodTo, 10, 8, 2, "", created, &completed, nil, 0,
 	)
 
 	t.Run("returns run and discrepancy views", func(t *testing.T) {

@@ -71,9 +71,12 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		if !reflect.DeepEqual(d.runs.updates, wantUpdates) {
 			t.Errorf("updates = %v, want %v", d.runs.updates, wantUpdates)
 		}
-		wantFroms := []domain.RunStatus{domain.RunStatusPending, domain.RunStatusRunning}
-		if !reflect.DeepEqual(d.runs.froms, wantFroms) {
-			t.Errorf("updates conditioned on %v, want %v", d.runs.froms, wantFroms)
+		// Cada UPDATE exige la versión vigente: 0 al tomarlo, 1 al cerrarlo.
+		if !reflect.DeepEqual(d.runs.versions, []int64{0, 1}) || d.run.Version() != 2 {
+			t.Errorf("updates conditioned on versions %v (final %d), want [0 1] and 2", d.runs.versions, d.run.Version())
+		}
+		if d.run.StartedAt() == nil || !d.run.StartedAt().Equal(testNow) {
+			t.Errorf("startedAt = %v, want %v", d.run.StartedAt(), testNow)
 		}
 		if d.tx.calls != 1 {
 			t.Errorf("tx calls = %d, want 1", d.tx.calls)
@@ -455,8 +458,35 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		if d.run.Status() != domain.RunStatusCompleted || d.run.ErrorMsg() != "" {
 			t.Errorf("status=%q errorMsg=%q", d.run.Status(), d.run.ErrorMsg())
 		}
-		if d.runs.froms[0] != domain.RunStatusFailed {
-			t.Errorf("claim conditioned on %q, want failed", d.runs.froms[0])
+	})
+
+	t.Run("abandoned running run is taken over", func(t *testing.T) {
+		d := newReportDeps()
+		stale := testNow.Add(-domain.RunStaleAfter)
+		d.run = domain.ReconstituteRun(domain.NewRunID(), domain.TenantID(tenantA), domain.TypePayment, domain.RunStatusRunning,
+			periodFrom, periodTo, 0, 0, 0, "", periodTo, nil, &stale, 3)
+		d.runs = newRunRepo(d.run)
+
+		if err := d.exec(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if d.run.Status() != domain.RunStatusCompleted || d.runs.versions[0] != 3 {
+			t.Errorf("status=%q claim conditioned on version %d, want completed and 3", d.run.Status(), d.runs.versions[0])
+		}
+	})
+
+	t.Run("running run within its lease is not taken over", func(t *testing.T) {
+		d := newReportDeps()
+		recent := testNow.Add(-domain.RunStaleAfter + time.Second)
+		d.run = domain.ReconstituteRun(domain.NewRunID(), domain.TenantID(tenantA), domain.TypePayment, domain.RunStatusRunning,
+			periodFrom, periodTo, 0, 0, 0, "", periodTo, nil, &recent, 3)
+		d.runs = newRunRepo(d.run)
+
+		if err := d.exec(); !errors.Is(err, domain.ErrRunAlreadyRunning) {
+			t.Fatalf("expected ErrRunAlreadyRunning, got %v", err)
+		}
+		if len(d.runs.updates) != 0 {
+			t.Error("a live run must not be touched")
 		}
 	})
 
@@ -739,7 +769,7 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 	t.Run("run not pending is rejected", func(t *testing.T) {
 		d := newInternalDeps()
 		d.run = domain.ReconstituteRun(domain.NewRunID(), domain.TenantID(tenantA), domain.TypeInternal, domain.RunStatusCompleted,
-			periodFrom, periodTo, 0, 0, 0, "", periodTo, nil)
+			periodFrom, periodTo, 0, 0, 0, "", periodTo, nil, nil, 0)
 		d.runs = newRunRepo(d.run)
 		if err := d.exec(); !errors.Is(err, domain.ErrRunAlreadyRunning) {
 			t.Fatalf("expected ErrRunAlreadyRunning, got %v", err)
