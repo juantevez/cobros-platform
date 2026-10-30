@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
@@ -48,6 +49,12 @@ func (r *pgEntryRepository) save(ctx context.Context, conn postgres.Conn, e *dom
 		e.CreatedAt(),
 	)
 	if err != nil {
+		// UNIQUE (tenant_id, idempotency_key): el caso de uso lo resuelve
+		// releyendo el asiento existente.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUniqueViolation {
+			return domain.ErrEntryAlreadyExists
+		}
 		return fmt.Errorf("entry repo: save entry: %w", err)
 	}
 

@@ -37,7 +37,8 @@ func respondDomainError(c *gin.Context, err error) {
 		respondError(c, http.StatusUnprocessableEntity, err.Error())
 
 	case errors.Is(err, domain.ErrEntryAlreadyExists),
-		errors.Is(err, domain.ErrAccountAlreadyExists):
+		errors.Is(err, domain.ErrAccountAlreadyExists),
+		errors.Is(err, domain.ErrIdempotencyKeyConflict):
 		respondError(c, http.StatusConflict, err.Error())
 
 	default:

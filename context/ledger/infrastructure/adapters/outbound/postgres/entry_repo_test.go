@@ -97,10 +97,11 @@ func TestEntryRepo_DuplicateIdempotencyKey(t *testing.T) {
 		t.Fatalf("first save: %v", err)
 	}
 
-	// Mismo (tenant, idempotency_key) → viola UNIQUE.
+	// Mismo (tenant, idempotency_key) → viola UNIQUE → ErrEntryAlreadyExists,
+	// que PostEntry resuelve releyendo el asiento.
 	second := buildBalancedEntry(t, tenantID, "dup-key", a1.ID(), a2.ID())
-	if err := saveEntryTx(t, pool, tenantID, second); err == nil {
-		t.Fatal("expected unique-violation error on duplicate idempotency key")
+	if err := saveEntryTx(t, pool, tenantID, second); !errors.Is(err, domain.ErrEntryAlreadyExists) {
+		t.Fatalf("expected ErrEntryAlreadyExists, got %v", err)
 	}
 	_ = ctx
 }

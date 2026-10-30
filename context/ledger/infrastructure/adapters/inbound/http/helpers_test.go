@@ -249,3 +249,20 @@ func (e *testEnv) lines(debitAmount, creditAmount int64) []map[string]any {
 
 // balancedLines retorna 2 líneas de request balanceadas.
 func (e *testEnv) balancedLines() []map[string]any { return e.lines(100, 100) }
+
+// entry construye un asiento ya registrado sobre las cuentas del tenant.
+func (e *testEnv) entry(t *testing.T, key string, amount int64) *domain.JournalEntry {
+	t.Helper()
+	entry, err := domain.NewJournalEntry(
+		domain.NewEntryID(), e.tenantID, key, "asiento", nil, time.Now().UTC(),
+		[]domain.PostingInput{
+			{AccountID: e.debit.ID(), Direction: domain.DirectionDebit, Amount: amount, Currency: "ARS"},
+			{AccountID: e.credit.ID(), Direction: domain.DirectionCredit, Amount: amount, Currency: "ARS"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build entry: %v", err)
+	}
+	entry.PullEvents()
+	return entry
+}

@@ -19,6 +19,8 @@ var (
 	ErrZeroAmount         = errors.New("posting amount must be greater than zero")
 	ErrInvalidDirection   = errors.New("invalid posting direction: must be 'debit' or 'credit'")
 	ErrEntryAlreadyExists = errors.New("a journal entry with this idempotency key already exists")
+	// ErrIdempotencyKeyConflict: la clave ya existe con otros movimientos.
+	ErrIdempotencyKeyConflict = errors.New("idempotency key already used for a different journal entry")
 
 	// ── Money ────────────────────────────────────────────────────────────────
 

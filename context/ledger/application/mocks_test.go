@@ -81,6 +81,9 @@ type fakeEntryRepo struct {
 	saveErr       error
 	idempotencyErr error // error no-NotFound al chequear idempotencia
 	findByIDErr   error
+	// raceEntry simula una carrera: Save la "inserta" (como si otra ejecución
+	// la hubiera creado) y falla con ErrEntryAlreadyExists.
+	raceEntry *domain.JournalEntry
 }
 
 func newFakeEntryRepo() *fakeEntryRepo {
@@ -96,6 +99,10 @@ func (r *fakeEntryRepo) preload(e *domain.JournalEntry) {
 }
 
 func (r *fakeEntryRepo) Save(ctx context.Context, e *domain.JournalEntry) error {
+	if r.raceEntry != nil {
+		r.preload(r.raceEntry)
+		return domain.ErrEntryAlreadyExists
+	}
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -223,6 +230,24 @@ func (f *entryFixture) lines(debitAmount, creditAmount int64) []PostingLine {
 }
 
 func (f *entryFixture) balancedLines() []PostingLine { return f.lines(100, 100) }
+
+// entry construye un asiento ya registrado sobre las cuentas del fixture,
+// por amount (balancedLines mueve 100).
+func (f *entryFixture) entry(t *testing.T, key string, amount int64) *domain.JournalEntry {
+	t.Helper()
+	e, err := domain.NewJournalEntry(
+		domain.NewEntryID(), f.tenantID, key, "asiento", nil, time.Now().UTC(),
+		[]domain.PostingInput{
+			{AccountID: f.debit.ID(), Direction: domain.DirectionDebit, Amount: amount, Currency: "ARS"},
+			{AccountID: f.credit.ID(), Direction: domain.DirectionCredit, Amount: amount, Currency: "ARS"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build entry: %v", err)
+	}
+	e.PullEvents()
+	return e
+}
 
 func buildEntry(t *testing.T, tenantID domain.TenantID, key string) *domain.JournalEntry {
 	t.Helper()

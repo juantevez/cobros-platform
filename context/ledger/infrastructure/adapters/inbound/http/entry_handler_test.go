@@ -29,7 +29,7 @@ func TestPostEntry_Success(t *testing.T) {
 func TestPostEntry_Idempotent200(t *testing.T) {
 	env := newTestEnv(t)
 	// Preload un asiento con la misma clave de idempotencia del tenant.
-	existing := buildEntry(t, env.tenantID, "pay-123")
+	existing := env.entry(t, "pay-123", 100)
 	env.entries.preload(existing)
 
 	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
@@ -44,6 +44,19 @@ func TestPostEntry_Idempotent200(t *testing.T) {
 	decodeBody(t, rec, &body)
 	if !body.WasExisting || body.EntryID != existing.ID().String() {
 		t.Errorf("expected existing entry, got %+v", body)
+	}
+}
+
+func TestPostEntry_IdempotencyKeyConflict409(t *testing.T) {
+	env := newTestEnv(t)
+	env.entries.preload(env.entry(t, "pay-123", 100))
+
+	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
+		"idempotency_key": "pay-123",
+		"lines":           env.lines(500, 500),
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
 	}
 }
 
