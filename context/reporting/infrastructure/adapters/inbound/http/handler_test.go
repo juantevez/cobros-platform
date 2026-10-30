@@ -271,6 +271,22 @@ func TestRespondReportError(t *testing.T) {
 	}
 }
 
+func TestMissingTenantReturns403(t *testing.T) {
+	r := &fakeReader{}
+	h := newHandler(r)
+	for name, handler := range map[string]gin.HandlerFunc{
+		"volume": h.GetVolume, "revenue": h.GetRevenue, "balances": h.GetBalances,
+	} {
+		rec := doRequest(handler, "/reports/x", "")
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "tenant required") {
+			t.Errorf("%s: status = %d body = %s, want 403", name, rec.Code, rec.Body)
+		}
+	}
+	if r.calls != 0 {
+		t.Errorf("reader called %d times without tenant", r.calls)
+	}
+}
+
 func TestRegisterRoutes(t *testing.T) {
 	denied := 0
 	engine := gin.New()

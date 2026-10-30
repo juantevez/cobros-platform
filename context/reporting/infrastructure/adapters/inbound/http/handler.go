@@ -25,7 +25,10 @@ func NewReportingHandler(reports *application.GetReportsUseCase) *ReportingHandl
 //
 //	GET /api/v1/reports/volume?from=&to=&granularity=day
 func (h *ReportingHandler) GetVolume(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 
 	from, to, ok := parseRange(c)
 	if !ok {
@@ -51,7 +54,10 @@ func (h *ReportingHandler) GetVolume(c *gin.Context) {
 //
 //	GET /api/v1/reports/revenue?from=&to=
 func (h *ReportingHandler) GetRevenue(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 
 	from, to, ok := parseRange(c)
 	if !ok {
@@ -72,7 +78,10 @@ func (h *ReportingHandler) GetRevenue(c *gin.Context) {
 //
 //	GET /api/v1/reports/balances
 func (h *ReportingHandler) GetBalances(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := requireTenant(c)
+	if !ok {
+		return
+	}
 
 	balances, err := h.reports.GetBalances(c.Request.Context(), tenantID)
 	if err != nil {
@@ -80,6 +89,18 @@ func (h *ReportingHandler) GetBalances(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"balances": balances})
+}
+
+// requireTenant obtiene el tenant autenticado. Sin tenant (p. ej. un usuario
+// de plataforma) no hay read-model que consultar: 403 en lugar de que la
+// consulta falle por un UUID vacío.
+func requireTenant(c *gin.Context) (string, bool) {
+	tenantID, ok := postgres.TenantIDFromContext(c.Request.Context())
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "tenant required"})
+		return "", false
+	}
+	return tenantID, true
 }
 
 // parseRange lee los parámetros from/to en formato RFC3339. Vacíos = sin filtro.
