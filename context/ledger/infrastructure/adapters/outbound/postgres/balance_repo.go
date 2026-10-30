@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,7 +35,7 @@ func NewBalanceRepository(pool *pgxpool.Pool) *pgBalanceRepository {
 func (r *pgBalanceRepository) Apply(ctx context.Context, postings []domain.Posting) error {
 	conn := postgres.ConnFromContext(ctx, r.pool)
 
-	for _, p := range postings {
+	for _, p := range lockOrder(postings) {
 		delta := p.Money().Amount()
 		if p.IsDebit() {
 			delta = -delta
@@ -56,6 +58,18 @@ func (r *pgBalanceRepository) Apply(ctx context.Context, postings []domain.Posti
 		}
 	}
 	return nil
+}
+
+// lockOrder devuelve los postings ordenados por cuenta. Cada UPDATE bloquea la
+// fila de saldo hasta el commit: si dos asientos concurrentes tocaran las
+// mismas cuentas en distinto orden, cada uno esperaría al otro (deadlock).
+// Con un orden global, el segundo espera al primero y sigue.
+func lockOrder(postings []domain.Posting) []domain.Posting {
+	sorted := slices.Clone(postings)
+	slices.SortStableFunc(sorted, func(a, b domain.Posting) int {
+		return strings.Compare(a.AccountID().String(), b.AccountID().String())
+	})
+	return sorted
 }
 
 // GetBalance retorna el saldo actual de una cuenta en centavos.
