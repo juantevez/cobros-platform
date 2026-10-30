@@ -7,7 +7,7 @@ import (
 )
 
 func newTestDiscrepancy() *Discrepancy {
-	return NewDiscrepancy(NewDiscrepancyID(), NewRunID(), testTenant, DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS")
+	return NewDiscrepancy(NewDiscrepancyID(), NewRunID(), testTenant, DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS", testNow)
 }
 
 func discrepancyWithStatus(st DiscrepancyStatus) *Discrepancy {
@@ -19,9 +19,8 @@ func discrepancyWithStatus(st DiscrepancyStatus) *Discrepancy {
 
 func TestNewDiscrepancy(t *testing.T) {
 	id, runID := NewDiscrepancyID(), NewRunID()
-	before := time.Now().UTC()
 
-	d := NewDiscrepancy(id, runID, testTenant, DiscrepancyMissingInSystem, "PSP-9", "", `{"x":1}`)
+	d := NewDiscrepancy(id, runID, testTenant, DiscrepancyMissingInSystem, "PSP-9", "", `{"x":1}`, testNow)
 
 	if d.ID() != id || d.RunID() != runID || d.TenantID() != testTenant {
 		t.Error("identity not set")
@@ -35,7 +34,7 @@ func TestNewDiscrepancy(t *testing.T) {
 	if d.Notes() != "" || d.ResolvedBy() != "" || d.ResolvedAt() != nil {
 		t.Error("resolution fields should be empty")
 	}
-	if d.CreatedAt().Before(before) || d.CreatedAt().Location() != time.UTC {
+	if !d.CreatedAt().Equal(testNow) || d.CreatedAt().Location() != time.UTC {
 		t.Errorf("createdAt = %v", d.CreatedAt())
 	}
 }
@@ -43,7 +42,7 @@ func TestNewDiscrepancy(t *testing.T) {
 func TestDiscrepancy_ResolveAndIgnore(t *testing.T) {
 	ops := []struct {
 		name string
-		do   func(*Discrepancy, string, string) error
+		do   func(*Discrepancy, string, string, time.Time) error
 		want DiscrepancyStatus
 	}{
 		{"resolve", (*Discrepancy).Resolve, DiscrepancyResolved},
@@ -53,9 +52,8 @@ func TestDiscrepancy_ResolveAndIgnore(t *testing.T) {
 	for _, op := range ops {
 		t.Run(op.name+" open discrepancy", func(t *testing.T) {
 			d := newTestDiscrepancy()
-			before := time.Now().UTC()
 
-			if err := op.do(d, "op-1", "checked with PSP"); err != nil {
+			if err := op.do(d, "op-1", "checked with PSP", testNow); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if d.Status() != op.want {
@@ -64,7 +62,7 @@ func TestDiscrepancy_ResolveAndIgnore(t *testing.T) {
 			if d.ResolvedBy() != "op-1" || d.Notes() != "checked with PSP" {
 				t.Errorf("by=%q notes=%q", d.ResolvedBy(), d.Notes())
 			}
-			if d.ResolvedAt() == nil || d.ResolvedAt().Before(before) || d.ResolvedAt().Location() != time.UTC {
+			if d.ResolvedAt() == nil || !d.ResolvedAt().Equal(testNow) || d.ResolvedAt().Location() != time.UTC {
 				t.Errorf("resolvedAt = %v", d.ResolvedAt())
 			}
 
@@ -85,7 +83,7 @@ func TestDiscrepancy_ResolveAndIgnore(t *testing.T) {
 		for _, st := range []DiscrepancyStatus{DiscrepancyResolved, DiscrepancyIgnored} {
 			t.Run(op.name+" rejected from "+st.String(), func(t *testing.T) {
 				d := discrepancyWithStatus(st)
-				if err := op.do(d, "op-2", "again"); !errors.Is(err, ErrDiscrepancyAlreadyResolved) {
+				if err := op.do(d, "op-2", "again", testNow); !errors.Is(err, ErrDiscrepancyAlreadyResolved) {
 					t.Fatalf("expected ErrDiscrepancyAlreadyResolved, got %v", err)
 				}
 				if d.Status() != st || d.ResolvedBy() != "" || d.Notes() != "" || d.ResolvedAt() != nil || len(d.PullEvents()) != 0 {

@@ -35,6 +35,7 @@ func NewReconciliationRun(
 	tenantID TenantID,
 	reconcType ReconciliationType,
 	periodFrom, periodTo time.Time,
+	now time.Time,
 ) (*ReconciliationRun, error) {
 	if !periodFrom.Before(periodTo) {
 		return nil, ErrInvalidPeriod
@@ -47,7 +48,7 @@ func NewReconciliationRun(
 		status:     RunStatusPending,
 		periodFrom: periodFrom,
 		periodTo:   periodTo,
-		createdAt:  time.Now().UTC(),
+		createdAt:  now.UTC(),
 	}, nil
 }
 
@@ -81,9 +82,12 @@ func (r *ReconciliationRun) Start() error {
 	return nil
 }
 
-// Complete finaliza el run con los resultados del proceso.
-func (r *ReconciliationRun) Complete(totalRecords, matchedCount, discrepancyCount int) {
-	now := time.Now().UTC()
+// Complete finaliza el run con los resultados del proceso. Solo desde running.
+func (r *ReconciliationRun) Complete(totalRecords, matchedCount, discrepancyCount int, now time.Time) error {
+	if r.status != RunStatusRunning {
+		return fmt.Errorf("%w: current status is %q", ErrRunNotRunning, r.status)
+	}
+	now = now.UTC()
 	r.status = RunStatusCompleted
 	r.totalRecords = totalRecords
 	r.matchedCount = matchedCount
@@ -91,7 +95,7 @@ func (r *ReconciliationRun) Complete(totalRecords, matchedCount, discrepancyCoun
 	r.completedAt = &now
 
 	r.record(ReconciliationCompletedEvent{
-		baseEvent:        newBase(r.tenantID.String()),
+		baseEvent:        newBase(r.tenantID.String(), now),
 		RunID:            r.id.String(),
 		TenantID:         r.tenantID.String(),
 		Type:             r.reconcType.String(),
@@ -99,17 +103,30 @@ func (r *ReconciliationRun) Complete(totalRecords, matchedCount, discrepancyCoun
 		MatchedCount:     matchedCount,
 		DiscrepancyCount: discrepancyCount,
 	})
+	return nil
 }
 
 // Fail marca el run como fallido con el motivo del error.
-// Los contadores vuelven a cero: un run fallido no tiene resultados.
-func (r *ReconciliationRun) Fail(reason string) {
-	now := time.Now().UTC()
+// Solo desde running. Los contadores vuelven a cero: un run fallido no tiene
+// resultados.
+func (r *ReconciliationRun) Fail(reason string, now time.Time) error {
+	if r.status != RunStatusRunning {
+		return fmt.Errorf("%w: current status is %q", ErrRunNotRunning, r.status)
+	}
+	now = now.UTC()
 	r.status = RunStatusFailed
 	r.errorMsg = reason
 	r.completedAt = &now
 	r.totalRecords, r.matchedCount, r.discrepancyCount = 0, 0, 0
-	r.events = nil
+
+	r.record(ReconciliationFailedEvent{
+		baseEvent: newBase(r.tenantID.String(), now),
+		RunID:     r.id.String(),
+		TenantID:  r.tenantID.String(),
+		Type:      r.reconcType.String(),
+		Error:     reason,
+	})
+	return nil
 }
 
 // ── Getters ───────────────────────────────────────────────────────────────────

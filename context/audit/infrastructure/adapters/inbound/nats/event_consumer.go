@@ -210,6 +210,7 @@ var mappings = map[string]eventMapping{
 
 	// ── Reconciliation ──
 	"reconciliation.run.completed.v1":        {"reconciliation_run", "run_id", "", nil},
+	"reconciliation.run.failed.v1":           {"reconciliation_run", "run_id", "", []string{"error"}},
 	"reconciliation.discrepancy.resolved.v1": {"reconciliation_discrepancy", "discrepancy_id", "resolved_by", []string{"run_id", "status"}},
 }
 

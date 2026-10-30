@@ -11,11 +11,13 @@ const testTenant = TenantID("11111111-1111-1111-1111-111111111111")
 var (
 	testFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	testTo   = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	// testNow en otra zona: el dominio debe normalizar a UTC.
+	testNow = time.Date(2026, 10, 2, 6, 30, 0, 0, time.FixedZone("ART", -3*3600))
 )
 
 func newTestRun(t *testing.T) *ReconciliationRun {
 	t.Helper()
-	r, err := NewReconciliationRun(NewRunID(), testTenant, TypePayment, testFrom, testTo)
+	r, err := NewReconciliationRun(NewRunID(), testTenant, TypePayment, testFrom, testTo, testNow)
 	if err != nil {
 		t.Fatalf("NewReconciliationRun: %v", err)
 	}
@@ -29,9 +31,8 @@ func runWithStatus(st RunStatus) *ReconciliationRun {
 func TestNewReconciliationRun(t *testing.T) {
 	t.Run("creates pending run", func(t *testing.T) {
 		id := NewRunID()
-		before := time.Now().UTC()
 
-		r, err := NewReconciliationRun(id, testTenant, TypeInternal, testFrom, testTo)
+		r, err := NewReconciliationRun(id, testTenant, TypeInternal, testFrom, testTo, testNow)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -50,7 +51,7 @@ func TestNewReconciliationRun(t *testing.T) {
 		if r.CompletedAt() != nil {
 			t.Error("completedAt should be nil")
 		}
-		if r.CreatedAt().Before(before) || r.CreatedAt().Location() != time.UTC {
+		if !r.CreatedAt().Equal(testNow) || r.CreatedAt().Location() != time.UTC {
 			t.Errorf("createdAt = %v", r.CreatedAt())
 		}
 		if len(r.PullEvents()) != 0 {
@@ -59,7 +60,7 @@ func TestNewReconciliationRun(t *testing.T) {
 	})
 
 	t.Run("global run has empty tenant", func(t *testing.T) {
-		r, err := NewReconciliationRun(NewRunID(), "", TypeInternal, testFrom, testTo)
+		r, err := NewReconciliationRun(NewRunID(), "", TypeInternal, testFrom, testTo, testNow)
 		if err != nil || r.TenantID() != "" {
 			t.Fatalf("got tenant %q, %v", r.TenantID(), err)
 		}
@@ -74,7 +75,7 @@ func TestNewReconciliationRun(t *testing.T) {
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := NewReconciliationRun(NewRunID(), testTenant, TypePayment, tc.from, tc.to)
+			r, err := NewReconciliationRun(NewRunID(), testTenant, TypePayment, tc.from, tc.to, testNow)
 			if !errors.Is(err, ErrInvalidPeriod) || r != nil {
 				t.Fatalf("expected ErrInvalidPeriod and nil run, got %v, %v", r, err)
 			}
@@ -123,9 +124,10 @@ func TestReconciliationRun_Complete(t *testing.T) {
 	t.Run("records results and emits completed event", func(t *testing.T) {
 		r := newTestRun(t)
 		_ = r.Start()
-		before := time.Now().UTC()
 
-		r.Complete(10, 7, 3)
+		if err := r.Complete(10, 7, 3, testNow); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
 		if r.Status() != RunStatusCompleted {
 			t.Errorf("status = %q, want completed", r.Status())
@@ -133,7 +135,7 @@ func TestReconciliationRun_Complete(t *testing.T) {
 		if r.TotalRecords() != 10 || r.MatchedCount() != 7 || r.DiscrepancyCount() != 3 {
 			t.Errorf("counts = %d/%d/%d", r.TotalRecords(), r.MatchedCount(), r.DiscrepancyCount())
 		}
-		if r.CompletedAt() == nil || r.CompletedAt().Before(before) {
+		if r.CompletedAt() == nil || !r.CompletedAt().Equal(testNow) || r.CompletedAt().Location() != time.UTC {
 			t.Errorf("completedAt = %v", r.CompletedAt())
 		}
 
@@ -157,14 +159,15 @@ func TestReconciliationRun_Complete(t *testing.T) {
 		if ev != want {
 			t.Errorf("event = %+v\nwant %+v", ev, want)
 		}
-		if ev.EventTenantID() != testTenant.String() {
-			t.Errorf("event tenant = %q", ev.EventTenantID())
+		if ev.EventTenantID() != testTenant.String() || !ev.OccurredAt().Equal(testNow) {
+			t.Errorf("event tenant=%q occurredAt=%v", ev.EventTenantID(), ev.OccurredAt())
 		}
 	})
 
 	t.Run("global run emits event with empty tenant", func(t *testing.T) {
-		r, _ := NewReconciliationRun(NewRunID(), "", TypeInternal, testFrom, testTo)
-		r.Complete(1, 1, 0)
+		r, _ := NewReconciliationRun(NewRunID(), "", TypeInternal, testFrom, testTo, testNow)
+		_ = r.Start()
+		_ = r.Complete(1, 1, 0, testNow)
 
 		ev := r.PullEvents()[0].(ReconciliationCompletedEvent)
 		if ev.TenantID != "" || ev.EventTenantID() != "" || ev.Type != "internal_ledger" {
@@ -172,42 +175,66 @@ func TestReconciliationRun_Complete(t *testing.T) {
 		}
 	})
 
-	// Complete no valida el estado previo: el caso de uso es responsable de
-	// llamarlo sólo sobre runs en running.
-	t.Run("does not guard previous status", func(t *testing.T) {
-		r := newTestRun(t)
-		r.Complete(0, 0, 0)
-		if r.Status() != RunStatusCompleted {
-			t.Errorf("status = %q, want completed", r.Status())
-		}
-	})
+	for _, st := range []RunStatus{RunStatusPending, RunStatusCompleted, RunStatusFailed} {
+		t.Run("rejected from "+st.String(), func(t *testing.T) {
+			r := runWithStatus(st)
+			if err := r.Complete(1, 1, 0, testNow); !errors.Is(err, ErrRunNotRunning) {
+				t.Fatalf("expected ErrRunNotRunning, got %v", err)
+			}
+			if r.Status() != st || r.TotalRecords() != 0 || len(r.PullEvents()) != 0 {
+				t.Error("rejected Complete must not change the run")
+			}
+		})
+	}
 }
 
 func TestReconciliationRun_Fail(t *testing.T) {
-	r := newTestRun(t)
-	_ = r.Start()
-	r.Complete(5, 4, 1) // completado en memoria, pero la tx no confirmó
+	t.Run("records the reason, clears results and emits failed event", func(t *testing.T) {
+		r := newTestRun(t)
+		_ = r.Start()
 
-	r.Fail("parse error")
+		if err := r.Fail("read payments: boom", testNow); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	if r.TotalRecords() != 0 || r.MatchedCount() != 0 || r.DiscrepancyCount() != 0 {
-		t.Errorf("counters = %d/%d/%d, want zero", r.TotalRecords(), r.MatchedCount(), r.DiscrepancyCount())
-	}
+		if r.Status() != RunStatusFailed || r.ErrorMsg() != "read payments: boom" {
+			t.Errorf("status=%q errorMsg=%q", r.Status(), r.ErrorMsg())
+		}
+		if r.TotalRecords() != 0 || r.MatchedCount() != 0 || r.DiscrepancyCount() != 0 {
+			t.Errorf("counters = %d/%d/%d, want zero", r.TotalRecords(), r.MatchedCount(), r.DiscrepancyCount())
+		}
+		if r.CompletedAt() == nil || !r.CompletedAt().Equal(testNow) {
+			t.Errorf("completedAt = %v", r.CompletedAt())
+		}
 
-	if r.Status() != RunStatusFailed || r.ErrorMsg() != "parse error" {
-		t.Errorf("status=%q errorMsg=%q", r.Status(), r.ErrorMsg())
-	}
-	if r.CompletedAt() == nil {
-		t.Error("completedAt should be set on failure")
-	}
-	if len(r.PullEvents()) != 0 {
-		t.Error("Fail should not emit events")
+		evs := r.PullEvents()
+		if len(evs) != 1 {
+			t.Fatalf("expected 1 event, got %d", len(evs))
+		}
+		ev := evs[0].(ReconciliationFailedEvent)
+		want := ReconciliationFailedEvent{baseEvent: ev.baseEvent, RunID: r.ID().String(), TenantID: testTenant.String(), Type: "payment", Error: "read payments: boom"}
+		if ev != want || ev.EventType() != "reconciliation.run.failed.v1" || !ev.OccurredAt().Equal(testNow) {
+			t.Errorf("event = %+v", ev)
+		}
+	})
+
+	for _, st := range []RunStatus{RunStatusPending, RunStatusCompleted, RunStatusFailed} {
+		t.Run("rejected from "+st.String(), func(t *testing.T) {
+			r := runWithStatus(st)
+			if err := r.Fail("x", testNow); !errors.Is(err, ErrRunNotRunning) {
+				t.Fatalf("expected ErrRunNotRunning, got %v", err)
+			}
+			if r.Status() != st || r.ErrorMsg() != "" || len(r.PullEvents()) != 0 {
+				t.Error("rejected Fail must not change the run")
+			}
+		})
 	}
 }
 
 func TestReconciliationRun_PullEvents(t *testing.T) {
 	r := newTestRun(t)
-	r.Complete(1, 1, 0)
+	_ = r.Start()
+	_ = r.Complete(1, 1, 0, testNow)
 
 	if len(r.PullEvents()) != 1 {
 		t.Fatal("first pull should return the event")

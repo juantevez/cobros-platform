@@ -105,6 +105,10 @@ type fakePublisher struct{}
 
 func (fakePublisher) Publish(ctx context.Context, events ...domain.Event) error { return nil }
 
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
 type fakeTx struct{}
 
 func (fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
@@ -127,10 +131,10 @@ func newEnv(payments []application.SystemPayment, unbalanced int) *env {
 	runs := &fakeRunRepo{byID: map[domain.RunID]*domain.ReconciliationRun{}}
 	discs := &fakeDiscRepo{byID: map[domain.DiscrepancyID]*domain.Discrepancy{}}
 	h := NewReconciliationHandler(
-		application.NewStartReconciliationUseCase(runs),
-		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakeTx{}, fakePublisher{}),
-		application.NewProcessInternalUseCase(runs, discs, fakeLedger{check}, fakeTx{}, fakePublisher{}),
-		application.NewResolveDiscrepancyUseCase(discs, fakeTx{}, fakePublisher{}),
+		application.NewStartReconciliationUseCase(runs, realClock{}),
+		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakeTx{}, fakePublisher{}, realClock{}),
+		application.NewProcessInternalUseCase(runs, discs, fakeLedger{check}, fakeTx{}, fakePublisher{}, realClock{}),
+		application.NewResolveDiscrepancyUseCase(discs, fakeTx{}, fakePublisher{}, realClock{}),
 		application.NewGetReportUseCase(runs, discs),
 		application.NewListRunsUseCase(runs),
 	)
@@ -138,13 +142,13 @@ func newEnv(payments []application.SystemPayment, unbalanced int) *env {
 }
 
 func (e *env) seedRun(t domain.ReconciliationType) *domain.ReconciliationRun {
-	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(testTenant), t, periodFrom, periodTo)
+	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(testTenant), t, periodFrom, periodTo, time.Now())
 	e.runs.byID[run.ID()] = run
 	return run
 }
 
 func (e *env) seedDiscrepancy() *domain.Discrepancy {
-	d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(testTenant), domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS")
+	d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(testTenant), domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS", time.Now())
 	e.discs.byID[d.ID()] = d
 	return d
 }
@@ -445,7 +449,8 @@ func TestProcessInternal(t *testing.T) {
 	t.Run("already processed run returns 409", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		run := e.seedRun(domain.TypeInternal)
-		run.Complete(1, 1, 0)
+		_ = run.Start()
+		_ = run.Complete(1, 1, 0, time.Now())
 		rec := doRequest(e.h.ProcessInternal, http.MethodPost, "/x", "", testTenant, runParam(run.ID().String()))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", rec.Code)
@@ -494,7 +499,7 @@ func TestResolveDiscrepancy(t *testing.T) {
 	t.Run("already resolved returns 409", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		d := e.seedDiscrepancy()
-		_ = d.Resolve("someone", "")
+		_ = d.Resolve("someone", "", time.Now())
 		rec := doRequest(e.h.ResolveDiscrepancy, http.MethodPost, "/x",
 			`{"action":"resolve","resolved_by":"op"}`, testTenant, discParam(d.ID().String()))
 		if rec.Code != http.StatusConflict {
@@ -639,7 +644,7 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrRunTypeMismatch, http.StatusUnprocessableEntity},
 		{domain.ErrInvalidArgument, http.StatusBadRequest},
 		{fmt.Errorf("find run: %w", domain.ErrRunNotFound), http.StatusNotFound},
-		{domain.ErrRunNotCompleted, http.StatusInternalServerError},
+		{domain.ErrRunNotRunning, http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},
 	}
 	for _, tc := range cases {

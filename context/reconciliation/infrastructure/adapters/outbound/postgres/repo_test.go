@@ -88,7 +88,7 @@ func runRow(id, tenantID string) []any {
 func TestRunRepository_Save(t *testing.T) {
 	t.Run("inserts run with NULL tenant and error for global pending run", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo, testCreated)
 
 		mock.ExpectExec("INSERT INTO reconciliation_runs").WithArgs(
 			run.ID().String(), (*string)(nil),
@@ -109,7 +109,7 @@ func TestRunRepository_Save(t *testing.T) {
 	t.Run("tenant run stores tenant id", func(t *testing.T) {
 		mock := newMock(t)
 		tenant := uuid.NewString()
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenant), domain.TypePayment, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenant), domain.TypePayment, testFrom, testTo, testCreated)
 		args := anyArgs(12)
 		args[1] = strPtr(tenant)
 
@@ -127,7 +127,7 @@ func TestRunRepository_Save(t *testing.T) {
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo, testCreated)
 		mock.ExpectExec("INSERT INTO reconciliation_runs").WithArgs(anyArgs(12)...).WillReturnError(errBoom)
 
 		err := NewRunRepository(mock).Save(context.Background(), run)
@@ -140,9 +140,9 @@ func TestRunRepository_Save(t *testing.T) {
 func TestRunRepository_Update(t *testing.T) {
 	t.Run("updates results of failed run conditioned on previous status", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo, testCreated)
 		_ = run.Start()
-		run.Fail("parse error")
+		_ = run.Fail("parse error", testCreated)
 
 		mock.ExpectExec("UPDATE reconciliation_runs SET .* WHERE id=\\$1 AND status=\\$8").WithArgs(
 			run.ID().String(), "failed",
@@ -160,7 +160,7 @@ func TestRunRepository_Update(t *testing.T) {
 
 	t.Run("no rows affected means another process changed the run", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo, testCreated)
 		_ = run.Start()
 		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(8)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
@@ -172,7 +172,7 @@ func TestRunRepository_Update(t *testing.T) {
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo, testCreated)
 		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(8)...).WillReturnError(errBoom)
 
 		err := NewRunRepository(mock).Update(context.Background(), run, domain.RunStatusPending)
@@ -322,8 +322,8 @@ func discRow(id, runID string) []any {
 
 func TestDiscrepancyRepository_SaveAll(t *testing.T) {
 	runID := domain.NewRunID()
-	d1 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, "", domain.DiscrepancyMissingInPSP, "A", "{}", "")
-	d2 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, domain.TenantID(uuid.NewString()), domain.DiscrepancyAmountMismatch, "B", "1 ARS", "2 ARS")
+	d1 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, "", domain.DiscrepancyMissingInPSP, "A", "{}", "", testCreated)
+	d2 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, domain.TenantID(uuid.NewString()), domain.DiscrepancyAmountMismatch, "B", "1 ARS", "2 ARS", testCreated)
 
 	t.Run("inserts each discrepancy", func(t *testing.T) {
 		mock := newMock(t)
@@ -371,8 +371,8 @@ func TestDiscrepancyRepository_SaveAll(t *testing.T) {
 func TestDiscrepancyRepository_Update(t *testing.T) {
 	t.Run("updates resolution columns", func(t *testing.T) {
 		mock := newMock(t)
-		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "")
-		_ = d.Ignore("op-1", "")
+		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "", testCreated)
+		_ = d.Ignore("op-1", "", testCreated)
 
 		mock.ExpectExec("UPDATE reconciliation_discrepancies SET").WithArgs(
 			d.ID().String(), "ignored", (*string)(nil), strPtr("op-1"), d.ResolvedAt(),
@@ -388,7 +388,7 @@ func TestDiscrepancyRepository_Update(t *testing.T) {
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
-		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "")
+		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "", testCreated)
 		mock.ExpectExec("UPDATE reconciliation_discrepancies").WithArgs(anyArgs(5)...).WillReturnError(errBoom)
 
 		err := NewDiscrepancyRepository(mock).Update(context.Background(), d)
@@ -517,7 +517,7 @@ func TestRepositories_RunInTenantSession(t *testing.T) {
 
 	t.Run("run update uses the run tenant", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenant), domain.TypePayment, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenant), domain.TypePayment, testFrom, testTo, testCreated)
 		_ = run.Start()
 		expectSession(mock, tenant)
 		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(8)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -560,7 +560,7 @@ func TestRepositories_RunInTenantSession(t *testing.T) {
 
 	t.Run("discrepancies are saved and updated with their tenant", func(t *testing.T) {
 		mock := newMock(t)
-		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(tenant), domain.DiscrepancyMissingInPSP, "A", "{}", "")
+		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(tenant), domain.DiscrepancyMissingInPSP, "A", "{}", "", testCreated)
 		expectSession(mock, tenant)
 		mock.ExpectExec("INSERT INTO reconciliation_discrepancies").WithArgs(anyArgs(9)...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		mock.ExpectCommit()

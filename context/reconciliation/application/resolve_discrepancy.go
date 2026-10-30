@@ -14,10 +14,11 @@ type ResolveDiscrepancyUseCase struct {
 	discrepancyRepo DiscrepancyRepository
 	txManager       TxManager
 	publisher       EventPublisher
+	clock           Clock
 }
 
-func NewResolveDiscrepancyUseCase(repo DiscrepancyRepository, txManager TxManager, publisher EventPublisher) *ResolveDiscrepancyUseCase {
-	return &ResolveDiscrepancyUseCase{discrepancyRepo: repo, txManager: txManager, publisher: publisher}
+func NewResolveDiscrepancyUseCase(repo DiscrepancyRepository, txManager TxManager, publisher EventPublisher, clock Clock) *ResolveDiscrepancyUseCase {
+	return &ResolveDiscrepancyUseCase{discrepancyRepo: repo, txManager: txManager, publisher: publisher, clock: clock}
 }
 
 func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDiscrepancyCmd) error {
@@ -41,11 +42,11 @@ func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDis
 
 	switch cmd.Action {
 	case "resolve":
-		if err := d.Resolve(cmd.ResolvedBy, cmd.Notes); err != nil {
+		if err := d.Resolve(cmd.ResolvedBy, cmd.Notes, uc.clock.Now()); err != nil {
 			return err
 		}
 	case "ignore":
-		if err := d.Ignore(cmd.ResolvedBy, cmd.Notes); err != nil {
+		if err := d.Ignore(cmd.ResolvedBy, cmd.Notes, uc.clock.Now()); err != nil {
 			return err
 		}
 	default:

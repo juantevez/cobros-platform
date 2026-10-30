@@ -22,7 +22,7 @@ func TestStartReconciliationUseCase_Execute(t *testing.T) {
 	t.Run("creates pending run for tenant", func(t *testing.T) {
 		repo := newRunRepo()
 
-		res, err := NewStartReconciliationUseCase(repo).Execute(ctx, validCmd)
+		res, err := NewStartReconciliationUseCase(repo, clock).Execute(ctx, validCmd)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -50,7 +50,7 @@ func TestStartReconciliationUseCase_Execute(t *testing.T) {
 		cmd.TenantID = ""
 		cmd.Type = "internal_ledger"
 
-		if _, err := NewStartReconciliationUseCase(repo).Execute(ctx, cmd); err != nil {
+		if _, err := NewStartReconciliationUseCase(repo, clock).Execute(ctx, cmd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		run := repo.saved[0]
@@ -78,7 +78,7 @@ func TestStartReconciliationUseCase_Execute(t *testing.T) {
 			cmd := validCmd
 			tc.mutate(&cmd)
 
-			_, err := NewStartReconciliationUseCase(repo).Execute(ctx, cmd)
+			_, err := NewStartReconciliationUseCase(repo, clock).Execute(ctx, cmd)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("expected %v, got %v", tc.wantErr, err)
 			}
@@ -95,7 +95,7 @@ func TestStartReconciliationUseCase_Execute(t *testing.T) {
 		repo := newRunRepo()
 		repo.saveErr = errBoom
 
-		_, err := NewStartReconciliationUseCase(repo).Execute(ctx, validCmd)
+		_, err := NewStartReconciliationUseCase(repo, clock).Execute(ctx, validCmd)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "save run") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}

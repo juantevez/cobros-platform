@@ -18,7 +18,15 @@ const (
 var (
 	periodFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	periodTo   = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	testNow    = time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
 )
+
+// fixedClock devuelve siempre la misma hora.
+type fixedClock struct{ t time.Time }
+
+func (c fixedClock) Now() time.Time { return c.t }
+
+var clock = fixedClock{testNow}
 
 // ── Fakes de puertos ──────────────────────────────────────────────────────────
 
@@ -253,7 +261,7 @@ func (f *fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) er
 
 // pendingRun crea un run real en estado pending para el tenant dado.
 func pendingRun(tenantID string, t domain.ReconciliationType) *domain.ReconciliationRun {
-	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenantID), t, periodFrom, periodTo)
+	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenantID), t, periodFrom, periodTo, testNow)
 	return run
 }
 
@@ -267,6 +275,6 @@ func runWithStatus(st domain.RunStatus) *domain.ReconciliationRun {
 func openDiscrepancy() *domain.Discrepancy {
 	return domain.NewDiscrepancy(
 		domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(tenantA),
-		domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS",
+		domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS", testNow,
 	)
 }

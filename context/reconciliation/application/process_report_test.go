@@ -37,7 +37,7 @@ func newReportDeps() *reportDeps {
 }
 
 func (d *reportDeps) exec() error {
-	uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub)
+	uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 	return uc.Execute(context.Background(), ProcessReportCmd{TenantID: d.run.TenantID().String(), RunID: d.run.ID().String(), ReportData: testReport})
 }
 
@@ -346,7 +346,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 
 	t.Run("run of another tenant is reported as not found", func(t *testing.T) {
 		d := newReportDeps()
-		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub)
+		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
 		err := uc.Execute(context.Background(), ProcessReportCmd{TenantID: tenantB, RunID: d.run.ID().String(), ReportData: testReport})
 		if !errors.Is(err, domain.ErrRunNotFound) {
@@ -361,7 +361,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		d := newReportDeps()
 		d.run = pendingRun("", domain.TypePayment)
 		d.runs = newRunRepo(d.run)
-		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub)
+		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
 		err := uc.Execute(context.Background(), ProcessReportCmd{TenantID: tenantA, RunID: d.run.ID().String(), ReportData: testReport})
 		if !errors.Is(err, domain.ErrRunNotFound) {
@@ -384,7 +384,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 
 	t.Run("empty report rejected before touching repo", func(t *testing.T) {
 		d := newReportDeps()
-		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub)
+		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
 		err := uc.Execute(context.Background(), ProcessReportCmd{RunID: "not-even-a-uuid"})
 		if !errors.Is(err, domain.ErrEmptyReport) {
@@ -397,7 +397,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 
 	t.Run("invalid run id", func(t *testing.T) {
 		d := newReportDeps()
-		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub)
+		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
 		err := uc.Execute(context.Background(), ProcessReportCmd{RunID: "x", ReportData: testReport})
 		if err == nil || !strings.Contains(err.Error(), "invalid run id") {
@@ -514,9 +514,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 			if !reflect.DeepEqual(d.runs.updates, wantUpdates) {
 				t.Errorf("updates = %v, want %v", d.runs.updates, wantUpdates)
 			}
-			if d.pub.calls != 0 {
-				t.Error("no event should be published on failure")
-			}
+			assertOnlyFailedEvent(t, d.pub, d.run)
 			if d.run.TotalRecords() != 0 || d.run.DiscrepancyCount() != 0 {
 				t.Error("failed run must not keep results")
 			}
@@ -544,9 +542,10 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "update run completed") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
-		if d.tx.rollbacks != 1 || d.pub.calls != 0 {
-			t.Errorf("rollbacks=%d publish calls=%d, want 1 and 0", d.tx.rollbacks, d.pub.calls)
+		if d.tx.rollbacks != 1 {
+			t.Errorf("rollbacks = %d, want 1", d.tx.rollbacks)
 		}
+		assertOnlyFailedEvent(t, d.pub, d.run)
 		wantUpdates := []domain.RunStatus{domain.RunStatusRunning, domain.RunStatusCompleted, domain.RunStatusFailed}
 		if !reflect.DeepEqual(d.runs.updates, wantUpdates) {
 			t.Errorf("updates = %v, want %v", d.runs.updates, wantUpdates)
@@ -556,27 +555,39 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("publish error rolls back and marks run failed", func(t *testing.T) {
+	t.Run("publish error rolls back both the completion and the failure", func(t *testing.T) {
 		d := newReportDeps()
 		d.pub.err = errBoom
 
-		if err := d.exec(); !errors.Is(err, errBoom) {
-			t.Fatalf("expected errBoom, got %v", err)
+		err := d.exec()
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "mark run failed") {
+			t.Fatalf("expected errBoom plus mark failed error, got %v", err)
 		}
-		if d.tx.rollbacks != 1 || d.run.Status() != domain.RunStatusFailed {
-			t.Errorf("rollbacks=%d status=%q", d.tx.rollbacks, d.run.Status())
+		if d.tx.rollbacks != 2 {
+			t.Errorf("rollbacks = %d, want 2", d.tx.rollbacks)
 		}
 	})
 
-	t.Run("tx begin error marks run failed", func(t *testing.T) {
+	t.Run("tx begin error leaves the run running and reports it", func(t *testing.T) {
 		d := newReportDeps()
 		d.tx.err = errBoom
 
-		if err := d.exec(); !errors.Is(err, errBoom) {
-			t.Fatalf("expected errBoom, got %v", err)
+		err := d.exec()
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "mark run failed") {
+			t.Fatalf("expected errBoom plus mark failed error, got %v", err)
 		}
-		if d.run.Status() != domain.RunStatusFailed || d.pub.calls != 0 {
-			t.Errorf("status=%q publish calls=%d", d.run.Status(), d.pub.calls)
+		if d.run.Status() != domain.RunStatusRunning || d.run.CompletedAt() != nil || d.pub.calls != 0 {
+			t.Errorf("status=%q completedAt=%v publish calls=%d", d.run.Status(), d.run.CompletedAt(), d.pub.calls)
+		}
+	})
+
+	t.Run("completed and failed times come from the clock", func(t *testing.T) {
+		d := newReportDeps()
+		if err := d.exec(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !d.run.CompletedAt().Equal(testNow) || !d.pub.events[0].OccurredAt().Equal(testNow) {
+			t.Errorf("completedAt=%v occurredAt=%v, want %v", d.run.CompletedAt(), d.pub.events[0].OccurredAt(), testNow)
 		}
 	})
 
@@ -617,7 +628,7 @@ func newInternalDeps() *internalDeps {
 }
 
 func (d *internalDeps) exec() error {
-	uc := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub)
+	uc := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub, clock)
 	return uc.Execute(context.Background(), ProcessInternalCmd{TenantID: d.run.TenantID().String(), RunID: d.run.ID().String()})
 }
 
@@ -698,7 +709,7 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 
 	t.Run("invalid run id", func(t *testing.T) {
 		d := newInternalDeps()
-		err := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub).Execute(context.Background(), ProcessInternalCmd{RunID: "x"})
+		err := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub, clock).Execute(context.Background(), ProcessInternalCmd{RunID: "x"})
 		if err == nil || !strings.Contains(err.Error(), "invalid run id") {
 			t.Fatalf("expected invalid run id error, got %v", err)
 		}
@@ -714,7 +725,7 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 
 	t.Run("run of another tenant is reported as not found", func(t *testing.T) {
 		d := newInternalDeps()
-		uc := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub)
+		uc := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub, clock)
 
 		err := uc.Execute(context.Background(), ProcessInternalCmd{TenantID: tenantB, RunID: d.run.ID().String()})
 		if !errors.Is(err, domain.ErrRunNotFound) {
@@ -789,9 +800,7 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 		if d.run.Status() != domain.RunStatusFailed {
 			t.Errorf("status = %q, want failed", d.run.Status())
 		}
-		if d.pub.calls != 0 {
-			t.Error("no event should be published on failure")
-		}
+		assertOnlyFailedEvent(t, d.pub, d.run)
 	})
 
 	t.Run("final update error rolls back and marks run failed", func(t *testing.T) {
@@ -808,14 +817,42 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("publish error rolls back and marks run failed", func(t *testing.T) {
+	t.Run("publish error rolls back both the completion and the failure", func(t *testing.T) {
 		d := newInternalDeps()
 		d.pub.err = errBoom
-		if err := d.exec(); !errors.Is(err, errBoom) {
-			t.Fatalf("expected errBoom, got %v", err)
+		if err := d.exec(); !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "mark run failed") {
+			t.Fatalf("expected errBoom plus mark failed error, got %v", err)
 		}
-		if d.tx.rollbacks != 1 || d.run.Status() != domain.RunStatusFailed {
-			t.Errorf("rollbacks=%d status=%q", d.tx.rollbacks, d.run.Status())
+		if d.tx.rollbacks != 2 {
+			t.Errorf("rollbacks = %d, want 2", d.tx.rollbacks)
 		}
 	})
+}
+
+// assertOnlyFailedEvent verifica que lo único publicado sea run.failed del run.
+func assertOnlyFailedEvent(t *testing.T, pub *fakePublisher, run *domain.ReconciliationRun) {
+	t.Helper()
+	if len(pub.events) != 1 {
+		t.Fatalf("published %d events, want only run.failed", len(pub.events))
+	}
+	ev, ok := pub.events[0].(domain.ReconciliationFailedEvent)
+	if !ok || ev.RunID != run.ID().String() || ev.Error != run.ErrorMsg() || ev.Type != run.Type().String() {
+		t.Errorf("event = %+v", pub.events[0])
+	}
+}
+
+func TestLifecycle_RunNotRunning(t *testing.T) {
+	// Defensivo: el claim deja el run en running antes de cerrarlo. Si se
+	// intentara cerrar uno que no lo está, nada se escribe y el error lo dice.
+	run := pendingRun(tenantA, domain.TypePayment)
+	runs, pub := newRunRepo(run), &fakePublisher{}
+	l := lifecycle{runs: runs, discs: newDiscRepo(), tx: &fakeTx{}, pub: pub, clock: clock}
+
+	err := l.complete(context.Background(), run, nil, 1, 1)
+	if !errors.Is(err, domain.ErrRunNotRunning) || !strings.Contains(err.Error(), "mark run failed") {
+		t.Fatalf("expected ErrRunNotRunning on both complete and fail, got %v", err)
+	}
+	if run.Status() != domain.RunStatusPending || len(runs.updates) != 0 || pub.calls != 0 {
+		t.Error("nothing should be written")
+	}
 }

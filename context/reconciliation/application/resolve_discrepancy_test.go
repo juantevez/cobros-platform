@@ -27,7 +27,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 			repo := newDiscRepo(d)
 			tx, pub := &fakeTx{}, &fakePublisher{}
 
-			err := NewResolveDiscrepancyUseCase(repo, tx, pub).Execute(ctx, ResolveDiscrepancyCmd{
+			err := NewResolveDiscrepancyUseCase(repo, tx, pub, clock).Execute(ctx, ResolveDiscrepancyCmd{
 				TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: tc.action, ResolvedBy: "op-1", Notes: "checked",
 			})
 			if err != nil {
@@ -54,7 +54,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		d := openDiscrepancy()
 		tx := &fakeTx{}
 
-		err := NewResolveDiscrepancyUseCase(newDiscRepo(d), tx, &fakePublisher{err: errBoom}).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(newDiscRepo(d), tx, &fakePublisher{err: errBoom}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: "resolve", ResolvedBy: "op",
 		})
 		if !errors.Is(err, errBoom) || tx.rollbacks != 1 {
@@ -66,21 +66,21 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		repo := newDiscRepo()
 		repo.findErr = errBoom
 
-		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}).Execute(ctx, ResolveDiscrepancyCmd{DiscrepancyID: "x", Action: "resolve"})
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{DiscrepancyID: "x", Action: "resolve"})
 		if err == nil || !strings.Contains(err.Error(), "resolved_by is required") {
 			t.Fatalf("expected resolved_by error, got %v", err)
 		}
 	})
 
 	t.Run("invalid discrepancy id", func(t *testing.T) {
-		err := NewResolveDiscrepancyUseCase(newDiscRepo(), &fakeTx{}, &fakePublisher{}).Execute(ctx, ResolveDiscrepancyCmd{TenantID: tenantA, DiscrepancyID: "x", Action: "resolve", ResolvedBy: "op"})
+		err := NewResolveDiscrepancyUseCase(newDiscRepo(), &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{TenantID: tenantA, DiscrepancyID: "x", Action: "resolve", ResolvedBy: "op"})
 		if err == nil || !strings.Contains(err.Error(), "invalid discrepancy id") {
 			t.Fatalf("expected invalid id error, got %v", err)
 		}
 	})
 
 	t.Run("unknown discrepancy returns ErrDiscrepancyNotFound", func(t *testing.T) {
-		err := NewResolveDiscrepancyUseCase(newDiscRepo(), &fakeTx{}, &fakePublisher{}).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(newDiscRepo(), &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantA, DiscrepancyID: domain.NewDiscrepancyID().String(), Action: "resolve", ResolvedBy: "op",
 		})
 		if !errors.Is(err, domain.ErrDiscrepancyNotFound) {
@@ -92,7 +92,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		d := openDiscrepancy()
 		repo := newDiscRepo(d)
 
-		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantB, DiscrepancyID: d.ID().String(), Action: "resolve", ResolvedBy: "op",
 		})
 		if !errors.Is(err, domain.ErrDiscrepancyNotFound) {
@@ -107,7 +107,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		d := openDiscrepancy()
 		repo := newDiscRepo(d)
 
-		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: "delete", ResolvedBy: "op",
 		})
 		if err == nil || !strings.Contains(err.Error(), `invalid action "delete"`) {
@@ -121,10 +121,10 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 	for _, tc := range actions {
 		t.Run(tc.action+" already closed discrepancy is rejected", func(t *testing.T) {
 			d := openDiscrepancy()
-			_ = d.Ignore("someone", "")
+			_ = d.Ignore("someone", "", testNow)
 			repo := newDiscRepo(d)
 
-			err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}).Execute(ctx, ResolveDiscrepancyCmd{
+			err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 				TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: tc.action, ResolvedBy: "op",
 			})
 			if !errors.Is(err, domain.ErrDiscrepancyAlreadyResolved) {
@@ -141,7 +141,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		repo := newDiscRepo(d)
 		repo.updateErr = errBoom
 
-		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: "resolve", ResolvedBy: "op",
 		})
 		if !errors.Is(err, errBoom) {

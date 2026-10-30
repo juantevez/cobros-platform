@@ -83,6 +83,11 @@ type LedgerChecker interface {
 	Check(ctx context.Context, tenantID domain.TenantID, from, to time.Time) (LedgerCheck, error)
 }
 
+// Clock da la hora actual (inyectable en tests).
+type Clock interface {
+	Now() time.Time
+}
+
 // EventPublisher publica eventos de dominio hacia el Outbox.
 type EventPublisher interface {
 	Publish(ctx context.Context, events ...domain.Event) error

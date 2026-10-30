@@ -36,6 +36,7 @@ func NewDiscrepancy(
 	recordID string,
 	systemValue string,
 	externalValue string,
+	now time.Time,
 ) *Discrepancy {
 	return &Discrepancy{
 		id:            id,
@@ -46,7 +47,7 @@ func NewDiscrepancy(
 		systemValue:   systemValue,
 		externalValue: externalValue,
 		status:        DiscrepancyOpen,
-		createdAt:     time.Now().UTC(),
+		createdAt:     now.UTC(),
 	}
 }
 
@@ -68,11 +69,11 @@ func ReconstituteDiscrepancy(
 }
 
 // Resolve marca la discrepancia como resuelta.
-func (d *Discrepancy) Resolve(resolvedBy, notes string) error {
+func (d *Discrepancy) Resolve(resolvedBy, notes string, now time.Time) error {
 	if d.status != DiscrepancyOpen {
 		return fmt.Errorf("%w: status is %q", ErrDiscrepancyAlreadyResolved, d.status)
 	}
-	now := time.Now().UTC()
+	now = now.UTC()
 	d.status = DiscrepancyResolved
 	d.resolvedBy = resolvedBy
 	d.notes = notes
@@ -82,11 +83,11 @@ func (d *Discrepancy) Resolve(resolvedBy, notes string) error {
 }
 
 // Ignore marca la discrepancia como conocida y aceptada (no requiere corrección).
-func (d *Discrepancy) Ignore(resolvedBy, notes string) error {
+func (d *Discrepancy) Ignore(resolvedBy, notes string, now time.Time) error {
 	if d.status != DiscrepancyOpen {
 		return fmt.Errorf("%w: status is %q", ErrDiscrepancyAlreadyResolved, d.status)
 	}
-	now := time.Now().UTC()
+	now = now.UTC()
 	d.status = DiscrepancyIgnored
 	d.resolvedBy = resolvedBy
 	d.notes = notes
@@ -97,7 +98,7 @@ func (d *Discrepancy) Ignore(resolvedBy, notes string) error {
 
 func (d *Discrepancy) recordResolution() {
 	d.events = append(d.events, DiscrepancyResolvedEvent{
-		baseEvent:     newBase(d.tenantID.String()),
+		baseEvent:     newBase(d.tenantID.String(), *d.resolvedAt),
 		DiscrepancyID: d.id.String(),
 		RunID:         d.runID.String(),
 		TenantID:      d.tenantID.String(),

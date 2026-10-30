@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 )
@@ -23,12 +24,9 @@ import (
 //
 // total_records = referencias evaluadas = matched + discrepancias.
 type ProcessReportUseCase struct {
-	runRepo         RunRepository
-	discrepancyRepo DiscrepancyRepository
-	paymentReader   PaymentReader
-	reportParser    ReportParser
-	txManager       TxManager
-	publisher       EventPublisher
+	lifecycle
+	paymentReader PaymentReader
+	reportParser  ReportParser
 }
 
 func NewProcessReportUseCase(
@@ -38,14 +36,12 @@ func NewProcessReportUseCase(
 	reportParser ReportParser,
 	txManager TxManager,
 	publisher EventPublisher,
+	clock Clock,
 ) *ProcessReportUseCase {
 	return &ProcessReportUseCase{
-		runRepo:         runRepo,
-		discrepancyRepo: discrepancyRepo,
-		paymentReader:   paymentReader,
-		reportParser:    reportParser,
-		txManager:       txManager,
-		publisher:       publisher,
+		lifecycle:     lifecycle{runs: runRepo, discs: discrepancyRepo, tx: txManager, pub: publisher, clock: clock},
+		paymentReader: paymentReader,
+		reportParser:  reportParser,
 	}
 }
 
@@ -66,7 +62,7 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 		return fmt.Errorf("parse report: %w", err)
 	}
 
-	run, err := uc.runRepo.FindByID(ctx, runID)
+	run, err := uc.runs.FindByID(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("find run: %w", err)
 	}
@@ -74,16 +70,16 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 		return domain.ErrRunNotFound
 	}
 
-	if err := claim(ctx, uc.runRepo, run, domain.TypePayment); err != nil {
+	if err := uc.claim(ctx, run, domain.TypePayment); err != nil {
 		return err
 	}
 
 	discrepancies, total, matched, err := uc.compare(ctx, run, pspRecords)
 	if err != nil {
-		return fail(ctx, uc.runRepo, run, fmt.Errorf("compare: %w", err))
+		return uc.fail(ctx, run, fmt.Errorf("compare: %w", err))
 	}
 
-	return complete(ctx, uc.txManager, uc.runRepo, uc.discrepancyRepo, uc.publisher, run, discrepancies, total, matched)
+	return uc.complete(ctx, run, discrepancies, total, matched)
 }
 
 func (uc *ProcessReportUseCase) compare(
@@ -123,9 +119,10 @@ func (uc *ProcessReportUseCase) compare(
 	}
 	sort.Strings(refs) // orden estable de las discrepancias
 
+	now := uc.clock.Now()
 	newDisc := func(t domain.DiscrepancyType, ref, system, external string) {
 		discrepancies = append(discrepancies, domain.NewDiscrepancy(
-			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external,
+			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external, now,
 		))
 	}
 
@@ -217,64 +214,6 @@ func ownedBy(run *domain.ReconciliationRun, tenantID string) bool {
 	return run.TenantID().String() == tenantID
 }
 
-// claim verifica que la operación corresponda al tipo del run y lo pasa a
-// running con un UPDATE condicionado al estado leído: de dos procesos
-// concurrentes sobre el mismo run, solo uno lo toma (el otro recibe
-// ErrRunAlreadyRunning).
-func claim(ctx context.Context, runs RunRepository, run *domain.ReconciliationRun, want domain.ReconciliationType) error {
-	if run.Type() != want {
-		return fmt.Errorf("%w: run %s is %q, operation requires %q", domain.ErrRunTypeMismatch, run.ID(), run.Type(), want)
-	}
-	from := run.Status()
-	if err := run.Start(); err != nil {
-		return err
-	}
-	if err := runs.Update(ctx, run, from); err != nil {
-		return fmt.Errorf("claim run: %w", err)
-	}
-	return nil
-}
-
-// complete guarda las discrepancias, cierra el run y publica el evento en una
-// sola transacción. Si falla, no queda nada a medias y el run pasa a failed.
-func complete(
-	ctx context.Context,
-	tx TxManager,
-	runs RunRepository,
-	discs DiscrepancyRepository,
-	pub EventPublisher,
-	run *domain.ReconciliationRun,
-	discrepancies []*domain.Discrepancy,
-	total, matched int,
-) error {
-	err := tx.RunInTx(ctx, func(ctx context.Context) error {
-		if len(discrepancies) > 0 {
-			if err := discs.SaveAll(ctx, discrepancies); err != nil {
-				return fmt.Errorf("save discrepancies: %w", err)
-			}
-		}
-		run.Complete(total, matched, len(discrepancies))
-		if err := runs.Update(ctx, run, domain.RunStatusRunning); err != nil {
-			return fmt.Errorf("update run completed: %w", err)
-		}
-		return pub.Publish(ctx, run.PullEvents()...)
-	})
-	if err != nil {
-		return fail(ctx, runs, run, err)
-	}
-	return nil
-}
-
-// fail marca el run como fallido y devuelve la causa. Si tampoco se puede
-// guardar el fallo, el run queda running y el error lo informa.
-func fail(ctx context.Context, runs RunRepository, run *domain.ReconciliationRun, cause error) error {
-	run.Fail(cause.Error())
-	if err := runs.Update(ctx, run, domain.RunStatusRunning); err != nil {
-		return fmt.Errorf("%w (mark run failed: %v)", cause, err)
-	}
-	return cause
-}
-
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
@@ -287,11 +226,8 @@ func toJSON(v any) string {
 // asientos con 2+ postings y suma todas las monedas juntas) y cada pago
 // capturado tiene su asiento. total_records = asientos + capturas revisados.
 type ProcessInternalUseCase struct {
-	runRepo         RunRepository
-	discrepancyRepo DiscrepancyRepository
-	ledgerChecker   LedgerChecker
-	txManager       TxManager
-	publisher       EventPublisher
+	lifecycle
+	ledgerChecker LedgerChecker
 }
 
 func NewProcessInternalUseCase(
@@ -300,10 +236,11 @@ func NewProcessInternalUseCase(
 	ledgerChecker LedgerChecker,
 	txManager TxManager,
 	publisher EventPublisher,
+	clock Clock,
 ) *ProcessInternalUseCase {
 	return &ProcessInternalUseCase{
-		runRepo: runRepo, discrepancyRepo: discrepancyRepo,
-		ledgerChecker: ledgerChecker, txManager: txManager, publisher: publisher,
+		lifecycle:     lifecycle{runs: runRepo, discs: discrepancyRepo, tx: txManager, pub: publisher, clock: clock},
+		ledgerChecker: ledgerChecker,
 	}
 }
 
@@ -313,7 +250,7 @@ func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessIntern
 		return err
 	}
 
-	run, err := uc.runRepo.FindByID(ctx, runID)
+	run, err := uc.runs.FindByID(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("find run: %w", err)
 	}
@@ -321,27 +258,27 @@ func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessIntern
 		return domain.ErrRunNotFound
 	}
 
-	if err := claim(ctx, uc.runRepo, run, domain.TypeInternal); err != nil {
+	if err := uc.claim(ctx, run, domain.TypeInternal); err != nil {
 		return err
 	}
 
 	check, err := uc.ledgerChecker.Check(ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo())
 	if err != nil {
-		return fail(ctx, uc.runRepo, run, fmt.Errorf("check ledger: %w", err))
+		return uc.fail(ctx, run, fmt.Errorf("check ledger: %w", err))
 	}
 
-	discrepancies := ledgerDiscrepancies(run, check)
+	discrepancies := ledgerDiscrepancies(run, check, uc.clock.Now())
 	total := check.EntriesChecked + check.CapturesChecked
-	return complete(ctx, uc.txManager, uc.runRepo, uc.discrepancyRepo, uc.publisher, run, discrepancies, total, total-len(discrepancies))
+	return uc.complete(ctx, run, discrepancies, total, total-len(discrepancies))
 }
 
 // ledgerDiscrepancies arma una discrepancia por asiento desbalanceado (con el
 // imbalance de cada moneda) y una por captura sin asiento.
-func ledgerDiscrepancies(run *domain.ReconciliationRun, check LedgerCheck) []*domain.Discrepancy {
+func ledgerDiscrepancies(run *domain.ReconciliationRun, check LedgerCheck, now time.Time) []*domain.Discrepancy {
 	var discrepancies []*domain.Discrepancy
 	newDisc := func(t domain.DiscrepancyType, ref, system, external string) {
 		discrepancies = append(discrepancies, domain.NewDiscrepancy(
-			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external,
+			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external, now,
 		))
 	}
 
