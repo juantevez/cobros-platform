@@ -61,6 +61,23 @@ func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDis
 	})
 }
 
+// Topes de paginación: limit ≤ 0 usa el default, y nunca se devuelve más que
+// el máximo.
+const (
+	defaultReportLimit = 100
+	maxReportLimit     = 500
+	defaultRunsLimit   = 20
+	maxRunsLimit       = 100
+)
+
+// clampLimit aplica el default y el tope a un limit pedido.
+func clampLimit(limit, def, max int) int {
+	if limit <= 0 {
+		return def
+	}
+	return min(limit, max)
+}
+
 // ── GetReport ─────────────────────────────────────────────────────────────────
 
 // GetReportUseCase retorna el reporte completo de un run con sus discrepancias.
@@ -92,10 +109,7 @@ func (uc *GetReportUseCase) Execute(ctx context.Context, q GetReportQuery) (Repo
 		return ReportView{}, domain.ErrRunNotFound
 	}
 
-	limit := q.Limit
-	if limit <= 0 {
-		limit = 100
-	}
+	limit := clampLimit(q.Limit, defaultReportLimit, maxReportLimit)
 
 	discrepancies, err := uc.discrepancyRepo.ListByRun(ctx, runID, q.StatusFilter, limit)
 	if err != nil {
@@ -126,9 +140,7 @@ func (uc *ListRunsUseCase) Execute(ctx context.Context, tenantID string, limit i
 			return nil, err
 		}
 	}
-	if limit <= 0 {
-		limit = 20
-	}
+	limit = clampLimit(limit, defaultRunsLimit, maxRunsLimit)
 
 	runs, err := uc.runRepo.List(ctx, tid, limit)
 	if err != nil {

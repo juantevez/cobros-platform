@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -238,14 +239,14 @@ func TestGetReportUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	for _, limit := range []int{0, -1} {
-		t.Run("non-positive limit uses default 100", func(t *testing.T) {
+	for limit, want := range map[int]int{0: 100, -1: 100, 500: 500, 501: 500, 1_000_000: 500} {
+		t.Run(fmt.Sprintf("limit %d is clamped to %d", limit, want), func(t *testing.T) {
 			discs := newDiscRepo()
 			if _, err := NewGetReportUseCase(newRunRepo(completedRun), discs).Execute(ctx, GetReportQuery{TenantID: tenantA, RunID: completedRun.ID().String(), Limit: limit}); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if discs.lastLimit != 100 {
-				t.Errorf("limit = %d, want 100", discs.lastLimit)
+			if discs.lastLimit != want {
+				t.Errorf("limit = %d, want %d", discs.lastLimit, want)
 			}
 		})
 	}
@@ -322,14 +323,14 @@ func TestListRunsUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	for _, limit := range []int{0, -1} {
-		t.Run("non-positive limit uses default 20", func(t *testing.T) {
+	for limit, want := range map[int]int{0: 20, -1: 20, 100: 100, 101: 100, 1_000_000: 100} {
+		t.Run(fmt.Sprintf("limit %d is clamped to %d", limit, want), func(t *testing.T) {
 			repo := newRunRepo()
 			if _, err := NewListRunsUseCase(repo).Execute(ctx, tenantA, limit); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if repo.lastLimit != 20 {
-				t.Errorf("limit = %d, want 20", repo.lastLimit)
+			if repo.lastLimit != want {
+				t.Errorf("limit = %d, want %d", repo.lastLimit, want)
 			}
 		})
 	}
