@@ -52,7 +52,7 @@ type PSPRecord struct {
 	Amount        int64  // en centavos
 	Currency      string
 	Status        string    // "captured", "rejected", "refunded"
-	ProcessedAt   time.Time
+	ProcessedAt   *time.Time // nil si el informe no lo trae
 }
 
 // ReportParser parsea el informe del PSP (CSV) y retorna los registros.

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 )
@@ -114,8 +115,8 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		if err := d.exec(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if d.run.TotalRecords() != 4 || d.run.MatchedCount() != 1 || d.run.DiscrepancyCount() != 4 {
-			t.Errorf("counts = %d/%d/%d, want 4/1/4", d.run.TotalRecords(), d.run.MatchedCount(), d.run.DiscrepancyCount())
+		if d.run.TotalRecords() != 5 || d.run.MatchedCount() != 1 || d.run.DiscrepancyCount() != 4 {
+			t.Errorf("counts = %d/%d/%d, want 5/1/4", d.run.TotalRecords(), d.run.MatchedCount(), d.run.DiscrepancyCount())
 		}
 		if d.discs.saveCalls != 1 {
 			t.Errorf("SaveAll calls = %d, want 1", d.discs.saveCalls)
@@ -174,13 +175,21 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		system, psp string
 		mismatch    bool
 	}{
+		{"captured", "captured", false},
+		{"failed", "rejected", false},
+		{"failed", "failed", false},
+		{"refunded", "refunded", false},
+		{"processing", "pending", false},
+		{"initiated", "pending", false},
 		{"captured", "rejected", true},
 		{"captured", "failed", true},
 		{"failed", "captured", true},
-		{"captured", "captured", false},
-		{"captured", "refunded", false},
-		{"refunded", "captured", false},
-		{"failed", "rejected", false},
+		{"processing", "captured", true}, // el sistema quedó trabado
+		{"captured", "pending", true},
+		{"captured", "refunded", true},   // el sistema no registró el reembolso
+		{"refunded", "captured", true},   // el PSP no registró el reembolso
+		{"captured", "chargeback", true}, // estado del PSP desconocido
+		{"unknown", "captured", true},
 	}
 	for _, tc := range statusCases {
 		t.Run("status "+tc.system+" vs "+tc.psp, func(t *testing.T) {
@@ -201,7 +210,112 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		})
 	}
 
-	t.Run("system payments without psp reference are skipped but counted in total", func(t *testing.T) {
+	t.Run("same amount in another currency is an amount mismatch", func(t *testing.T) {
+		d := newReportDeps()
+		d.reader.payments = []SystemPayment{sysPay("X", 100, "captured")}
+		usd := pspRec("X", 100, "captured")
+		usd.Currency = "USD"
+		d.parser.records = []PSPRecord{usd}
+
+		if err := d.exec(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(d.discs.saved) != 1 || d.discs.saved[0].Type() != domain.DiscrepancyAmountMismatch ||
+			d.discs.saved[0].SystemValue() != "100 ARS" || d.discs.saved[0].ExternalValue() != "100 USD" {
+			t.Fatalf("expected amount_mismatch 100 ARS vs 100 USD, got %v", d.discs.saved)
+		}
+	})
+
+	t.Run("currency comparison ignores case", func(t *testing.T) {
+		d := newReportDeps()
+		d.reader.payments = []SystemPayment{sysPay("X", 100, "captured")}
+		lower := pspRec("X", 100, "captured")
+		lower.Currency = "ars"
+		d.parser.records = []PSPRecord{lower}
+
+		if err := d.exec(); err != nil || d.run.MatchedCount() != 1 {
+			t.Fatalf("expected match, err=%v matched=%d", err, d.run.MatchedCount())
+		}
+	})
+
+	t.Run("duplicated references are reported once and not matched", func(t *testing.T) {
+		d := newReportDeps()
+		d.reader.payments = []SystemPayment{sysPay("DUP-PSP", 100, "captured"), sysPay("DUP-SYS", 100, "captured"), sysPay("DUP-SYS", 100, "captured")}
+		d.parser.records = []PSPRecord{pspRec("DUP-PSP", 100, "captured"), pspRec("DUP-PSP", 100, "refunded"), pspRec("DUP-SYS", 100, "captured")}
+
+		if err := d.exec(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := d.discs.byRecord()
+		if len(d.discs.saved) != 2 || d.run.MatchedCount() != 0 || d.run.TotalRecords() != 2 {
+			t.Fatalf("discrepancies=%d matched=%d total=%d, want 2/0/2", len(d.discs.saved), d.run.MatchedCount(), d.run.TotalRecords())
+		}
+		for _, ref := range []string{"DUP-PSP", "DUP-SYS"} {
+			disc := got[ref]
+			if disc == nil || disc.Type() != domain.DiscrepancyDuplicateReference ||
+				!strings.HasPrefix(disc.SystemValue(), "[") || !strings.HasPrefix(disc.ExternalValue(), "[") {
+				t.Errorf("%s: %+v", ref, disc)
+			}
+		}
+		if strings.Count(got["DUP-PSP"].ExternalValue(), "TransactionID") != 2 {
+			t.Errorf("both PSP rows should be kept: %s", got["DUP-PSP"].ExternalValue())
+		}
+	})
+
+	t.Run("duplicated reference only in the report has empty system value", func(t *testing.T) {
+		d := newReportDeps()
+		d.parser.records = []PSPRecord{pspRec("D", 1, "captured"), pspRec("D", 1, "captured")}
+
+		if err := d.exec(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(d.discs.saved) != 1 || d.discs.saved[0].Type() != domain.DiscrepancyDuplicateReference || d.discs.saved[0].SystemValue() != "" {
+			t.Fatalf("got %v", d.discs.saved)
+		}
+	})
+
+	t.Run("report rows processed outside the period are left for their own run", func(t *testing.T) {
+		d := newReportDeps()
+		before, inside, after := periodFrom.Add(-time.Second), periodFrom, periodTo
+		at := func(r PSPRecord, ts time.Time) PSPRecord { r.ProcessedAt = &ts; return r }
+		d.reader.payments = []SystemPayment{sysPay("LATE-MATCH", 100, "captured")}
+		d.parser.records = []PSPRecord{
+			at(pspRec("EARLY", 1, "captured"), before),       // fuera, sin pago: se ignora
+			at(pspRec("LATE", 1, "captured"), after),         // period_to es exclusivo: se ignora
+			at(pspRec("INSIDE", 1, "captured"), inside),      // dentro: falta en el sistema
+			at(pspRec("LATE-MATCH", 100, "captured"), after), // fuera, pero el pago es del período: se compara
+			pspRec("NO-DATE", 1, "captured"),                 // sin fecha: se asume dentro
+		}
+
+		if err := d.exec(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := d.discs.byRecord()
+		if len(got) != 2 || got["INSIDE"] == nil || got["NO-DATE"] == nil {
+			t.Errorf("discrepancies = %v, want INSIDE and NO-DATE", got)
+		}
+		if d.run.TotalRecords() != 3 || d.run.MatchedCount() != 1 {
+			t.Errorf("total=%d matched=%d, want 3/1", d.run.TotalRecords(), d.run.MatchedCount())
+		}
+	})
+
+	t.Run("discrepancies are saved in reference order", func(t *testing.T) {
+		d := newReportDeps()
+		d.parser.records = []PSPRecord{pspRec("C", 1, "captured"), pspRec("A", 1, "captured"), pspRec("B", 1, "captured")}
+
+		if err := d.exec(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var order []string
+		for _, disc := range d.discs.saved {
+			order = append(order, disc.RecordID())
+		}
+		if strings.Join(order, ",") != "A,B,C" {
+			t.Errorf("order = %v", order)
+		}
+	})
+
+	t.Run("system payments without psp reference are not evaluated", func(t *testing.T) {
 		d := newReportDeps()
 		d.reader.payments = []SystemPayment{sysPay("A", 100, "captured"), sysPay("", 100, "failed"), sysPay("", 50, "failed")}
 		d.parser.records = []PSPRecord{pspRec("A", 100, "captured")}
@@ -212,12 +326,12 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		if len(d.discs.saved) != 0 {
 			t.Errorf("payments without reference should not create discrepancies, got %d", len(d.discs.saved))
 		}
-		if d.run.TotalRecords() != 3 || d.run.MatchedCount() != 1 {
-			t.Errorf("total=%d matched=%d, want 3/1", d.run.TotalRecords(), d.run.MatchedCount())
+		if d.run.TotalRecords() != 1 || d.run.MatchedCount() != 1 {
+			t.Errorf("total=%d matched=%d, want 1/1", d.run.TotalRecords(), d.run.MatchedCount())
 		}
 	})
 
-	t.Run("total is the larger side", func(t *testing.T) {
+	t.Run("total is every reference evaluated", func(t *testing.T) {
 		d := newReportDeps()
 		d.reader.payments = []SystemPayment{sysPay("A", 100, "captured")}
 		d.parser.records = []PSPRecord{pspRec("A", 100, "captured"), pspRec("B", 1, "captured"), pspRec("C", 1, "captured")}

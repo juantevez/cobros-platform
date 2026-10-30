@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 )
@@ -11,14 +13,15 @@ import (
 // ProcessReportUseCase compara los pagos del sistema contra el informe del PSP
 // y genera discrepancias para cada inconsistencia encontrada.
 //
-// Algoritmo de matching:
-//  1. Parsear el CSV del PSP → []PSPRecord indexados por TransactionID (= psp_reference)
-//  2. Cargar los pagos del sistema del período → []SystemPayment indexados por PSPReference
-//  3. Comparar:
-//     - En sistema, no en PSP → MissingInPSP
-//     - En PSP, no en sistema → MissingInSystem
-//     - En ambos, monto distinto → AmountMismatch
-//     - En ambos, estado inconsistente → StatusMismatch
+// Algoritmo de matching (por referencia: transaction_id = psp_reference):
+//   - Referencia repetida en el informe o en el sistema → DuplicateReference
+//   - En sistema, no en PSP → MissingInPSP
+//   - En PSP, no en sistema → MissingInSystem, salvo que el informe la ubique
+//     fuera del período (processed_at): esa queda para el run que corresponda
+//   - En ambos, monto o moneda distintos → AmountMismatch
+//   - En ambos, estados que no se corresponden → StatusMismatch
+//
+// total_records = referencias evaluadas = matched + discrepancias.
 type ProcessReportUseCase struct {
 	runRepo         RunRepository
 	discrepancyRepo DiscrepancyRepository
@@ -89,7 +92,6 @@ func (uc *ProcessReportUseCase) compare(
 	pspRecords []PSPRecord,
 ) (discrepancies []*domain.Discrepancy, total, matched int, err error) {
 
-	// 1. Cargar pagos del sistema para el período.
 	systemPayments, err := uc.paymentReader.ReadByPeriod(
 		ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo(),
 	)
@@ -97,89 +99,115 @@ func (uc *ProcessReportUseCase) compare(
 		return nil, 0, 0, fmt.Errorf("read payments: %w", err)
 	}
 
-	// 2. Indexar por psp_reference / transaction_id para O(1) lookup.
-	pspIndex := make(map[string]PSPRecord, len(pspRecords))
+	// Indexar ambos lados por referencia. Los pagos sin psp_reference no
+	// llegaron al PSP: no hay contra qué compararlos.
+	pspIndex := make(map[string][]PSPRecord, len(pspRecords))
 	for _, r := range pspRecords {
-		pspIndex[r.TransactionID] = r
+		pspIndex[r.TransactionID] = append(pspIndex[r.TransactionID], r)
 	}
-
-	systemIndex := make(map[string]SystemPayment, len(systemPayments))
+	systemIndex := make(map[string][]SystemPayment, len(systemPayments))
 	for _, p := range systemPayments {
 		if p.PSPReference != "" {
-			systemIndex[p.PSPReference] = p
+			systemIndex[p.PSPReference] = append(systemIndex[p.PSPReference], p)
 		}
 	}
 
-	total = max(len(pspRecords), len(systemPayments))
-
-	// 3. Recorrer sistema → buscar en PSP.
-	for ref, sysPayment := range systemIndex {
-		pspRec, found := pspIndex[ref]
-		if !found {
-			// El sistema tiene el pago pero el PSP no lo reporta.
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyMissingInPSP,
-				ref,
-				toJSON(sysPayment),
-				"",
-			))
-			continue
+	refs := make([]string, 0, len(pspIndex)+len(systemIndex))
+	for ref := range systemIndex {
+		refs = append(refs, ref)
+	}
+	for ref := range pspIndex {
+		if _, ok := systemIndex[ref]; !ok {
+			refs = append(refs, ref)
 		}
+	}
+	sort.Strings(refs) // orden estable de las discrepancias
 
-		// Comparar monto.
-		if sysPayment.Amount != pspRec.Amount {
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyAmountMismatch,
-				ref,
-				fmt.Sprintf("%d %s", sysPayment.Amount, sysPayment.Currency),
-				fmt.Sprintf("%d %s", pspRec.Amount, pspRec.Currency),
-			))
-			continue
-		}
-
-		// Comparar estado.
-		if isStatusMismatch(sysPayment.Status, pspRec.Status) {
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyStatusMismatch,
-				ref,
-				sysPayment.Status,
-				pspRec.Status,
-			))
-			continue
-		}
-
-		matched++
+	newDisc := func(t domain.DiscrepancyType, ref, system, external string) {
+		discrepancies = append(discrepancies, domain.NewDiscrepancy(
+			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external,
+		))
 	}
 
-	// 4. Recorrer PSP → buscar los que no existen en sistema.
-	for ref, pspRec := range pspIndex {
-		if _, found := systemIndex[ref]; !found {
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyMissingInSystem,
-				ref,
-				"",
-				toJSON(pspRec),
-			))
+	for _, ref := range refs {
+		sys, psp := systemIndex[ref], pspIndex[ref]
+
+		if len(sys) == 0 && !inPeriod(psp[0], run) && len(psp) == 1 {
+			continue // procesado por el PSP en otro período
+		}
+		total++
+
+		switch {
+		case len(sys) > 1 || len(psp) > 1:
+			newDisc(domain.DiscrepancyDuplicateReference, ref, jsonOrEmpty(sys), jsonOrEmpty(psp))
+		case len(psp) == 0:
+			newDisc(domain.DiscrepancyMissingInPSP, ref, toJSON(sys[0]), "")
+		case len(sys) == 0:
+			newDisc(domain.DiscrepancyMissingInSystem, ref, "", toJSON(psp[0]))
+		case sys[0].Amount != psp[0].Amount || !strings.EqualFold(sys[0].Currency, psp[0].Currency):
+			newDisc(domain.DiscrepancyAmountMismatch, ref,
+				fmt.Sprintf("%d %s", sys[0].Amount, sys[0].Currency),
+				fmt.Sprintf("%d %s", psp[0].Amount, psp[0].Currency))
+		case isStatusMismatch(sys[0].Status, psp[0].Status):
+			newDisc(domain.DiscrepancyStatusMismatch, ref, sys[0].Status, psp[0].Status)
+		default:
+			matched++
 		}
 	}
 
 	return discrepancies, total, matched, nil
 }
 
-// isStatusMismatch detecta inconsistencias críticas de estado.
-// No todos los estados distintos son errores: ej. "refunded" en PSP puede
-// coincidir con "captured" en sistema si el reembolso aún no fue procesado.
-func isStatusMismatch(systemStatus, pspStatus string) bool {
-	criticalMismatches := map[[2]string]bool{
-		{"captured", "rejected"}: true,
-		{"captured", "failed"}:   true,
-		{"failed", "captured"}:   true,
+// inPeriod indica si el PSP procesó el registro dentro del período del run.
+// Sin processed_at no se puede saber: se asume que sí.
+func inPeriod(r PSPRecord, run *domain.ReconciliationRun) bool {
+	if r.ProcessedAt == nil {
+		return true
 	}
-	return criticalMismatches[[2]string{systemStatus, pspStatus}]
+	return !r.ProcessedAt.Before(run.PeriodFrom()) && r.ProcessedAt.Before(run.PeriodTo())
+}
+
+// Desenlace de un pago en cada lado. Los estados de ambos se traducen a estos
+// valores y se comparan; un estado del PSP desconocido nunca coincide.
+const (
+	outcomePending  = "pending"
+	outcomeCaptured = "captured"
+	outcomeFailed   = "failed"
+	outcomeRefunded = "refunded"
+)
+
+var systemOutcome = map[string]string{
+	"initiated":     outcomePending,
+	"processing":    outcomePending,
+	"captured":      outcomeCaptured,
+	"risk_rejected": outcomeFailed,
+	"failed":        outcomeFailed,
+	"refunded":      outcomeRefunded,
+}
+
+var pspOutcome = map[string]string{
+	"pending":  outcomePending,
+	"captured": outcomeCaptured,
+	"rejected": outcomeFailed,
+	"failed":   outcomeFailed,
+	"refunded": outcomeRefunded,
+}
+
+// isStatusMismatch indica si los estados de ambos lados no describen el mismo
+// desenlace. Incluye los reembolsos: si uno de los lados lo registra y el otro
+// no, el dinero devuelto no coincide (el operador decide si es un desfase).
+func isStatusMismatch(systemStatus, pspStatus string) bool {
+	sys, okSys := systemOutcome[systemStatus]
+	psp, okPSP := pspOutcome[pspStatus]
+	return !okSys || !okPSP || sys != psp
+}
+
+// jsonOrEmpty serializa los registros de un lado, o "" si no hay ninguno.
+func jsonOrEmpty[T any](records []T) string {
+	if len(records) == 0 {
+		return ""
+	}
+	return toJSON(records)
 }
 
 // ownedBy indica si el run pertenece al tenant del caller.
@@ -250,13 +278,6 @@ func fail(ctx context.Context, runs RunRepository, run *domain.ReconciliationRun
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // ── ProcessInternalUseCase ────────────────────────────────────────────────────

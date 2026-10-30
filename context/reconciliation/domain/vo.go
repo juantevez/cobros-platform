@@ -101,6 +101,10 @@ const (
 	// LedgerImbalance: el Ledger no balancea (sum débitos ≠ sum créditos).
 	// Indica un bug en la lógica de asientos o corrupción de datos.
 	DiscrepancyLedgerImbalance DiscrepancyType = "ledger_imbalance"
+
+	// DuplicateReference: la misma referencia aparece más de una vez en el
+	// informe o en el sistema; no se puede decidir con qué registro comparar.
+	DiscrepancyDuplicateReference DiscrepancyType = "duplicate_reference"
 )
 
 func (t DiscrepancyType) String() string { return string(t) }
