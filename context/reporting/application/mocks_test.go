@@ -49,11 +49,11 @@ func (w *fakeWriter) SaveLedgerMovement(ctx context.Context, m domain.LedgerMove
 type fakeAccounts struct {
 	types   map[string]string
 	err     error
-	lookups []string
+	lookups []string // "tenant/cuenta" de cada consulta
 }
 
-func (a *fakeAccounts) AccountType(ctx context.Context, accountID string) (string, error) {
-	a.lookups = append(a.lookups, accountID)
+func (a *fakeAccounts) AccountType(ctx context.Context, tenantID, accountID string) (string, error) {
+	a.lookups = append(a.lookups, tenantID+"/"+accountID)
 	if a.err != nil {
 		return "", a.err
 	}

@@ -89,7 +89,7 @@ func (uc *ProjectEventsUseCase) ProjectEntryPosted(ctx context.Context, cmd Entr
 		// Denormalizamos el tipo de cuenta para agregar balances sin JOINs.
 		// Si la cuenta no se encuentra, proyectamos con tipo vacío (mejor
 		// que perder el movimiento).
-		accountType, err := uc.accounts.AccountType(ctx, p.AccountID)
+		accountType, err := uc.accounts.AccountType(ctx, cmd.TenantID, p.AccountID)
 		if err != nil {
 			return err
 		}

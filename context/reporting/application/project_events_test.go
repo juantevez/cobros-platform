@@ -168,8 +168,8 @@ func TestProjectEventsUseCase_ProjectEntryPosted(t *testing.T) {
 		if len(w.movements) != 1 || w.movements[0].AccountID != "acc-merchant" {
 			t.Errorf("movements = %+v", w.movements)
 		}
-		if !reflect.DeepEqual(a.lookups, []string{"acc-merchant"}) {
-			t.Errorf("lookups = %v, empty account should not be looked up", a.lookups)
+		if !reflect.DeepEqual(a.lookups, []string{tenantA + "/acc-merchant"}) {
+			t.Errorf("lookups = %v, want only acc-merchant, with the event tenant", a.lookups)
 		}
 	})
 

@@ -44,7 +44,7 @@ func (w *fakeWriter) SaveLedgerMovement(ctx context.Context, m domain.LedgerMove
 
 type fakeAccounts struct{ types map[string]string }
 
-func (a fakeAccounts) AccountType(ctx context.Context, id string) (string, error) {
+func (a fakeAccounts) AccountType(ctx context.Context, tenantID, id string) (string, error) {
 	return a.types[id], nil
 }
 

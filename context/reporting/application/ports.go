@@ -18,8 +18,9 @@ type ProjectionWriter interface {
 // AccountTypeReader resuelve el tipo de una cuenta contable a partir de su ID.
 // Los eventos ledger.entry.posted.v1 traen el account_id pero no el tipo; se
 // consulta la tabla ledger_accounts (misma BD) para denormalizarlo al proyectar.
+// El tenant fija la sesión RLS de la consulta.
 type AccountTypeReader interface {
-	AccountType(ctx context.Context, accountID string) (string, error)
+	AccountType(ctx context.Context, tenantID, accountID string) (string, error)
 }
 
 // ReportReader ejecuta las consultas agregadas del dashboard.
