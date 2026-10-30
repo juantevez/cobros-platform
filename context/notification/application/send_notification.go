@@ -180,7 +180,13 @@ func (uc *SendNotificationUseCase) resolveRecipient(
 
 // ── ListNotifications ─────────────────────────────────────────────────────────
 
-// ListNotificationsUseCase retorna el historial de notificaciones del tenant.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 200
+)
+
+// ListNotificationsUseCase retorna el historial de notificaciones del tenant
+// (limit ≤ 0 → 50; máximo 200).
 type ListNotificationsUseCase struct {
 	notifRepo NotificationRepository
 }
@@ -195,7 +201,10 @@ func (uc *ListNotificationsUseCase) Execute(ctx context.Context, tenantID string
 		return nil, err
 	}
 	if limit <= 0 {
-		limit = 50
+		limit = defaultListLimit
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
 	}
 
 	notifs, err := uc.notifRepo.ListByTenant(ctx, tid, limit)

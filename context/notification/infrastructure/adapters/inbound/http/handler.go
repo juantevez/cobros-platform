@@ -34,7 +34,11 @@ func NewNotificationHandler(
 //
 //	GET /api/v1/notifications?limit=50
 func (h *NotificationHandler) ListNotifications(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := postgres.TenantIDFromContext(c.Request.Context())
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "tenant required"})
+		return
+	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 
 	views, err := h.listNotifs.Execute(c.Request.Context(), tenantID, limit)
@@ -49,7 +53,11 @@ func (h *NotificationHandler) ListNotifications(c *gin.Context) {
 //
 //	GET /api/v1/notifications/preferences
 func (h *NotificationHandler) GetPreferences(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := postgres.TenantIDFromContext(c.Request.Context())
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "tenant required"})
+		return
+	}
 	views, err := h.getPrefs.Execute(c.Request.Context(), application.GetPreferencesQuery{
 		TenantID: tenantID,
 	})
@@ -64,7 +72,11 @@ func (h *NotificationHandler) GetPreferences(c *gin.Context) {
 //
 //	PUT /api/v1/notifications/preferences/:eventType
 func (h *NotificationHandler) UpdatePreference(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := postgres.TenantIDFromContext(c.Request.Context())
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "tenant required"})
+		return
+	}
 
 	var req struct {
 		Enabled        bool    `json:"enabled"`

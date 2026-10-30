@@ -1,8 +1,8 @@
 package application
 
 import (
-	"strings"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -219,6 +219,16 @@ func TestListNotificationsUseCase_Execute(t *testing.T) {
 		}
 		if nr.gotLimit != 50 {
 			t.Errorf("expected default limit 50, got %d", nr.gotLimit)
+		}
+	})
+
+	t.Run("limit capped at 200", func(t *testing.T) {
+		nr := &fakeNotifRepo{}
+		if _, err := NewListNotificationsUseCase(nr).Execute(context.Background(), validTenant(), 1_000_000); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if nr.gotLimit != 200 {
+			t.Errorf("limit = %d, want 200", nr.gotLimit)
 		}
 	})
 

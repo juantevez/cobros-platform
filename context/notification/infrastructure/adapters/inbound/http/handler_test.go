@@ -105,6 +105,20 @@ func TestListNotifications(t *testing.T) {
 		}
 	})
 
+	t.Run("missing tenant yields 403 on every endpoint", func(t *testing.T) {
+		h := newHandler(&fakeNotifRepo{}, &fakePrefRepo{})
+		for name, rec := range map[string]*httptest.ResponseRecorder{
+			"list":      doRequest(h.ListNotifications, http.MethodGet, "/notifications", "", "", nil),
+			"get prefs": doRequest(h.GetPreferences, http.MethodGet, "/notifications/preferences", "", "", nil),
+			"update pref": doRequest(h.UpdatePreference, http.MethodPut, "/x", `{"enabled":false}`, "",
+				gin.Params{{Key: "eventType", Value: "payment.captured"}}),
+		} {
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s: status = %d, want 403", name, rec.Code)
+			}
+		}
+	})
+
 	t.Run("repo error yields 500", func(t *testing.T) {
 		rec := doRequest(newHandler(&fakeNotifRepo{listErr: errBoom}, &fakePrefRepo{}).ListNotifications,
 			http.MethodGet, "/notifications", "", tid, nil)
