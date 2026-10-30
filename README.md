@@ -410,7 +410,7 @@ Subjects publicados hoy, por stream:
 | `PAYOUT` (`payout.>`) | `payout.{initiated,confirmed,failed,unknown}.v1` |
 | `BILLING` (`billing.>`) | `billing.plan.{created,assigned,updated,deactivated}.v1` |
 | `WEBHOOK` (`webhook.>`) | `webhook.endpoint.{registered,deactivated}.v1`, `webhook.delivery.exhausted.v1` |
-| `RECONCILIATION` (`reconciliation.>`) | `reconciliation.run.completed.v1` |
+| `RECONCILIATION` (`reconciliation.>`) | `reconciliation.run.completed.v1`, `reconciliation.discrepancy.resolved.v1` |
 | `DISPUTE` (`dispute.>`) | `dispute.{opened,resolved}.v1` |
 | `COMPLIANCE` (`compliance.>`) | `compliance.alert.{raised,review_proposed,proposal_rejected,resolved}.v1`, `compliance.sanction.{matched,cleared,confirmed}.v1` (internos, los consume Auth) |
 | `NOTIFICATION` (`notification.>`) | *(stream creado; sin eventos publicados)* |
