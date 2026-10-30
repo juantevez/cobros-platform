@@ -136,6 +136,25 @@ func TestNotificationRepository_ListByTenant(t *testing.T) {
 
 // ── PreferenceRepository ──────────────────────────────────────────────────────
 
+func TestNotificationRepository_ListByTenant_rejectsCorruptRows(t *testing.T) {
+	tid := domain.TenantID(uuid.NewString())
+	for name, row := range map[string][]any{
+		"unknown status":  {"id-1", tid.String(), "payment.captured", "email", "u@x.com", "s", "delivered", "", (*time.Time)(nil), testTime},
+		"unknown channel": {"id-1", tid.String(), "payment.captured", "sms", "u@x.com", "s", "sent", "", (*time.Time)(nil), testTime},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mock := newMock(t)
+			expectSession(mock)
+			mock.ExpectQuery("FROM notifications").WithArgs(tid.String(), 50).
+				WillReturnRows(pgxmock.NewRows(notifCols).AddRow(row...))
+			mock.ExpectRollback()
+			if _, err := NewNotificationRepository(mock).ListByTenant(context.Background(), tid, 50); err == nil {
+				t.Fatal("expected error for a corrupt row")
+			}
+		})
+	}
+}
+
 func TestPreferenceRepository_Upsert(t *testing.T) {
 	p := domain.NewNotificationPreference(domain.TenantID(uuid.NewString()),
 		"payment.captured", domain.ChannelEmail, true, "ops@x.com")

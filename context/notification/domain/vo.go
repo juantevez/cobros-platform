@@ -47,9 +47,19 @@ func (c Channel) String() string { return string(c) }
 type NotificationStatus string
 
 const (
-	StatusPending   NotificationStatus = "pending"
-	StatusSent      NotificationStatus = "sent"
-	StatusFailed    NotificationStatus = "failed"
+	StatusPending NotificationStatus = "pending"
+	StatusSent    NotificationStatus = "sent"
+	StatusFailed  NotificationStatus = "failed"
 )
 
 func (s NotificationStatus) String() string { return string(s) }
+
+// ParseStatus valida un estado leído de la base (defensa además del CHECK).
+func ParseStatus(s string) (NotificationStatus, error) {
+	st := NotificationStatus(s)
+	switch st {
+	case StatusPending, StatusSent, StatusFailed:
+		return st, nil
+	}
+	return "", fmt.Errorf("%w: %q", ErrInvalidStatus, s)
+}

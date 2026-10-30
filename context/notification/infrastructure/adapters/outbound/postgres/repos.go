@@ -126,11 +126,18 @@ func (r *pgNotificationRepository) list(ctx context.Context, conn pkgpostgres.Co
 			&recipientEmail, &subject, &statusStr, &errMsg, &sentAt, &createdAt); err != nil {
 			return nil, fmt.Errorf("notification repo: scan: %w", err)
 		}
-		ch, _ := domain.ParseChannel(channelStr)
+		ch, err := domain.ParseChannel(channelStr)
+		if err != nil {
+			return nil, fmt.Errorf("notification repo: row %s: %w", idStr, err)
+		}
+		status, err := domain.ParseStatus(statusStr)
+		if err != nil {
+			return nil, fmt.Errorf("notification repo: row %s: %w", idStr, err)
+		}
 		notifs = append(notifs, domain.ReconstituteNotification(
 			domain.NotificationID(idStr), domain.TenantID(tenantIDStr),
 			eventType, ch, recipientEmail, subject,
-			domain.NotificationStatus(statusStr), errMsg,
+			status, errMsg,
 			sentAt, createdAt.UTC(),
 		))
 	}
@@ -193,7 +200,10 @@ func (r *pgPreferenceRepository) FindByTenantAndEvent(
 		}
 		return nil, fmt.Errorf("preference repo: find: %w", err)
 	}
-	ch, _ := domain.ParseChannel(channelStr)
+	ch, err := domain.ParseChannel(channelStr)
+	if err != nil {
+		return nil, fmt.Errorf("preference repo: %w", err)
+	}
 	return domain.ReconstitutePreference(
 		tenantID, eventType, ch, enabled, recipientEmail, updatedAt.UTC(),
 	), nil
@@ -229,7 +239,10 @@ func (r *pgPreferenceRepository) list(ctx context.Context, conn pkgpostgres.Conn
 		if err := rows.Scan(&eventType, &channelStr, &enabled, &recipientEmail, &updatedAt); err != nil {
 			return nil, fmt.Errorf("preference repo: scan: %w", err)
 		}
-		ch, _ := domain.ParseChannel(channelStr)
+		ch, err := domain.ParseChannel(channelStr)
+		if err != nil {
+			return nil, fmt.Errorf("preference repo: %s: %w", eventType, err)
+		}
 		prefs = append(prefs, domain.ReconstitutePreference(
 			tenantID, eventType, ch, enabled, recipientEmail, updatedAt.UTC(),
 		))

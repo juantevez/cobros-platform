@@ -72,3 +72,16 @@ func TestNotificationStatus_String(t *testing.T) {
 		}
 	}
 }
+
+func TestParseStatus(t *testing.T) {
+	for _, ok := range []NotificationStatus{StatusPending, StatusSent, StatusFailed} {
+		if got, err := ParseStatus(ok.String()); err != nil || got != ok {
+			t.Errorf("ParseStatus(%q) = %q, %v", ok, got, err)
+		}
+	}
+	for _, bad := range []string{"", "SENT", "delivered"} {
+		if _, err := ParseStatus(bad); !errors.Is(err, ErrInvalidStatus) {
+			t.Errorf("ParseStatus(%q): expected ErrInvalidStatus, got %v", bad, err)
+		}
+	}
+}
