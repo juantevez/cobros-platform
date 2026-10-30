@@ -60,11 +60,27 @@ type ReportParser interface {
 	Parse(data []byte) ([]PSPRecord, error)
 }
 
+// LedgerImbalance es un asiento que no balancea en una moneda: créditos menos
+// débitos ≠ 0. Un asiento sin postings se informa con Currency vacío.
+type LedgerImbalance struct {
+	EntryID   string
+	Currency  string
+	Imbalance int64 // créditos - débitos, en centavos
+}
+
+// LedgerCheck es el resultado de revisar el Ledger de un período.
+type LedgerCheck struct {
+	EntriesChecked  int               // asientos creados en el período
+	Unbalanced      []LedgerImbalance // ordenados por asiento y moneda
+	CapturesChecked int               // pagos capturados en el período
+	MissingEntries  []SystemPayment   // capturas sin su asiento payment_captured_<id>
+}
+
 // LedgerChecker verifica la coherencia interna del Ledger.
 type LedgerChecker interface {
-	// CheckBalance verifica que sum(débitos) == sum(créditos) para el período.
-	// Retorna el imbalance en centavos (0 = todo balanceado).
-	CheckBalance(ctx context.Context, tenantID domain.TenantID, from, to time.Time) (int64, error)
+	// Check revisa el período: cada asiento debe balancear por moneda y cada
+	// pago capturado (captured o refunded) debe tener su asiento de captura.
+	Check(ctx context.Context, tenantID domain.TenantID, from, to time.Time) (LedgerCheck, error)
 }
 
 // EventPublisher publica eventos de dominio hacia el Outbox.

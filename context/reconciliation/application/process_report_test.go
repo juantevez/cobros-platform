@@ -622,8 +622,9 @@ func (d *internalDeps) exec() error {
 }
 
 func TestProcessInternalUseCase_Execute(t *testing.T) {
-	t.Run("balanced ledger completes with one match", func(t *testing.T) {
+	t.Run("consistent ledger matches every entry and capture", func(t *testing.T) {
 		d := newInternalDeps()
+		d.ledger.check = LedgerCheck{EntriesChecked: 3, CapturesChecked: 2}
 
 		if err := d.exec(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -631,11 +632,11 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 		if d.run.Status() != domain.RunStatusCompleted {
 			t.Errorf("status = %q, want completed", d.run.Status())
 		}
-		if d.run.TotalRecords() != 1 || d.run.MatchedCount() != 1 || d.run.DiscrepancyCount() != 0 {
-			t.Errorf("counts = %d/%d/%d, want 1/1/0", d.run.TotalRecords(), d.run.MatchedCount(), d.run.DiscrepancyCount())
+		if d.run.TotalRecords() != 5 || d.run.MatchedCount() != 5 || d.run.DiscrepancyCount() != 0 {
+			t.Errorf("counts = %d/%d/%d, want 5/5/0", d.run.TotalRecords(), d.run.MatchedCount(), d.run.DiscrepancyCount())
 		}
 		if d.discs.saveCalls != 0 {
-			t.Error("SaveAll should not be called when balanced")
+			t.Error("SaveAll should not be called when consistent")
 		}
 		if d.ledger.lastTenant != domain.TenantID(tenantA) || !d.ledger.lastFrom.Equal(periodFrom) || !d.ledger.lastTo.Equal(periodTo) {
 			t.Errorf("ledger checked with tenant=%q from=%v to=%v", d.ledger.lastTenant, d.ledger.lastFrom, d.ledger.lastTo)
@@ -649,27 +650,49 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("imbalance creates ledger_imbalance discrepancy", func(t *testing.T) {
+	t.Run("one discrepancy per unbalanced entry and per capture without entry", func(t *testing.T) {
 		d := newInternalDeps()
-		d.ledger.imbalance = -500
+		captured := periodFrom.Add(time.Hour)
+		d.ledger.check = LedgerCheck{
+			EntriesChecked: 4,
+			Unbalanced: []LedgerImbalance{
+				{EntryID: "E-SINGLE", Currency: "ARS", Imbalance: 50},
+				{EntryID: "E-MIXED", Currency: "ARS", Imbalance: 100},
+				{EntryID: "E-MIXED", Currency: "USD", Imbalance: -100},
+				{EntryID: "E-EMPTY"},
+			},
+			CapturesChecked: 3,
+			MissingEntries:  []SystemPayment{{PaymentID: "P-2", PSPReference: "R2", Amount: 200, Currency: "ARS", Status: "captured", CapturedAt: &captured}},
+		}
 
 		if err := d.exec(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if d.run.MatchedCount() != 0 || d.run.DiscrepancyCount() != 1 {
-			t.Errorf("matched=%d discrepancies=%d, want 0/1", d.run.MatchedCount(), d.run.DiscrepancyCount())
+		if d.run.TotalRecords() != 7 || d.run.MatchedCount() != 3 || d.run.DiscrepancyCount() != 4 {
+			t.Errorf("counts = %d/%d/%d, want 7/3/4", d.run.TotalRecords(), d.run.MatchedCount(), d.run.DiscrepancyCount())
 		}
-		if len(d.discs.saved) != 1 {
-			t.Fatalf("expected 1 discrepancy, got %d", len(d.discs.saved))
+
+		want := []struct {
+			typ                domain.DiscrepancyType
+			record, sys, extnl string
+		}{
+			{domain.DiscrepancyLedgerImbalance, "E-SINGLE", "0", "50 ARS (créditos - débitos)"},
+			{domain.DiscrepancyLedgerImbalance, "E-MIXED", "0", "100 ARS, -100 USD (créditos - débitos)"},
+			{domain.DiscrepancyLedgerImbalance, "E-EMPTY", "0", "sin postings"},
+			{domain.DiscrepancyMissingInLedger, "P-2", "", ""},
 		}
-		disc := d.discs.saved[0]
-		if disc.Type() != domain.DiscrepancyLedgerImbalance || disc.RecordID() != "global" ||
-			disc.SystemValue() != "0" || disc.ExternalValue() != "-500 (centavos fuera de balance)" {
-			t.Errorf("discrepancy = type=%q record=%q system=%q external=%q",
-				disc.Type(), disc.RecordID(), disc.SystemValue(), disc.ExternalValue())
+		if len(d.discs.saved) != len(want) {
+			t.Fatalf("got %d discrepancies, want %d", len(d.discs.saved), len(want))
 		}
-		if disc.RunID() != d.run.ID() {
-			t.Error("discrepancy not linked to run")
+		for i, w := range want {
+			disc := d.discs.saved[i]
+			if disc.Type() != w.typ || disc.RecordID() != w.record || disc.ExternalValue() != w.extnl ||
+				(w.sys != "" && disc.SystemValue() != w.sys) || disc.RunID() != d.run.ID() {
+				t.Errorf("discrepancy %d = type=%q record=%q system=%q external=%q", i, disc.Type(), disc.RecordID(), disc.SystemValue(), disc.ExternalValue())
+			}
+		}
+		if !strings.Contains(d.discs.saved[3].SystemValue(), `"PaymentID":"P-2"`) {
+			t.Errorf("missing_in_ledger system value = %q", d.discs.saved[3].SystemValue())
 		}
 	})
 
@@ -743,10 +766,10 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 		d.ledger.err = errBoom
 
 		err := d.exec()
-		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "check ledger balance") {
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "check ledger") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
-		if d.run.Status() != domain.RunStatusFailed || d.run.ErrorMsg() != "check ledger balance: boom" {
+		if d.run.Status() != domain.RunStatusFailed || d.run.ErrorMsg() != "check ledger: boom" {
 			t.Errorf("status=%q errorMsg=%q", d.run.Status(), d.run.ErrorMsg())
 		}
 		if !reflect.DeepEqual(d.runs.updates, []domain.RunStatus{domain.RunStatusRunning, domain.RunStatusFailed}) {
@@ -756,7 +779,7 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 
 	t.Run("save discrepancies error marks run failed", func(t *testing.T) {
 		d := newInternalDeps()
-		d.ledger.imbalance = 10
+		d.ledger.check = LedgerCheck{EntriesChecked: 1, Unbalanced: []LedgerImbalance{{EntryID: "E", Currency: "ARS", Imbalance: 10}}}
 		d.discs.saveErr = errBoom
 
 		err := d.exec()

@@ -95,10 +95,10 @@ func (f fakePaymentReader) ReadByPeriod(ctx context.Context, t domain.TenantID, 
 	return f.payments, nil
 }
 
-type fakeLedger struct{ imbalance int64 }
+type fakeLedger struct{ check application.LedgerCheck }
 
-func (f fakeLedger) CheckBalance(ctx context.Context, t domain.TenantID, from, to time.Time) (int64, error) {
-	return f.imbalance, nil
+func (f fakeLedger) Check(ctx context.Context, t domain.TenantID, from, to time.Time) (application.LedgerCheck, error) {
+	return f.check, nil
 }
 
 type fakePublisher struct{}
@@ -117,13 +117,19 @@ type env struct {
 	h     *ReconciliationHandler
 }
 
-func newEnv(payments []application.SystemPayment, imbalance int64) *env {
+// newEnv arma el handler con fakes; unbalanced es la cantidad de asientos
+// desbalanceados que informa el Ledger.
+func newEnv(payments []application.SystemPayment, unbalanced int) *env {
+	check := application.LedgerCheck{EntriesChecked: unbalanced}
+	for i := 0; i < unbalanced; i++ {
+		check.Unbalanced = append(check.Unbalanced, application.LedgerImbalance{EntryID: fmt.Sprint("E", i), Currency: "ARS", Imbalance: 1})
+	}
 	runs := &fakeRunRepo{byID: map[domain.RunID]*domain.ReconciliationRun{}}
 	discs := &fakeDiscRepo{byID: map[domain.DiscrepancyID]*domain.Discrepancy{}}
 	h := NewReconciliationHandler(
 		application.NewStartReconciliationUseCase(runs),
 		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakeTx{}, fakePublisher{}),
-		application.NewProcessInternalUseCase(runs, discs, fakeLedger{imbalance}, fakeTx{}, fakePublisher{}),
+		application.NewProcessInternalUseCase(runs, discs, fakeLedger{check}, fakeTx{}, fakePublisher{}),
 		application.NewResolveDiscrepancyUseCase(discs, fakeTx{}, fakePublisher{}),
 		application.NewGetReportUseCase(runs, discs),
 		application.NewListRunsUseCase(runs),
@@ -416,7 +422,7 @@ func (errReader) Read([]byte) (int, error) { return 0, errBoom }
 
 func TestProcessInternal(t *testing.T) {
 	t.Run("runs ledger check and returns 202", func(t *testing.T) {
-		e := newEnv(nil, 42)
+		e := newEnv(nil, 1)
 		run := e.seedRun(domain.TypeInternal)
 
 		rec := doRequest(e.h.ProcessInternal, http.MethodPost, "/runs/x/process-internal", "", testTenant, runParam(run.ID().String()))

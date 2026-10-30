@@ -196,21 +196,21 @@ func (f *fakeParser) Parse(data []byte) ([]PSPRecord, error) {
 	return f.records, nil
 }
 
-// fakeLedger devuelve un imbalance fijo o un error.
+// fakeLedger devuelve un resultado fijo o un error.
 type fakeLedger struct {
-	imbalance  int64
+	check      LedgerCheck
 	err        error
 	lastTenant domain.TenantID
 	lastFrom   time.Time
 	lastTo     time.Time
 }
 
-func (f *fakeLedger) CheckBalance(ctx context.Context, tenantID domain.TenantID, from, to time.Time) (int64, error) {
+func (f *fakeLedger) Check(ctx context.Context, tenantID domain.TenantID, from, to time.Time) (LedgerCheck, error) {
 	f.lastTenant, f.lastFrom, f.lastTo = tenantID, from, to
 	if f.err != nil {
-		return 0, f.err
+		return LedgerCheck{}, f.err
 	}
-	return f.imbalance, nil
+	return f.check, nil
 }
 
 // fakePublisher acumula eventos publicados o falla con err.

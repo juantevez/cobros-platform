@@ -98,13 +98,18 @@ const (
 	// Ejemplo: sistema dice "captured" pero PSP dice "rejected".
 	DiscrepancyStatusMismatch DiscrepancyType = "status_mismatch"
 
-	// LedgerImbalance: el Ledger no balancea (sum débitos ≠ sum créditos).
+	// LedgerImbalance: un asiento no balancea en una moneda (sum débitos ≠
+	// sum créditos) o no tiene postings.
 	// Indica un bug en la lógica de asientos o corrupción de datos.
 	DiscrepancyLedgerImbalance DiscrepancyType = "ledger_imbalance"
 
 	// DuplicateReference: la misma referencia aparece más de una vez en el
 	// informe o en el sistema; no se puede decidir con qué registro comparar.
 	DiscrepancyDuplicateReference DiscrepancyType = "duplicate_reference"
+
+	// MissingInLedger: un pago capturado no tiene su asiento en el Ledger
+	// (el dinero entró pero no quedó contabilizado).
+	DiscrepancyMissingInLedger DiscrepancyType = "missing_in_ledger"
 )
 
 func (t DiscrepancyType) String() string { return string(t) }

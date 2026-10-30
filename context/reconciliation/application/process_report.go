@@ -282,8 +282,10 @@ func toJSON(v any) string {
 
 // ── ProcessInternalUseCase ────────────────────────────────────────────────────
 
-// ProcessInternalUseCase verifica la coherencia matemática del Ledger.
-// Verifica que sum(débitos) == sum(créditos) para el período del run.
+// ProcessInternalUseCase verifica la coherencia del Ledger en el período del
+// run: cada asiento balancea por moneda (el trigger de la base solo valida
+// asientos con 2+ postings y suma todas las monedas juntas) y cada pago
+// capturado tiene su asiento. total_records = asientos + capturas revisados.
 type ProcessInternalUseCase struct {
 	runRepo         RunRepository
 	discrepancyRepo DiscrepancyRepository
@@ -323,24 +325,42 @@ func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessIntern
 		return err
 	}
 
-	// Verificar balance del Ledger para el período.
-	imbalance, err := uc.ledgerChecker.CheckBalance(ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo())
+	check, err := uc.ledgerChecker.Check(ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo())
 	if err != nil {
-		return fail(ctx, uc.runRepo, run, fmt.Errorf("check ledger balance: %w", err))
+		return fail(ctx, uc.runRepo, run, fmt.Errorf("check ledger: %w", err))
 	}
 
+	discrepancies := ledgerDiscrepancies(run, check)
+	total := check.EntriesChecked + check.CapturesChecked
+	return complete(ctx, uc.txManager, uc.runRepo, uc.discrepancyRepo, uc.publisher, run, discrepancies, total, total-len(discrepancies))
+}
+
+// ledgerDiscrepancies arma una discrepancia por asiento desbalanceado (con el
+// imbalance de cada moneda) y una por captura sin asiento.
+func ledgerDiscrepancies(run *domain.ReconciliationRun, check LedgerCheck) []*domain.Discrepancy {
 	var discrepancies []*domain.Discrepancy
-	matched := 1
-	if imbalance != 0 {
-		matched = 0
+	newDisc := func(t domain.DiscrepancyType, ref, system, external string) {
 		discrepancies = append(discrepancies, domain.NewDiscrepancy(
-			domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-			domain.DiscrepancyLedgerImbalance,
-			"global",
-			"0",
-			fmt.Sprintf("%d (centavos fuera de balance)", imbalance),
+			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external,
 		))
 	}
 
-	return complete(ctx, uc.txManager, uc.runRepo, uc.discrepancyRepo, uc.publisher, run, discrepancies, 1, matched)
+	for i := 0; i < len(check.Unbalanced); {
+		entryID := check.Unbalanced[i].EntryID
+		var parts []string
+		for ; i < len(check.Unbalanced) && check.Unbalanced[i].EntryID == entryID; i++ {
+			if c := check.Unbalanced[i]; c.Currency != "" {
+				parts = append(parts, fmt.Sprintf("%d %s", c.Imbalance, c.Currency))
+			}
+		}
+		external := "sin postings"
+		if len(parts) > 0 {
+			external = strings.Join(parts, ", ") + " (créditos - débitos)"
+		}
+		newDisc(domain.DiscrepancyLedgerImbalance, entryID, "0", external)
+	}
+	for _, p := range check.MissingEntries {
+		newDisc(domain.DiscrepancyMissingInLedger, p.PaymentID, toJSON(p), "")
+	}
+	return discrepancies
 }
