@@ -190,8 +190,7 @@ cubre la lectura del último hash y el INSERT, así dos registros simultáneos n
 se encadenan al mismo eslabón. Un `SELECT … FOR UPDATE` de la última fila **no
 alcanza**, ni siquiera dentro de la transacción: en READ COMMITTED el segundo
 lector, al obtener el lock, revalida la misma fila vieja en lugar de ver la
-recién insertada (reproducido contra PostgreSQL 16). Prueba de estrés: 8
-goroutines × 50 registros concurrentes → cadena válida, sin bifurcaciones.
+recién insertada.
 
 Mapeo evento → entrada ([inbound/nats/event_consumer.go](../../context/audit/infrastructure/adapters/inbound/nats/event_consumer.go)):
 
@@ -378,15 +377,14 @@ catálogo se reconstituye como vacío.
 
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
-| 1 | Entradas previas al fix de precisión | Las entradas grabadas antes de truncar `created_at` a microsegundos tienen un hash calculado con nanosegundos que ya no existen en la base: no verifican y no se pueden recuperar. `/audit/verify` desde `from_id = 0` reporta la primera de ellas; verificar desde la primera entrada posterior al fix. | Operativo |
-| 2 | Cobertura parcial | Solo `AUTH` y `LEDGER`. No se auditan Onboarding (decisiones KYC), Payment, Payout, Billing, Dispute, Webhook ni Compliance (holds, four-eyes, cambios de watchlist). `login`/`logout` definidos y sin uso. | Medio |
-| 3 | Actor genérico | Todo queda como `system` salvo `role.assigned`: no se sabe qué operador suspendió un tenant o revocó una key (los eventos no traen el actor). | Medio |
-| 4 | Campos fuera del hash | `metadata` y `correlation_id` no entran en el payload canónico: se pueden alterar sin que la verificación lo detecte. | Medio |
-| 5 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
-| 6 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
-| 7 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
-| 8 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
-| 9 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
+| 1 | Cobertura parcial | Solo `AUTH` y `LEDGER`. No se auditan Onboarding (decisiones KYC), Payment, Payout, Billing, Dispute, Webhook ni Compliance (holds, four-eyes, cambios de watchlist). `login`/`logout` definidos y sin uso. | Medio |
+| 2 | Actor genérico | Todo queda como `system` salvo `role.assigned`: no se sabe qué operador suspendió un tenant o revocó una key (los eventos no traen el actor). | Medio |
+| 3 | Campos fuera del hash | `metadata` y `correlation_id` no entran en el payload canónico: se pueden alterar sin que la verificación lo detecte. | Medio |
+| 4 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
+| 5 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
+| 6 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
+| 7 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
+| 8 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
 
 ---
 
@@ -405,15 +403,11 @@ catálogo se reconstituye como vacío.
 go test ./context/audit/...
 ```
 
-`TestNewAuditLogEntry_storagePrecision` cubre la regresión de precisión
-(timestamp con nanosegundos que vuelve de la base truncado a microsegundos).
+`TestNewAuditLogEntry_storagePrecision` cubre la precisión del timestamp
+(nanosegundos que vuelven de la base truncados a microsegundos).
 `TestRecordActionUseCase_Execute` verifica que `LockChain → FindLast → Save`
 ocurran en orden y dentro de la misma transacción. Los guards y el aislamiento
 por tenant están en `audit_handler_test.go`.
-
-Validado además contra PostgreSQL 16 (no automatizado): migración 000024 up →
-down → up, y estrés de 8 goroutines × 50 registros con el caso de uso real →
-`VerifyChain` válida sobre las 400 entradas, sin `prev_hash` repetidos.
 
 ---
 
