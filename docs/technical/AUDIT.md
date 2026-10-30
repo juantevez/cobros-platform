@@ -2,7 +2,8 @@
 
 > **Bounded Context:** `context/audit`
 > **Migraciones:** [`000004_audit_init`](../../migrations/000004_audit_init.up.sql),
-> [`000024_audit_chain_integrity`](../../migrations/000024_audit_chain_integrity.up.sql)
+> [`000024_audit_chain_integrity`](../../migrations/000024_audit_chain_integrity.up.sql),
+> [`000025_audit_hash_payload`](../../migrations/000025_audit_hash_payload.up.sql)
 > **Streams NATS consumidos:** `AUTH` (`auth.>`), `LEDGER` (`ledger.>`) — no publica eventos
 
 ---
@@ -100,8 +101,8 @@ Archivo: [domain/log_entry.go](../../context/audit/domain/log_entry.go)
 | `actor` | `string` | userID, `system`. Vacío → `system`. |
 | `action` | `Action` | Ver §4.4. |
 | `resourceType` / `resourceID` | `ResourceType` / `string` | Recurso afectado. |
-| `metadata` | `map[string]string` | Contexto libre; hoy `{event_subject}`. **No entra en el hash.** |
-| `correlationID` | `string` | Header `correlation-id` del mensaje. **No entra en el hash.** |
+| `metadata` | `map[string]string` | Contexto libre; hoy `{event_subject}`. Entra en el hash. |
+| `correlationID` | `string` | Header `correlation-id` del mensaje. Entra en el hash. |
 | `prevHash` | `[]byte` | Hash de la entrada anterior; `nil` en la primera del sistema. |
 | `hash` | `[]byte` | SHA-256 del payload canónico (32 bytes). |
 | `createdAt` | `time.Time` | Reloj del worker al registrar, en UTC y **truncado a microsegundos** (`TruncateToStorage`), la precisión de `TIMESTAMPTZ`. No es la hora del evento. |
@@ -132,14 +133,23 @@ No hay mutaciones: una entrada no cambia después de creada.
 ### 4.3 Payload canónico y hash
 
 ```
-hash_n = SHA-256( hex(prev_hash) | tenant_id | actor | action | resource_type | resource_id | created_at RFC3339Nano UTC )
+hash_n = SHA-256( JSON[ hex(prev_hash), tenant_id, actor, action, resource_type,
+                        resource_id, created_at, correlation_id, metadata ] )
 ```
 
-Campos unidos con `|` en ese orden fijo (no debe cambiar: invalidaría toda la
-cadena existente). `created_at` se trunca a microsegundos **antes** de hashear:
-si se hasheara con los nanosegundos de `time.Now()`, al releer la fila desde
-`TIMESTAMPTZ` el payload cambiaría y la verificación fallaría siempre. `metadata` y `correlation_id` **quedan fuera**: se pueden
-modificar sin que la verificación lo detecte (§10).
+El payload canónico es un **array JSON** con todos los campos de la entrada,
+en ese orden fijo (no debe cambiar: invalidaría la cadena existente). Así
+cualquier campo modificado rompe la verificación, y un valor que contenga
+caracteres especiales no puede hacer colisionar dos entradas distintas (con un
+separador de texto plano, `("x|y","z")` y `("x","y|z")` darían el mismo
+payload).
+
+- `created_at`: RFC3339Nano UTC, truncado a microsegundos **antes** de hashear
+  (`TruncateToStorage`). `TIMESTAMPTZ` guarda microsegundos: con los
+  nanosegundos de `time.Now()` el payload cambiaría al releer la fila.
+- `metadata`: objeto JSON con las claves ordenadas (`encoding/json` ordena los
+  mapas); `nil` equivale a `{}`. El payload es idéntico antes de persistir y
+  después de leer de `JSONB`, incluso con acentos, comillas o `<>&`.
 
 Implementación del hash: [crypto/sha256_hasher.go](../../context/audit/infrastructure/adapters/outbound/crypto/sha256_hasher.go)
 (`SHA256Hasher.Compute`, sin salt: el payload ya incluye `prev_hash` y timestamp).
@@ -360,10 +370,9 @@ catálogo se reconstituye como vacío.
 
 ## 9. Seguridad y multi-tenancy
 
-- **Integridad**: tamper-evident, no tamper-proof. Detecta cambios en los
-  campos del payload canónico de filas intermedias; no detecta cambios en
-  `metadata`/`correlation_id`, borrado de la cola ni la reescritura completa
-  de la cadena (no hay anclaje externo).
+- **Integridad**: tamper-evident, no tamper-proof. Detecta cambios en
+  cualquier campo de filas intermedias; no detecta el borrado de la cola ni la
+  reescritura completa de la cadena (no hay anclaje externo).
 - **Inmutabilidad**: solo por convención del código (§4.2).
 - **Aislamiento**: por `WHERE tenant_id` en la consulta, con el tenant tomado
   del JWT en `/audit/logs`. La lectura de otros comercios y la verificación
@@ -379,12 +388,11 @@ catálogo se reconstituye como vacío.
 |---|---|---|---|
 | 1 | Cobertura parcial | Solo `AUTH` y `LEDGER`. No se auditan Onboarding (decisiones KYC), Payment, Payout, Billing, Dispute, Webhook ni Compliance (holds, four-eyes, cambios de watchlist). `login`/`logout` definidos y sin uso. | Medio |
 | 2 | Actor genérico | Todo queda como `system` salvo `role.assigned`: no se sabe qué operador suspendió un tenant o revocó una key (los eventos no traen el actor). | Medio |
-| 3 | Campos fuera del hash | `metadata` y `correlation_id` no entran en el payload canónico: se pueden alterar sin que la verificación lo detecte. | Medio |
-| 4 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
-| 5 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
-| 6 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
-| 7 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
-| 8 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
+| 3 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
+| 4 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
+| 5 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
+| 6 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
+| 7 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
 
 ---
 
@@ -392,7 +400,7 @@ catálogo se reconstituye como vacío.
 
 | Capa | Archivos | Tipo |
 |---|---|---|
-| Dominio | `domain/log_entry_test.go`, `vo_test.go` | Unitarios: hash determinista, campos fuera del hash, `VerifyHash` con manipulación, `ChainLinksTo`, parseo de VOs. |
+| Dominio | `domain/log_entry_test.go`, `vo_test.go` | Unitarios: hash determinista, todos los campos cubiertos (incl. `metadata`/`correlation_id`), orden de claves y `nil` vs `{}`, sin colisiones por separador, `VerifyHash` con manipulación, `ChainLinksTo`, parseo de VOs. |
 | Aplicación | `application/record_action_test.go`, `verify_chain_test.go`, `list_logs_test.go` (+ `mocks_test.go`) | Unitarios con repo en memoria: encadenamiento, cadena rota, límites. |
 | HTTP | `inbound/http/audit_handler_test.go` | Handlers Gin con `httptest`: tenant por defecto del JWT, 200/409/500, rutas. |
 | NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject, ack de desconocidos, nak ante error, configs de consumers. |

@@ -2,8 +2,8 @@ package domain
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -11,9 +11,10 @@ import (
 //
 // Forma una cadena de hash tamper-evident:
 //
-//	hash_n = SHA-256( hex(hash_{n-1}) | tenantID | actor | action | resourceType | resourceID | createdAt )
+//	hash_n = SHA-256( JSON[hex(hash_{n-1}), tenantID, actor, action,
+//	                       resourceType, resourceID, createdAt, correlationID, metadata] )
 //
-// Si alguien modifica cualquier campo de la entrada k, su hash cambia y deja
+// (ver canonicalPayload). Si alguien modifica cualquier campo de la entrada k, su hash cambia y deja
 // de coincidir con el prev_hash de k+1: la manipulación queda evidenciada.
 //
 // El ID es BIGSERIAL (entero secuencial) para garantizar el orden de la cadena
@@ -119,14 +120,27 @@ func (e *AuditLogEntry) VerifyHash(computeHash func(payload string) []byte) bool
 	return true
 }
 
-// canonicalPayload construye el string determinista sobre el que se calcula el hash.
-// El orden y formato de los campos es fijo y no debe cambiar.
+// canonicalPayload construye el string determinista sobre el que se calcula
+// el hash: un array JSON con TODOS los campos de la entrada, en orden fijo.
+//
+//	["<hex prev_hash>", tenant_id, actor, action, resource_type, resource_id,
+//	 "<created_at RFC3339Nano UTC>", correlation_id, {metadata}]
+//
+// JSON y no un join con separador: un valor que contenga el separador no
+// puede hacer colisionar dos entradas distintas. metadata se serializa con
+// las claves ordenadas (encoding/json ordena los mapas) y nil equivale a {}:
+// así el payload es el mismo antes de persistir y después de leer de JSONB.
+// El orden y el formato no deben cambiar: invalidarían la cadena existente.
 func (e *AuditLogEntry) canonicalPayload() string {
 	prevHashHex := ""
 	if len(e.prevHash) > 0 {
 		prevHashHex = hex.EncodeToString(e.prevHash)
 	}
-	return strings.Join([]string{
+	metadata := e.metadata
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	payload, err := json.Marshal([]any{
 		prevHashHex,
 		e.tenantID,
 		e.actor,
@@ -134,7 +148,14 @@ func (e *AuditLogEntry) canonicalPayload() string {
 		e.resourceType.String(),
 		e.resourceID,
 		e.createdAt.UTC().Format(time.RFC3339Nano),
-	}, "|")
+		e.correlationID,
+		metadata,
+	})
+	if err != nil {
+		// Solo strings y map[string]string: Marshal no puede fallar.
+		panic(fmt.Sprintf("audit: canonical payload: %v", err))
+	}
+	return string(payload)
 }
 
 // HashHex retorna el hash como string hexadecimal (para mostrar en APIs).

@@ -97,13 +97,41 @@ func TestNewAuditLogEntry(t *testing.T) {
 		}
 	})
 
-	t.Run("metadata and correlationID excluded from hash", func(t *testing.T) {
+	t.Run("metadata and correlationID are covered by the hash", func(t *testing.T) {
+		mk := func(meta map[string]string, corr string) string {
+			e, _ := NewAuditLogEntry("t", "a", ActionLogin, ResourceUser, "r", meta, corr, nil, createdAt, sha256Hash)
+			return e.HashHex()
+		}
+		base := mk(map[string]string{"x": "1"}, "corr-A")
+		if base == mk(map[string]string{"x": "2"}, "corr-A") {
+			t.Error("metadata change not detected")
+		}
+		if base == mk(map[string]string{"x": "1"}, "corr-B") {
+			t.Error("correlationID change not detected")
+		}
+	})
+
+	t.Run("metadata key order and nil vs empty do not change the hash", func(t *testing.T) {
 		a, _ := NewAuditLogEntry("t", "a", ActionLogin, ResourceUser, "r",
-			map[string]string{"x": "1"}, "corr-A", nil, createdAt, sha256Hash)
+			map[string]string{"a": "1", "b": "2"}, "", nil, createdAt, sha256Hash)
 		b, _ := NewAuditLogEntry("t", "a", ActionLogin, ResourceUser, "r",
-			map[string]string{"y": "2"}, "corr-B", nil, createdAt, sha256Hash)
+			map[string]string{"b": "2", "a": "1"}, "", nil, createdAt, sha256Hash)
 		if a.HashHex() != b.HashHex() {
-			t.Error("metadata/correlationID leaked into canonical payload")
+			t.Error("map iteration order leaked into the hash")
+		}
+		n, _ := NewAuditLogEntry("t", "a", ActionLogin, ResourceUser, "r", nil, "", nil, createdAt, sha256Hash)
+		e, _ := NewAuditLogEntry("t", "a", ActionLogin, ResourceUser, "r", map[string]string{}, "", nil, createdAt, sha256Hash)
+		if n.HashHex() != e.HashHex() {
+			t.Error("nil and empty metadata must hash the same (JSONB round trip)")
+		}
+	})
+
+	t.Run("separator inside a field cannot collide two entries", func(t *testing.T) {
+		// Con el viejo join por "|", ("x|y","z") y ("x","y|z") producían el mismo payload.
+		a, _ := NewAuditLogEntry("x|y", "z", ActionLogin, ResourceUser, "r", nil, "", nil, createdAt, sha256Hash)
+		b, _ := NewAuditLogEntry("x", "y|z", ActionLogin, ResourceUser, "r", nil, "", nil, createdAt, sha256Hash)
+		if a.HashHex() == b.HashHex() {
+			t.Error("distinct entries collided")
 		}
 	})
 }
