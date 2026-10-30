@@ -4,7 +4,8 @@
 > **Migraciones:** [`000010_reconciliation_init`](../../migrations/000010_reconciliation_init.up.sql),
 > [`000030_reconciliation_rls`](../../migrations/000030_reconciliation_rls.up.sql),
 > [`000031_reconciliation_duplicate_reference`](../../migrations/000031_reconciliation_duplicate_reference.up.sql),
-> [`000032_reconciliation_missing_in_ledger`](../../migrations/000032_reconciliation_missing_in_ledger.up.sql)
+> [`000032_reconciliation_missing_in_ledger`](../../migrations/000032_reconciliation_missing_in_ledger.up.sql),
+> [`000033_reconciliation_run_lease`](../../migrations/000033_reconciliation_run_lease.up.sql)
 > **Stream NATS publicado:** `RECONCILIATION` (`reconciliation.>`) vía outbox — no consume eventos
 > **Lee tablas de otros BCs:** `payments` (Payment), `journal_entries` + `postings` (Ledger)
 
@@ -30,7 +31,7 @@ Responsabilidades:
 3. Verificar el Ledger del período: doble partida por asiento y moneda, y un asiento por cada captura.
 4. Persistir las discrepancias y exponer el reporte del run.
 5. Permitir al operador **resolver** o **ignorar** cada discrepancia con notas.
-6. Publicar `reconciliation.run.completed.v1` y `reconciliation.discrepancy.resolved.v1`
+6. Publicar `reconciliation.run.{completed,failed}.v1` y `reconciliation.discrepancy.resolved.v1`
    (los consume Audit).
 
 ### Fuera de alcance (hoy)
@@ -51,7 +52,8 @@ Responsabilidades:
 | **Run** (`ReconciliationRun`) | Una ejecución de conciliación de un tipo sobre un período. Tiene estado y contadores. |
 | **Período** | Intervalo semiabierto `[period_from, period_to)`, con `period_from < period_to`. |
 | **Run global** | Run sin `tenant_id`: abarca todos los tenants. Solo para procesos internos de plataforma. |
-| **Claim** | Paso del run a `running` con un UPDATE condicionado al estado leído: de dos procesos simultáneos, solo uno lo toma. |
+| **Claim** | Paso del run a `running` con un UPDATE condicionado a la versión leída (optimistic locking): de dos procesos simultáneos, solo uno lo toma. |
+| **Run abandonado** | Run `running` tomado hace más de `RunStaleAfter` (15 min) sin cerrarse, o sin registro de cuándo se tomó: el proceso murió. Se puede volver a tomar. |
 | **Informe del PSP** | CSV con las transacciones que el PSP dice haber procesado. |
 | **`psp_reference`** | Referencia del pago en el PSP. Es la clave de matching (`transaction_id` en el CSV). |
 | **Discrepancia** | Diferencia detectada en un run. Queda `open` hasta que un operador la resuelve o la ignora. |
@@ -83,6 +85,9 @@ sequenceDiagram
     H->>RR: Save(run pending)
     H-->>O: 201 {run_id}
     O->>H: POST /runs/:runID/report (CSV)
+    alt CSV de más de 50 MB
+        H-->>O: 413
+    end
     H->>UC: Execute(tenant, runID, CSV)
     UC->>CSV: Parse(CSV)
     alt CSV mal formado
@@ -90,26 +95,26 @@ sequenceDiagram
     end
     UC->>RR: FindByID + ownedBy(tenant)
     UC->>UC: el run debe ser de tipo payment (si no, 422)
-    UC->>RR: claim: Update(running) WHERE status = leído
+    UC->>RR: claim: Update(running) WHERE version = leída
     alt otro proceso lo tomó antes
         UC-->>H: ErrRunAlreadyRunning (409)
     end
     UC->>PR: ReadByPeriod(tenant, from, to)
     UC->>UC: indexar ambos lados por psp_reference y comparar
     alt error al leer pagos
-        UC->>RR: Update(failed, error_msg)
+        UC->>RR: Update(failed, error_msg) + Publish(run.failed)
         UC-->>H: error 500
     end
     rect rgba(128, 128, 128, 0.1)
         Note over UC,OB: una sola transacción
         UC->>DR: SaveAll(discrepancias)
-        UC->>RR: Update(completed) WHERE status = running
+        UC->>RR: Update(completed) WHERE version = leída
         UC->>OB: Publish(reconciliation.run.completed.v1)
     end
     alt la transacción falla
-        UC->>RR: Update(failed) (sin discrepancias guardadas)
+        UC->>RR: Update(failed) + Publish(run.failed) (sin discrepancias guardadas)
     end
-    H-->>O: 202
+    H-->>O: 200 {run terminado}
     O->>H: GET /runs/:runID?status=open
     H-->>O: 200 {run, discrepancies}
     O->>H: POST /discrepancies/:id/resolve (resolve o ignore)
@@ -119,7 +124,9 @@ sequenceDiagram
 `internal_ledger` sigue el mismo esqueleto con `POST /runs/:runID/process-internal` (sin CSV): el
 `LedgerChecker` revisa el período y cada hallazgo es una discrepancia (ver "Chequeo del Ledger").
 
-Un run `failed` se puede volver a procesar: el fallo no deja discrepancias guardadas.
+Un run `failed` se puede volver a procesar: el fallo no deja discrepancias guardadas. Un run
+abandonado en `running` (el proceso murió a mitad) también: pasado `RunStaleAfter` cualquier
+request de proceso lo retoma.
 
 ### Reglas de matching (`payment`)
 
@@ -184,21 +191,25 @@ consumer viene atrasado.
 | `total_records`, `matched_count`, `discrepancy_count` | Se fijan en `Complete`; `Fail` los vuelve a cero. |
 | `error_msg` | Se fija en `Fail`; `Start` lo limpia. |
 | `created_at`, `completed_at` | `completed_at` se fija en `Complete` y en `Fail`. |
+| `started_at` | Se fija en cada `Start` (claim). Define si un run `running` está abandonado. |
+| `version` | Optimistic locking: cada UPDATE exige la versión leída y la incrementa (`MarkVersionPersisted`). |
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending: NewReconciliationRun
     pending --> running: Start()
     failed --> running: Start() (reproceso)
+    running --> running: Start() (abandonado)
     running --> completed: Complete()
     running --> failed: Fail(reason)
     completed --> [*]
 ```
 
-- `Start()` solo desde `pending` o `failed`; desde `running` o `completed` devuelve
+- `Start(now)` desde `pending`, `failed` o un `running` abandonado (`IsStale`); en otro caso
   `ErrRunAlreadyRunning`.
-- `Complete()` registra `ReconciliationCompletedEvent`. `Fail()` no emite evento y descarta los
-  eventos pendientes.
+- `Complete(…, now)` y `Fail(reason, now)` solo desde `running` (si no, `ErrRunNotRunning`).
+  Registran `ReconciliationCompletedEvent` y `ReconciliationFailedEvent`.
+- Toda la hora la recibe el dominio desde el `Clock` de la aplicación: no usa `time.Now()`.
 
 ### 4.2 Entidad `Discrepancy`
 
@@ -228,7 +239,7 @@ stateDiagram-v2
 | `ErrRunAlreadyRunning`, `ErrDiscrepancyAlreadyResolved` | 409 (incluye perder el claim contra otro proceso) |
 | `ErrInvalidPeriod`, `ErrEmptyReport`, `ErrInvalidReportFormat`, `ErrInvalidArgument` | 400 (`ErrInvalidArgument`: IDs, tipo de run, acción, filtro de estado) |
 | `ErrRunTypeMismatch` | 422: la operación no corresponde al tipo del run |
-| `ErrRunNotCompleted` | Declarado, sin uso |
+| `ErrRunNotRunning` | 500: cerrar o fallar un run que no está `running` (no ocurre: el claim lo garantiza) |
 | Cualquier otro | 500 |
 
 ---
@@ -241,8 +252,8 @@ stateDiagram-v2
 | `ProcessReportUseCase` | Parsea el CSV → verifica tipo `payment` → claim → lee `payments` del período → compara → en una transacción: discrepancias + `Complete` + evento. |
 | `ProcessInternalUseCase` | Verifica tipo `internal_ledger` → claim → `LedgerChecker.Check` → una discrepancia por hallazgo → misma transacción de cierre. |
 | `ResolveDiscrepancyUseCase` | Busca la discrepancia, verifica el tenant, aplica `resolve` o `ignore` y, en una transacción, la guarda y publica el evento. |
-| `GetReportUseCase` | Run + discrepancias, con filtro opcional por estado (`open`, `resolved`, `ignored`; otro valor → 400). `limit` por defecto 100. |
-| `ListRunsUseCase` | Runs del tenant, `created_at DESC` (`limit` por defecto 20). |
+| `GetReportUseCase` | Run + discrepancias, con filtro opcional por estado (`open`, `resolved`, `ignored`; otro valor → 400). `limit` por defecto 100, máximo 500. |
+| `ListRunsUseCase` | Runs del tenant, `created_at DESC`. `limit` por defecto 20, máximo 100. |
 
 **Aislamiento en la aplicación:** `ownedBy` compara el `tenant_id` del run con el del caller. Un
 tenant nunca ve runs de otro ni globales, y un caller sin tenant solo ve globales. El mismo
@@ -251,12 +262,15 @@ criterio aplica a las discrepancias. Si el recurso no pertenece al caller, la re
 
 **Atomicidad y concurrencia:**
 
-- El claim es un `UPDATE … WHERE id=$1 AND status=<leído>`. Si afecta 0 filas, otro proceso tomó
-  el run y la respuesta es 409.
+- Cada UPDATE del run es `… WHERE id=$1 AND version=<leída>` y suma uno a la versión. Si afecta 0
+  filas, otro proceso lo modificó antes y la respuesta es 409. Así, de dos requests que toman (o
+  retoman) el mismo run, solo uno lo procesa.
 - Discrepancias, cierre del run y evento comparten transacción: o queda todo o nada.
 - Un CSV mal formado se rechaza antes del claim: el run sigue `pending`.
 - Si la lectura de datos o la transacción de cierre fallan, el run pasa a `failed` sin
-  resultados. Si tampoco se puede guardar el fallo, el error lo informa y el run queda `running`.
+  resultados y se publica `reconciliation.run.failed.v1`, en una transacción. Si tampoco se
+  puede guardar el fallo, el error lo informa y el run queda `running` hasta que se lo retome por
+  abandonado.
 
 ---
 
@@ -274,10 +288,10 @@ contexto → **401**. Los guards de rol se inyectan desde `cmd/api` (`RouteGuard
 | Método | Ruta | Guard | Descripción | Respuestas |
 |---|---|---|---|---|
 | `POST` | `/runs` | Operate | Body `{"type","period_from","period_to"}` (RFC3339) → `{run_id}` | 201 · 400 · 401 · 403 · 500 |
-| `GET` | `/runs?limit=20` | Read | `{runs:[…], count}` | 200 · 401 · 403 · 500 |
-| `GET` | `/runs/:runID?status=open&limit=100` | Read | `{run, discrepancies:[…]}` | 200 · 400 · 401 · 403 · 404 · 500 |
-| `POST` | `/runs/:runID/report` | Operate | CSV del PSP en el body (máx. 50 MB) | 202 · 400 · 401 · 403 · 404 · 409 · 422 · 500 |
-| `POST` | `/runs/:runID/process-internal` | Operate | Chequeo del Ledger | 202 · 400 · 401 · 403 · 404 · 409 · 422 · 500 |
+| `GET` | `/runs?limit=20` | Read | `{runs:[…], count}` (máx. 100) | 200 · 401 · 403 · 500 |
+| `GET` | `/runs/:runID?status=open&limit=100` | Read | `{run, discrepancies:[…]}` (máx. 500) | 200 · 400 · 401 · 403 · 404 · 500 |
+| `POST` | `/runs/:runID/report` | Operate | CSV del PSP en el body (máx. 50 MB) → run terminado | 200 · 400 · 401 · 403 · 404 · 409 · 413 · 422 · 500 |
+| `POST` | `/runs/:runID/process-internal` | Operate | Chequeo del Ledger → run terminado | 200 · 400 · 401 · 403 · 404 · 409 · 422 · 500 |
 | `POST` | `/discrepancies/:discrepancyID/resolve` | Operate | Body `{"action":"resolve"\|"ignore","notes"}`; firma el usuario autenticado | 204 · 400 · 401 · 403 · 404 · 409 · 500 |
 
 ### Formato del CSV
@@ -306,12 +320,13 @@ PSP-REF-002,5000,ARS,rejected,2026-06-01T12:05:00Z
 | Subject | Cuándo | Payload |
 |---|---|---|
 | `reconciliation.run.completed.v1` | Al completar un run (con o sin discrepancias) | `run_id`, `tenant_id`, `type`, `total_records`, `matched_count`, `discrepancy_count` |
+| `reconciliation.run.failed.v1` | Al fallar un run (lectura de datos o cierre) | `run_id`, `tenant_id`, `type`, `error` |
 | `reconciliation.discrepancy.resolved.v1` | Al resolver o ignorar una discrepancia | `discrepancy_id`, `run_id`, `tenant_id`, `type`, `status` (`resolved`\|`ignored`), `resolved_by` |
 
 Se publican por el outbox (`pkg/outbox`), dentro de la misma transacción que el cambio de estado.
 El único consumidor es **Audit** (`audit-reconciliation-consumer`): registra
-`reconciliation_run` y `reconciliation_discrepancy` (con `resolved_by` como actor). Notification
-no los notifica. No hay evento para runs fallidos.
+`reconciliation_run` (con el `error` en metadata si falló) y `reconciliation_discrepancy` (con
+`resolved_by` como actor). Notification no los notifica.
 
 ### 7.2 Consumidos
 
@@ -326,7 +341,8 @@ Ninguno.
 | `reconciliation_runs` | PK `id`; `idx_recon_runs_tenant (tenant_id, created_at DESC) WHERE tenant_id IS NOT NULL`; `idx_recon_runs_created (created_at DESC)` | `type`, `status`, `period_from < period_to` |
 | `reconciliation_discrepancies` | PK `id`; FK `run_id` → runs; `idx_recon_disc_run (run_id, status)`; `idx_recon_disc_tenant` | `type` (7 valores), `status` |
 
-`tenant_id` es nullable en ambas tablas (runs globales).
+`reconciliation_runs` tiene además `started_at` (último claim) y `version` (optimistic locking,
+`000033`). `tenant_id` es nullable en ambas tablas (runs globales).
 
 **RLS** (`000030`), en las dos tablas:
 
@@ -369,11 +385,7 @@ Ambos fijan `app.current_tenant` con el tenant del run: esas tablas tienen RLS p
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Run trabado en `running` | Si el proceso muere entre el claim y el cierre (o no puede guardar el fallo), el run queda `running` para siempre: no hay timeout ni forma de liberarlo. |
-| 2 | Baja | `limit` sin tope | `GET /runs` y `GET /runs/:runID` aceptan cualquier `limit`. |
-| 3 | Baja | Síncrono con 202 | El CSV (hasta 50 MB) se procesa dentro del request y la respuesta es 202 aunque el trabajo ya terminó. |
-| 4 | Baja | Dominio y limpieza | `Complete` y `Fail` no validan el estado previo. `Fail` no emite evento. El dominio usa `time.Now()`. Código muerto: `ErrRunNotCompleted` y el campo `runRepo TxManager` de `StartReconciliationUseCase`. |
-| 5 | Producto | Alcance | Sin runs programados ni ingesta automática del informe. Sin conciliación de payouts (`unknown`). Sin runs globales vía API. Un único formato de CSV. |
+| 1 | Producto | Alcance | Sin runs programados ni ingesta automática del informe. Sin conciliación de payouts (`unknown`). Sin runs globales vía API. Un único formato de CSV. |
 
 ---
 
@@ -383,15 +395,16 @@ Ambos fijan `app.current_tenant` con el tenant del run: esas tablas tienen RLS p
 
 | Paquete | Enfoque |
 |---|---|
-| `domain` | Máquina de estados del run (incluido el reproceso desde `failed` y el reseteo en `Fail`), validación de período, `Resolve`/`Ignore` con su evento, VOs con `ErrInvalidArgument`. |
-| `application` | Fakes de repos, reader, parser, ledger, `TxManager` y publisher: cada tipo de discrepancia, tabla de desenlaces, moneda, duplicados, período por `processed_at`, invariante de contadores, hallazgos del Ledger, tipo de run, CSV inválido sin tocar el run, `ownedBy`, claim perdido (409), rollbacks, resolución con evento. |
-| `http` | Binding, 401 sin tenant, 400 por cada error de cliente, 422 por tipo de run, firma con el actor autenticado, guard correcto por ruta, pánico sin guards, mapeo de errores. |
-| `postgres` | pgxmock: SQL de cada método dentro de la sesión RLS con el tenant que corresponde, UPDATE condicionado (0 filas → `ErrRunAlreadyRunning`), `ErrNoRows` → not found. |
+| `domain` | Máquina de estados del run con hora inyectada (reproceso desde `failed`, retoma de abandonados y umbral exacto, guardas de `Complete`/`Fail`, eventos completed y failed), versión, validación de período, `Resolve`/`Ignore` con su evento, VOs con `ErrInvalidArgument`. |
+| `application` | Fakes de repos, reader, parser, ledger, `TxManager` y publisher: cada tipo de discrepancia, tabla de desenlaces, moneda, duplicados, período por `processed_at`, invariante de contadores, hallazgos del Ledger, tipo de run, CSV inválido sin tocar el run, `ownedBy`, claim perdido (409), retoma de un run abandonado, versión exigida en cada UPDATE, rollbacks, `run.failed` publicado, topes de `limit`, resolución con evento. |
+| `http` | Binding, 401 sin tenant, 400 por cada error de cliente, 422 por tipo de run, 413 pasados los 50 MB (y 50 MB exactos aceptados), 200 con el run terminado, firma con el actor autenticado, guard correcto por ruta, pánico sin guards, mapeo de errores. |
+| `postgres` | pgxmock: SQL de cada método dentro de la sesión RLS con el tenant que corresponde, UPDATE condicionado a la versión (0 filas → `ErrRunAlreadyRunning`, versión sin mover), `ErrNoRows` → not found. |
 | `readers` | Parser CSV (montos y `processed_at` inválidos con número de fila) y SQL de `PaymentReader`/`LedgerChecker` dentro de la sesión RLS, con y sin tenant. |
 
 La RLS, la concurrencia y el SQL del chequeo del Ledger se verificaron además contra Postgres con
 un rol sin `BYPASSRLS`: 30 rondas de dos uploads simultáneos (siempre uno procesa y el otro
-recibe 409), y asientos de un posting, sin postings y cruzados entre monedas, más capturas sin
+recibe 409); retoma de runs abandonados (20 min, y sin `started_at`) y respeto de uno vigente
+(1 min); y asientos de un posting, sin postings y cruzados entre monedas, más capturas sin
 asiento. Esas pruebas no están automatizadas.
 
 ---
@@ -401,17 +414,18 @@ asiento. Esas pruebas no están automatizadas.
 ```
 context/reconciliation/
 ├── domain/
-│   ├── run.go              # agregado ReconciliationRun: pending→running→completed/failed (failed reprocesable)
+│   ├── run.go              # agregado ReconciliationRun: pending→running→completed/failed (failed y abandonados reprocesables), version
 │   ├── discrepancy.go      # entidad Discrepancy: open→resolved/ignored + evento
-│   ├── events.go           # ReconciliationCompletedEvent, DiscrepancyResolvedEvent
+│   ├── events.go           # ReconciliationCompleted/FailedEvent, DiscrepancyResolvedEvent
 │   ├── vo.go               # IDs, ReconciliationType, RunStatus, DiscrepancyType/Status
 │   └── errors.go
 ├── application/
-│   ├── ports.go            # repos (Update condicionado), PaymentReader, ReportParser, LedgerChecker (LedgerCheck), TxManager, EventPublisher
+│   ├── ports.go            # repos (Update por versión), PaymentReader, ReportParser, LedgerChecker (LedgerCheck), TxManager, EventPublisher, Clock
+│   ├── lifecycle.go        # claim / complete / fail compartidos por los casos de uso que procesan
 │   ├── commands.go         # comandos, queries y views
 │   ├── start_reconciliation.go
-│   ├── process_report.go   # ProcessReport (matching, desenlaces) + ProcessInternal + claim/complete/fail
-│   └── resolve_discrepancy.go # Resolve + GetReport + ListRuns
+│   ├── process_report.go   # ProcessReport (matching, desenlaces) + ProcessInternal
+│   └── resolve_discrepancy.go # Resolve + GetReport + ListRuns (topes de limit)
 └── infrastructure/adapters/
     ├── inbound/http/handler.go          # 6 endpoints, RouteGuards, RegisterRoutes
     └── outbound/

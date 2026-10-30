@@ -242,6 +242,7 @@ tipo de recurso y el campo del payload con su ID:
 | `compliance.alert.{raised,review_proposed,proposal_rejected,resolved}.v1` | `aml_alert` | `alert_id` | |
 | `compliance.sanction.{matched,cleared,confirmed}.v1` | `aml_alert` | `alert_id` | |
 | `reconciliation.run.completed.v1` | `reconciliation_run` | `run_id` | |
+| `reconciliation.run.failed.v1` | `reconciliation_run` | `run_id` | `metadata.error` |
 | `reconciliation.discrepancy.resolved.v1` | `reconciliation_discrepancy` | `discrepancy_id` | actor = `resolved_by` del payload; `metadata.run_id`, `metadata.status` |
 
 Agregar un evento auditado = una línea en `mappings` (y, si es de un stream
