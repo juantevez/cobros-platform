@@ -358,7 +358,7 @@ Todos se ejecutan en `cmd/worker`.
 | Consumidor | Durable | Filtro | Acción | `MaxDeliver` |
 |---|---|---|---|---|
 | **Auth** | `auth-onboarding-consumer` | `onboarding.application.approved.v1` | `ActivateTenant` con `Environment: production` | 5 |
-| **Ledger** | `ledger-onboarding-consumer` | `onboarding.application.approved.v1` | Crea 5 cuentas en `currency`: `merchant_balance`, `reserve`, `dispute_hold`, `payout_transit`, `payout_sent` | 5 |
+| **Ledger** | `ledger-onboarding-consumer` | `onboarding.application.approved.v1` | Crea 7 cuentas en `currency`: `merchant_balance`, `reserve`, `dispute_hold`, `payout_transit`, `payout_sent`, `in_transit`, `platform_fees` | 5 |
 | **Compliance** | `compliance-onboarding-consumer` | `onboarding.application.submitted.>` | `ScreenApplication` (screening por razón social) | 5 |
 | **Notification** | `notification-onboarding-consumer` | `onboarding.application.>` | Envía email solo para `approved.v1` y `rejected.v1` (con `rejection_reason`); el resto (incluido `reopened.v1`) se ignora | 3 |
 | **Webhook** | `webhook-onboarding-consumer` | `onboarding.>` | Crea deliveries a los endpoints suscriptos del comercio | — |

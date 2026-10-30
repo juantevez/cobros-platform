@@ -89,9 +89,9 @@ stateDiagram-v2
 | Transición | Evento publicado | Efecto en Ledger |
 |---|---|---|
 | `initiated → processing` | — | — |
-| creación (`initiated`) | `payout.initiated.v1` | `merchant_balance` CREDIT / `payout_transit` DEBIT |
-| `processing → confirmed` | `payout.confirmed.v1` | `payout_transit` CREDIT / `payout_sent` DEBIT |
-| `processing → failed` | `payout.failed.v1` | **Reversa**: `payout_transit` CREDIT / `merchant_balance` DEBIT |
+| creación (`initiated`) | `payout.initiated.v1` | `merchant_balance` DEBIT / `payout_transit` CREDIT |
+| `processing → confirmed` | `payout.confirmed.v1` | `payout_transit` DEBIT / `payout_sent` CREDIT |
+| `processing → failed` | `payout.failed.v1` | **Reversa**: `payout_transit` DEBIT / `merchant_balance` CREDIT |
 | `processing → unknown` | `payout.unknown.v1` | **Ninguno**: los fondos permanecen en `payout_transit` hasta la resolución |
 | `unknown → confirmed / failed` | `payout.confirmed.v1` / `payout.failed.v1` | Como en el camino normal (los asientos son idempotentes por clave) |
 

@@ -83,7 +83,7 @@ sequenceDiagram
     D->>DB: FindByPaymentID → si existe: 409 duplicate
     D->>DB: tx{INSERT dispute(open) + outbox dispute.opened.v1}
     N-->>L: dispute.opened.v1
-    L->>L: asiento: merchant_balance CREDIT / dispute_hold DEBIT
+    L->>L: asiento: merchant_balance DEBIT / dispute_hold CREDIT
     D-->>O: 201 {dispute_id}
 
     alt Comercio contesta con evidencia
@@ -92,7 +92,7 @@ sequenceDiagram
     else Comercio acepta
         M->>D: POST /disputes/:id/accept {note}
         D->>DB: tx{UPDATE accepted + outbox dispute.resolved.v1(accepted)}
-        N-->>L: hold CREDIT / platform_fees DEBIT (fondos salen)
+        N-->>L: hold DEBIT / in_transit CREDIT (el PSP descuenta el contracargo)
     else Vence el plazo (poller horario)
         W->>DB: ListOverdue(now, 100)
         W->>DB: tx{UPDATE expired + outbox dispute.resolved.v1(expired)}
@@ -101,7 +101,7 @@ sequenceDiagram
 
     O->>D: POST /disputes/:id/resolve {outcome: won|lost, note}
     D->>DB: tx{UPDATE won/lost + outbox dispute.resolved.v1}
-    N-->>L: won → hold CREDIT / merchant_balance DEBIT · lost → hold CREDIT / platform_fees DEBIT
+    N-->>L: won → hold DEBIT / merchant_balance CREDIT · lost → hold DEBIT / in_transit CREDIT
     D-->>O: 204
 ```
 
@@ -153,9 +153,9 @@ Implementado en [dispute_consumer.go](../../context/ledger/infrastructure/adapte
 
 | Evento | Asiento (idempotency key) |
 |---|---|
-| `dispute.opened.v1` | `merchant_balance` CREDIT / `dispute_hold` DEBIT — `dispute_opened_<id>` |
-| `dispute.resolved.v1` `won` | `dispute_hold` CREDIT / `merchant_balance` DEBIT (reintegro al comercio) — `dispute_resolved_<id>` |
-| `dispute.resolved.v1` `lost`/`accepted`/`expired` | `dispute_hold` CREDIT / **`platform_fees` DEBIT** ⚠️ (deuda técnica §10.4) |
+| `dispute.opened.v1` | `merchant_balance` DEBIT / `dispute_hold` CREDIT — `dispute_opened_<id>` |
+| `dispute.resolved.v1` `won` | `dispute_hold` DEBIT / `merchant_balance` CREDIT (reintegro al comercio) — `dispute_resolved_<id>` |
+| `dispute.resolved.v1` `lost`/`accepted`/`expired` | `dispute_hold` DEBIT / `in_transit` CREDIT (el PSP descuenta el contracargo de la liquidación) — `dispute_resolved_<id>` |
 
 ### 4.4 Value Objects
 
@@ -342,7 +342,7 @@ es UUID y sirve de `Nats-Msg-Id` (dedupe de 5 min).
 | `ledger-dispute-consumer` | worker | `DISPUTE` / `dispute.>` | Asientos de hold/liberación (§4.3), idempotente por claves `dispute_opened_*` / `dispute_resolved_*`. `MaxDeliver: 5`. |
 
 **Nadie más** consume `dispute.*`: no hay webhook saliente, notificación al comercio,
-proyección en Reporting ni screening de Compliance por disputas (§10.5).
+proyección en Reporting ni screening de Compliance por disputas (§10.4).
 
 ### 7.3 Este BC no consume eventos de otros
 
@@ -433,14 +433,13 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 | 1 | **Sin control de roles** | `POST /disputes` (abrir) y `POST /:id/resolve` (fallo del banco) cuelgan de `protected` sin `RequireRole(RolePlatformSupport)`: cualquier usuario de cualquier tenant puede abrir disputas contra pagos ajenos y resolver disputas. `ResolveDisputeCmd` ni siquiera lleva `TenantID`. | **Alto** |
 | 2 | Pago no validado | No se comprueba existencia, estado `captured` ni coherencia del monto; `ErrPaymentNotCaptured` es código muerto. `payment_id` es TEXT sin FK: se puede disputar un pago inexistente. | Alto |
 | 3 | Cross-tenant posible en Open | `PaymentID` no se contrasta con la tabla `payments`; la disputa se atribuye al tenant del caller, no al dueño del pago. | Alto |
-| 4 | Contrapartida contable provisoria | En `lost/accepted/expired` el consumer de Ledger debita `platform_fees` como cuenta de salida (comentario en código: Fase 4 → `chargebacks_paid`). Distorsiona el revenue de la plataforma. | Medio |
-| 5 | Disputas invisibles fuera de Ledger | Sin webhooks, sin notificación al comercio (que desconoce plazos por el canal oficial), sin proyección en Reporting, sin alerta de Compliance por tasa de chargebacks. | Funcional |
-| 6 | Sin concurrencia optimista | `FindByID` fuera de tx + `UPDATE` sin versión: operaciones concurrentes publican dos `resolved.v1` (last-write-wins). La idempotencia del Ledger amortigua el doble asiento, no la doble resolución lógica. | Medio |
-| 7 | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`; si gana la constraint `UNIQUE(payment_id)`, el error genérico se responde **500** en lugar de 409. | Bajo/Medio |
-| 8 | Deadline ignorado silenciosamente | Un `deadline` malformado en el JSON se descarta y aplica now+7d sin error. No se rechaza un deadline en el pasado (la disputa nace expirable). | Bajo |
-| 9 | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; primer ciclo no corre hasta la primera hora; lote fijo de 100 sin paginación. `Expire()` no deja `resolvedNote`. | Bajo |
-| 10 | Evidencia: N+1 y sin validación | `scanWithEvidence` hace 1 query extra por disputa listada; `evidence_type` acepta cualquier string. No hay forma de agregar evidencia en `under_review` (una sola ronda). | Bajo |
-| 11 | Sin vista operatoria global | No hay endpoint multi-tenant para que soporte vea todas las disputas abiertas de la plataforma (el diseño RLS/filtro lo impide). | Funcional |
+| 4 | Disputas invisibles fuera de Ledger | Sin webhooks, sin notificación al comercio (que desconoce plazos por el canal oficial), sin proyección en Reporting, sin alerta de Compliance por tasa de chargebacks. | Funcional |
+| 5 | Sin concurrencia optimista | `FindByID` fuera de tx + `UPDATE` sin versión: operaciones concurrentes publican dos `resolved.v1` (last-write-wins). La idempotencia del Ledger amortigua el doble asiento, no la doble resolución lógica. | Medio |
+| 6 | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`; si gana la constraint `UNIQUE(payment_id)`, el error genérico se responde **500** en lugar de 409. | Bajo/Medio |
+| 7 | Deadline ignorado silenciosamente | Un `deadline` malformado en el JSON se descarta y aplica now+7d sin error. No se rechaza un deadline en el pasado (la disputa nace expirable). | Bajo |
+| 8 | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; primer ciclo no corre hasta la primera hora; lote fijo de 100 sin paginación. `Expire()` no deja `resolvedNote`. | Bajo |
+| 9 | Evidencia: N+1 y sin validación | `scanWithEvidence` hace 1 query extra por disputa listada; `evidence_type` acepta cualquier string. No hay forma de agregar evidencia en `under_review` (una sola ronda). | Bajo |
+| 10 | Sin vista operatoria global | No hay endpoint multi-tenant para que soporte vea todas las disputas abiertas de la plataforma (el diseño RLS/filtro lo impide). | Funcional |
 
 ---
 

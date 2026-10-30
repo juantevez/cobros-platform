@@ -44,8 +44,8 @@ Ledger es mayormente **reactivo**: la mayoría de los asientos los generan sus c
 | `dispute_hold` | Fondos congelados por disputas. | Consumer de Onboarding |
 | `payout_transit` | Fondos en camino al banco del comercio. | Consumer de Onboarding |
 | `payout_sent` | Fondos confirmados como enviados. | Consumer de Onboarding |
-| `in_transit` | Fondos cobrados que el PSP aún no liquidó. | ⚠️ **Nadie** (§10 #1) |
-| `platform_fees` | Comisiones de la plataforma (y hoy, contrapartida de disputas perdidas). | ⚠️ **Nadie** (§10 #1) |
+| `in_transit` | Fondos cobrados que el PSP aún no liquidó. Saldo negativo: lo que el PSP adeuda. | Consumer de Onboarding |
+| `platform_fees` | Comisiones de la plataforma. | Consumer de Onboarding |
 
 ---
 
@@ -64,11 +64,11 @@ sequenceDiagram
 
     OB-->>N: onboarding.application.approved.v1
     N-->>L: ledger-onboarding-consumer
-    L->>DB: 5 × CreateAccount (merchant_balance, reserve, dispute_hold, payout_transit, payout_sent)
+    L->>DB: 7 × CreateAccount (§2.1)
 
-    PAY-->>N: payment.captured.v1
+    PAY-->>N: payment.captured | refunded
     N-->>L: ledger-payment-consumer
-    L->>DB: PostEntry payment_captured_<id> (in_transit / merchant_balance / platform_fees)
+    L->>DB: PostEntry payment_captured_<id> / payment_refunded_<id>
 
     PO->>DB: lee account_balances (merchant_balance) para validar el saldo
     PO-->>N: payout.initiated | confirmed | failed
@@ -128,7 +128,17 @@ credit → balance += amount
 debit  → balance -= amount
 ```
 
-El comentario del repositorio declara que *"merchant_balance positivo = la plataforma le debe ese monto al comercio"*, y Payout se apoya en eso. Los consumers, en cambio, **debitan** `merchant_balance` para aumentarlo. Ver §10 #2.
+Los consumers asientan con las direcciones de la contabilidad estándar, así que el saldo se lee igual en todas las cuentas de pasivo e ingreso:
+
+| Cuenta | Saldo positivo significa | Sube con |
+|---|---|---|
+| `merchant_balance` | Lo que la plataforma le debe al comercio. Payout exige que sea > 0. | Pago capturado, disputa ganada, payout fallido |
+| `platform_fees` | Comisiones ganadas. | Pago capturado |
+| `dispute_hold` | Fondos congelados por disputas abiertas. | Disputa abierta |
+| `payout_transit` | Payouts iniciados sin confirmar. | Payout iniciado |
+| `payout_sent` | Total enviado a bancos. | Payout confirmado |
+
+`in_transit` es la única cuenta de activo: queda **negativa** mientras el PSP adeuda la liquidación (un pago la debita; un reembolso o un contracargo la acreditan). Reporting calcula su neto con la misma regla.
 
 ### 4.5 Errores
 
@@ -241,10 +251,10 @@ Todos corren en `cmd/worker` con `MaxDeliver: 5`. Si fallan los 5 intentos, el m
 
 | Durable | Filtro | Asiento (según el código) | Clave de idempotencia |
 |---|---|---|---|
-| `ledger-onboarding-consumer` | `onboarding.application.approved.v1` | Crea 5 cuentas (§2.1) en `currency` (default `ARS`). | — (no es un asiento) |
-| `ledger-payment-consumer` | `payment.captured.v1` | `in_transit` **C** amount · `merchant_balance` **D** (amount − platform_fee − psp_fee) · `platform_fees` **D** platform_fee (si existe la cuenta) | `payment_captured_<payment_id>` |
-| `ledger-payout-consumer` | `payout.>` | **initiated:** `merchant_balance` C · `payout_transit` D. **confirmed:** `payout_transit` C · `payout_sent` D. **failed:** `payout_transit` C · `merchant_balance` D | evento `idempotency_key` o `payout_initiated_<id>`; `payout_confirmed_<id>`; `payout_failed_<id>` |
-| `ledger-dispute-consumer` | `dispute.>` | **opened:** `merchant_balance` C · `dispute_hold` D. **resolved won:** `dispute_hold` C · `merchant_balance` D. **resolved lost/accepted/expired:** `dispute_hold` C · `platform_fees` D | `dispute_opened_<id>`, `dispute_resolved_<id>` |
+| `ledger-onboarding-consumer` | `onboarding.application.approved.v1` | Crea las 7 cuentas (§2.1) en `currency` (default `ARS`). La migración 000036 completó `in_transit` y `platform_fees` a los comercios aprobados antes. | — (no es un asiento) |
+| `ledger-payment-consumer` | `payment.>` | **captured:** `in_transit` D (amount − psp_fee) · `merchant_balance` C (amount − platform_fee − psp_fee) · `platform_fees` C platform_fee (si es > 0; sin la cuenta, error). **refunded:** `merchant_balance` D · `in_transit` C, por `refund_amount` (las comisiones no se devuelven). El resto de los eventos se ignora. | `payment_captured_<payment_id>`, `payment_refunded_<payment_id>` |
+| `ledger-payout-consumer` | `payout.>` | **initiated:** `merchant_balance` D · `payout_transit` C. **confirmed:** `payout_transit` D · `payout_sent` C. **failed:** `payout_transit` D · `merchant_balance` C | evento `idempotency_key` o `payout_initiated_<id>`; `payout_confirmed_<id>`; `payout_failed_<id>` |
+| `ledger-dispute-consumer` | `dispute.>` | **opened:** `merchant_balance` D · `dispute_hold` C. **resolved won:** `dispute_hold` D · `merchant_balance` C. **resolved lost/accepted/expired:** `dispute_hold` D · `in_transit` C (el PSP descuenta el contracargo) | `dispute_opened_<id>`, `dispute_resolved_<id>` |
 
 C = crédito (suma al saldo), D = débito (resta del saldo), según `Apply`.
 
@@ -310,18 +320,15 @@ Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDI
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Alta | Los pagos capturados nunca llegan al Ledger | (a) Onboarding crea 5 cuentas (§2.1) y ningún flujo crea `in_transit` ni `platform_fees`: `FindByTenantAndType(in_transit)` falla y el mensaje se descarta tras 5 intentos. (b) Aunque existieran, el asiento acredita `amount` y debita `amount − platform_fee − psp_fee` + `platform_fee`: **no balancea si `psp_fee > 0`**, y el PSP mock cobra siempre ≥ 1. (c) Si falta `platform_fees`, la línea de comisión se omite sin aviso y el asiento tampoco balancea. Las disputas perdidas también fallan por falta de `platform_fees`. |
-| 2 | Alta | Signo invertido en los consumers | `Apply` suma créditos y resta débitos en todas las cuentas (§4.4). Los consumers **debitan** `merchant_balance` cuando el comercio gana dinero (pago, disputa ganada) y lo **acreditan** cuando sale (payout, disputa abierta): cada pago dejaría `merchant_balance` más negativo y Payout, que exige saldo > 0, rechazaría todos los payouts. Reporting calcula su neto con la convención de los consumers ([REPORTING.md §10](REPORTING.md)). Además, una disputa perdida usa `platform_fees` como contrapartida: la plataforma pagaría los contracargos con sus comisiones. |
-| 3 | Alta | Los reembolsos no llegan al Ledger | Ningún consumer del Ledger escucha `payment.refunded.v1`. `merchant_balance` no baja con un reembolso, y el comercio puede retirar el dinero devuelto. |
-| 4 | Alta | Sobregiro por débito asíncrono | Payout serializa con un advisory lock la lectura del saldo y la creación del payout, pero el débito de `merchant_balance` llega después (outbox → consumer). Dos payouts seguidos antes de que corra el consumer leen el mismo saldo y ambos pasan. Hoy no ocurre porque #1 y #2 impiden todo payout. Se resuelve en Payout, descontando los payouts cuyo asiento aún no existe. |
-| 5 | Media | RLS sin tenant | Las políticas no usan `NULLIF` ni tienen política de operador, y ningún repo setea `app.current_tenant`. Hoy no filtra porque la app conecta como owner (ONBOARDING.MD §10.2); con un rol sin `BYPASSRLS`, toda query falla al castear `''` a `uuid`. |
-| 6 | Media | Idempotencia con carrera | Check-then-insert (§5.1): un duplicado concurrente → 500 en lugar de `was_existing`. Reusar una clave con otro contenido devuelve el asiento original sin avisar. `ErrEntryAlreadyExists` nunca se emite. |
-| 7 | Baja | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). |
-| 8 | Baja | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. |
-| 9 | Baja | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). |
-| 10 | Baja | `account_balances` sin `tenant_id` | Sin RLS propio: depende de que cada query haga join con `ledger_accounts` o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). |
-| 11 | Baja | Consumers poco estrictos | Una disputa con `outcome` desconocido se asienta como perdida. Un pago con neto ≤ 0 reintenta 5 veces un error permanente. Tras 5 fallos el mensaje se descarta sin registro. |
-| 12 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Sin control de sobregiro. Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
+| 1 | Alta | Sobregiro por débito asíncrono | Payout serializa con un advisory lock la lectura del saldo y la creación del payout, pero el débito de `merchant_balance` llega después (outbox → consumer). Dos payouts seguidos antes de que corra el consumer leen el mismo saldo y ambos pasan. Se resuelve en Payout, descontando los payouts cuyo asiento aún no existe. |
+| 2 | Media | RLS sin tenant | Las políticas no usan `NULLIF` ni tienen política de operador, y ningún repo setea `app.current_tenant`. Hoy no filtra porque la app conecta como owner (ONBOARDING.MD §10.2); con un rol sin `BYPASSRLS`, toda query falla al castear `''` a `uuid`. |
+| 3 | Media | Idempotencia con carrera | Check-then-insert (§5.1): un duplicado concurrente → 500 en lugar de `was_existing`. Reusar una clave con otro contenido devuelve el asiento original sin avisar. `ErrEntryAlreadyExists` nunca se emite. |
+| 4 | Baja | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). |
+| 5 | Baja | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. |
+| 6 | Baja | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). |
+| 7 | Baja | `account_balances` sin `tenant_id` | Sin RLS propio: depende de que cada query haga join con `ledger_accounts` o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). |
+| 8 | Baja | Consumers poco estrictos | Una disputa con `outcome` desconocido se asienta como perdida. Un pago con neto ≤ 0 reintenta 5 veces un error permanente. Tras 5 fallos el mensaje se descarta sin registro. |
+| 9 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Un reembolso sale entero de `merchant_balance` (no se devuelven comisiones) y no hay reembolsos parciales. Sin control de sobregiro. Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
 
 ---
 
@@ -332,14 +339,14 @@ Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDI
 | Dominio | `domain/*_test.go` | `Money`, invariantes de `JournalEntry`, `BuildReverse`, eventos. |
 | Aplicación | `application/*_test.go` | `CreateAccount` (incluye idempotencia y carrera), `PostEntry` (idempotencia, cuenta inexistente, cuenta de otro tenant, moneda distinta a la de la cuenta), `GetBalance` (aislamiento), `ReverseEntry`. |
 | HTTP | `inbound/http/*_test.go` | Handlers, router, `writeGuard` (403 en las escrituras; la lectura no se ve afectada), 404 cross-tenant y mapeo de errores. |
-| NATS | `inbound/nats/*_test.go` | Los 4 consumers con repos y casos de uso falsos, más redelivery y reintento parcial del consumer de Onboarding. ⚠️ Los fakes no reproducen #1: tienen las cuentas precargadas y usan `psp_fee` que balancea. |
+| NATS | `inbound/nats/*_test.go` | Los 4 consumers con repos y casos de uso falsos, más redelivery y reintento parcial del consumer de Onboarding. `convention_test.go` encadena pago, reembolso, disputas y payouts y verifica el saldo de cada cuenta según `Apply`. |
 | Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`), incluido el mapeo de `23505` → `ErrAccountAlreadyExists`; se saltan si no hay DB. |
 
 ```bash
 go test ./context/ledger/...
 ```
 
-Falta un test de integración de punta a punta: aprobar onboarding → capturar pago → iniciar payout. Ese test haría fallar #1 y #3.
+Falta un test de integración de punta a punta contra NATS y Postgres: aprobar onboarding → capturar pago → iniciar payout.
 
 ---
 
