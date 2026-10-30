@@ -25,8 +25,16 @@ func NewBalanceChecker(pool pkgpostgres.Conn) *BalanceChecker {
 	return &BalanceChecker{pool: pool}
 }
 
-// GetAvailableBalance retorna el saldo de la cuenta merchant_balance del tenant.
+// GetAvailableBalance retorna el saldo de la cuenta merchant_balance del tenant
+// menos los payouts que todavía no se descontaron de ella.
 // Un saldo positivo indica que la plataforma le debe ese monto al comercio.
+//
+// El Ledger debita merchant_balance de forma asíncrona (outbox → consumer de
+// payout.initiated.v1): hasta que el asiento existe, el saldo todavía incluye
+// el payout. Sin descontarlo, dos payouts seguidos leían el mismo saldo y
+// ambos pasaban aunque el lock los serializara. Se descuentan los payouts sin
+// su asiento de initiated (ledger_entry_key), salvo los fallidos: su reversa
+// tampoco llegó, así que el efecto neto pendiente es cero.
 func (b *BalanceChecker) GetAvailableBalance(
 	ctx context.Context,
 	tenantID domain.TenantID,
@@ -34,7 +42,18 @@ func (b *BalanceChecker) GetAvailableBalance(
 ) (int64, error) {
 	var balance int64
 	err := b.pool.QueryRow(ctx, `
-		SELECT ab.balance
+		SELECT ab.balance - COALESCE((
+			SELECT SUM(p.amount)
+			FROM payouts p
+			WHERE p.tenant_id = la.tenant_id
+			  AND p.currency  = la.currency
+			  AND p.status   <> 'failed'
+			  AND NOT EXISTS (
+			      SELECT 1 FROM journal_entries je
+			      WHERE je.tenant_id       = p.tenant_id
+			        AND je.idempotency_key = p.ledger_entry_key
+			  )
+		), 0)
 		FROM account_balances ab
 		JOIN ledger_accounts la ON la.id = ab.account_id
 		WHERE la.tenant_id = $1
