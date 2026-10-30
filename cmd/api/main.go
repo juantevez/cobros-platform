@@ -328,7 +328,10 @@ func main() {
 
 	reconciliationhttp.RegisterRoutes(protected, reconciliationhttp.NewReconciliationHandler(
 		startRun, processReport, processInternal, resolveDisc, getReport, listRuns,
-	))
+	), reconciliationhttp.RouteGuards{
+		Read:    authttp.RequireRole(authdomain.RoleAdmin, authdomain.RoleAccountant, authdomain.RoleOperator),
+		Operate: authttp.RequireRole(authdomain.RoleAdmin, authdomain.RoleAccountant),
+	})
 
 	// ── Notifications ─────────────────────────────────────────────────────────
 

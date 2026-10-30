@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -610,25 +609,56 @@ func TestRespondError(t *testing.T) {
 
 // ── RegisterRoutes ────────────────────────────────────────────────────────────
 
+// guard registra el nombre del guard que atendió el request y lo corta.
+func guard(name string) gin.HandlerFunc {
+	return func(c *gin.Context) { c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"guard": name}) }
+}
+
 func TestRegisterRoutes(t *testing.T) {
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newEnv(nil, 0).h)
+	RegisterRoutes(engine.Group("/api/v1"), newEnv(nil, 0).h, RouteGuards{Read: guard("read"), Operate: guard("operate")})
 
+	want := map[string]string{
+		"GET /api/v1/reconciliation/runs":                                  "read",
+		"GET /api/v1/reconciliation/runs/:runID":                           "read",
+		"POST /api/v1/reconciliation/discrepancies/:discrepancyID/resolve": "operate",
+		"POST /api/v1/reconciliation/runs":                                 "operate",
+		"POST /api/v1/reconciliation/runs/:runID/process-internal":         "operate",
+		"POST /api/v1/reconciliation/runs/:runID/report":                   "operate",
+	}
 	var got []string
 	for _, r := range engine.Routes() {
 		got = append(got, r.Method+" "+r.Path)
 	}
-	sort.Strings(got)
-
-	want := []string{
-		"GET /api/v1/reconciliation/runs",
-		"GET /api/v1/reconciliation/runs/:runID",
-		"POST /api/v1/reconciliation/discrepancies/:discrepancyID/resolve",
-		"POST /api/v1/reconciliation/runs",
-		"POST /api/v1/reconciliation/runs/:runID/process-internal",
-		"POST /api/v1/reconciliation/runs/:runID/report",
+	if len(got) != len(want) {
+		t.Fatalf("routes = %v", got)
 	}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("routes = %v\nwant %v", got, want)
+
+	for route, wantGuard := range want {
+		method, path, _ := strings.Cut(route, " ")
+		path = strings.NewReplacer(":runID", uuid.NewString(), ":discrepancyID", uuid.NewString()).Replace(path)
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		var body struct{ Guard string }
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != http.StatusForbidden || body.Guard != wantGuard {
+			t.Errorf("%s: guard = %q (status %d), want %q", route, body.Guard, rec.Code, wantGuard)
+		}
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	for name, g := range map[string]RouteGuards{
+		"no read":    {Operate: guard("operate")},
+		"no operate": {Read: guard("read")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("expected panic")
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/"), newEnv(nil, 0).h, g)
+		})
 	}
 }

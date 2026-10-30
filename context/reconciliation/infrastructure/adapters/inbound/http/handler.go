@@ -232,15 +232,26 @@ func respondError(c *gin.Context, err error) {
 	}
 }
 
+// RouteGuards autoriza cada operación. Se inyectan desde el composition root
+// para no acoplar este contexto con Auth.
+type RouteGuards struct {
+	Read    gin.HandlerFunc // consultar runs y discrepancias
+	Operate gin.HandlerFunc // crear y procesar runs, resolver discrepancias
+}
+
 // RegisterRoutes registra las rutas de Reconciliation en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *ReconciliationHandler) {
+func RegisterRoutes(rg *gin.RouterGroup, h *ReconciliationHandler, guards RouteGuards) {
+	if guards.Read == nil || guards.Operate == nil {
+		panic("reconciliation: RegisterRoutes requires Read and Operate guards")
+	}
+
 	rec := rg.Group("/reconciliation")
 	{
-		rec.POST("/runs", h.StartRun)
-		rec.GET("/runs", h.ListRuns)
-		rec.GET("/runs/:runID", h.GetReport)
-		rec.POST("/runs/:runID/report", h.UploadReport)
-		rec.POST("/runs/:runID/process-internal", h.ProcessInternal)
-		rec.POST("/discrepancies/:discrepancyID/resolve", h.ResolveDiscrepancy)
+		rec.POST("/runs", guards.Operate, h.StartRun)
+		rec.GET("/runs", guards.Read, h.ListRuns)
+		rec.GET("/runs/:runID", guards.Read, h.GetReport)
+		rec.POST("/runs/:runID/report", guards.Operate, h.UploadReport)
+		rec.POST("/runs/:runID/process-internal", guards.Operate, h.ProcessInternal)
+		rec.POST("/discrepancies/:discrepancyID/resolve", guards.Operate, h.ResolveDiscrepancy)
 	}
 }
