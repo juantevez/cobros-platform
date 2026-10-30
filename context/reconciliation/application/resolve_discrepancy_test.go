@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,8 +26,9 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		t.Run(tc.action+" open discrepancy", func(t *testing.T) {
 			d := openDiscrepancy()
 			repo := newDiscRepo(d)
+			tx, pub := &fakeTx{}, &fakePublisher{}
 
-			err := NewResolveDiscrepancyUseCase(repo).Execute(ctx, ResolveDiscrepancyCmd{
+			err := NewResolveDiscrepancyUseCase(repo, tx, pub, clock).Execute(ctx, ResolveDiscrepancyCmd{
 				TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: tc.action, ResolvedBy: "op-1", Notes: "checked",
 			})
 			if err != nil {
@@ -38,28 +40,48 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 			if len(repo.updated) != 1 || repo.updated[0] != d {
 				t.Error("discrepancy should be updated once")
 			}
+			if tx.calls != 1 || len(pub.events) != 1 {
+				t.Fatalf("tx calls=%d events=%d, want 1 and 1", tx.calls, len(pub.events))
+			}
+			ev, ok := pub.events[0].(domain.DiscrepancyResolvedEvent)
+			if !ok || ev.DiscrepancyID != d.ID().String() || ev.RunID != d.RunID().String() ||
+				ev.TenantID != tenantA || ev.Status != string(tc.want) || ev.ResolvedBy != "op-1" || ev.Type != "amount_mismatch" {
+				t.Errorf("event = %+v", pub.events[0])
+			}
 		})
 	}
+
+	t.Run("publish error rolls back the resolution", func(t *testing.T) {
+		d := openDiscrepancy()
+		tx := &fakeTx{}
+
+		err := NewResolveDiscrepancyUseCase(newDiscRepo(d), tx, &fakePublisher{err: errBoom}, clock).Execute(ctx, ResolveDiscrepancyCmd{
+			TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: "resolve", ResolvedBy: "op",
+		})
+		if !errors.Is(err, errBoom) || tx.rollbacks != 1 {
+			t.Fatalf("err=%v rollbacks=%d, want errBoom and 1", err, tx.rollbacks)
+		}
+	})
 
 	t.Run("missing resolved_by rejected before lookup", func(t *testing.T) {
 		repo := newDiscRepo()
 		repo.findErr = errBoom
 
-		err := NewResolveDiscrepancyUseCase(repo).Execute(ctx, ResolveDiscrepancyCmd{DiscrepancyID: "x", Action: "resolve"})
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{DiscrepancyID: "x", Action: "resolve"})
 		if err == nil || !strings.Contains(err.Error(), "resolved_by is required") {
 			t.Fatalf("expected resolved_by error, got %v", err)
 		}
 	})
 
 	t.Run("invalid discrepancy id", func(t *testing.T) {
-		err := NewResolveDiscrepancyUseCase(newDiscRepo()).Execute(ctx, ResolveDiscrepancyCmd{TenantID: tenantA, DiscrepancyID: "x", Action: "resolve", ResolvedBy: "op"})
+		err := NewResolveDiscrepancyUseCase(newDiscRepo(), &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{TenantID: tenantA, DiscrepancyID: "x", Action: "resolve", ResolvedBy: "op"})
 		if err == nil || !strings.Contains(err.Error(), "invalid discrepancy id") {
 			t.Fatalf("expected invalid id error, got %v", err)
 		}
 	})
 
 	t.Run("unknown discrepancy returns ErrDiscrepancyNotFound", func(t *testing.T) {
-		err := NewResolveDiscrepancyUseCase(newDiscRepo()).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(newDiscRepo(), &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantA, DiscrepancyID: domain.NewDiscrepancyID().String(), Action: "resolve", ResolvedBy: "op",
 		})
 		if !errors.Is(err, domain.ErrDiscrepancyNotFound) {
@@ -71,7 +93,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		d := openDiscrepancy()
 		repo := newDiscRepo(d)
 
-		err := NewResolveDiscrepancyUseCase(repo).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantB, DiscrepancyID: d.ID().String(), Action: "resolve", ResolvedBy: "op",
 		})
 		if !errors.Is(err, domain.ErrDiscrepancyNotFound) {
@@ -86,7 +108,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		d := openDiscrepancy()
 		repo := newDiscRepo(d)
 
-		err := NewResolveDiscrepancyUseCase(repo).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: "delete", ResolvedBy: "op",
 		})
 		if err == nil || !strings.Contains(err.Error(), `invalid action "delete"`) {
@@ -100,10 +122,10 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 	for _, tc := range actions {
 		t.Run(tc.action+" already closed discrepancy is rejected", func(t *testing.T) {
 			d := openDiscrepancy()
-			_ = d.Ignore("someone", "")
+			_ = d.Ignore("someone", "", testNow)
 			repo := newDiscRepo(d)
 
-			err := NewResolveDiscrepancyUseCase(repo).Execute(ctx, ResolveDiscrepancyCmd{
+			err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 				TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: tc.action, ResolvedBy: "op",
 			})
 			if !errors.Is(err, domain.ErrDiscrepancyAlreadyResolved) {
@@ -120,7 +142,7 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 		repo := newDiscRepo(d)
 		repo.updateErr = errBoom
 
-		err := NewResolveDiscrepancyUseCase(repo).Execute(ctx, ResolveDiscrepancyCmd{
+		err := NewResolveDiscrepancyUseCase(repo, &fakeTx{}, &fakePublisher{}, clock).Execute(ctx, ResolveDiscrepancyCmd{
 			TenantID: tenantA, DiscrepancyID: d.ID().String(), Action: "resolve", ResolvedBy: "op",
 		})
 		if !errors.Is(err, errBoom) {
@@ -131,12 +153,21 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 
 func TestGetReportUseCase_Execute(t *testing.T) {
 	ctx := context.Background()
+
+	t.Run("invalid status filter is rejected", func(t *testing.T) {
+		run := pendingRun(tenantA, domain.TypePayment)
+		discs := newDiscRepo()
+		_, err := NewGetReportUseCase(newRunRepo(run), discs).Execute(ctx, GetReportQuery{TenantID: tenantA, RunID: run.ID().String(), StatusFilter: "closed"})
+		if !errors.Is(err, domain.ErrInvalidArgument) || !strings.Contains(err.Error(), `"closed"`) {
+			t.Fatalf("expected ErrInvalidArgument, got %v", err)
+		}
+	})
 	created := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
 	completed := created.Add(time.Hour)
 
 	completedRun := domain.ReconstituteRun(
 		domain.NewRunID(), domain.TenantID(tenantA), domain.TypePayment, domain.RunStatusCompleted,
-		periodFrom, periodTo, 10, 8, 2, "", created, &completed,
+		periodFrom, periodTo, 10, 8, 2, "", created, &completed, nil, 0,
 	)
 
 	t.Run("returns run and discrepancy views", func(t *testing.T) {
@@ -208,14 +239,14 @@ func TestGetReportUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	for _, limit := range []int{0, -1} {
-		t.Run("non-positive limit uses default 100", func(t *testing.T) {
+	for limit, want := range map[int]int{0: 100, -1: 100, 500: 500, 501: 500, 1_000_000: 500} {
+		t.Run(fmt.Sprintf("limit %d is clamped to %d", limit, want), func(t *testing.T) {
 			discs := newDiscRepo()
 			if _, err := NewGetReportUseCase(newRunRepo(completedRun), discs).Execute(ctx, GetReportQuery{TenantID: tenantA, RunID: completedRun.ID().String(), Limit: limit}); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if discs.lastLimit != 100 {
-				t.Errorf("limit = %d, want 100", discs.lastLimit)
+			if discs.lastLimit != want {
+				t.Errorf("limit = %d, want %d", discs.lastLimit, want)
 			}
 		})
 	}
@@ -292,14 +323,14 @@ func TestListRunsUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	for _, limit := range []int{0, -1} {
-		t.Run("non-positive limit uses default 20", func(t *testing.T) {
+	for limit, want := range map[int]int{0: 20, -1: 20, 100: 100, 101: 100, 1_000_000: 100} {
+		t.Run(fmt.Sprintf("limit %d is clamped to %d", limit, want), func(t *testing.T) {
 			repo := newRunRepo()
 			if _, err := NewListRunsUseCase(repo).Execute(ctx, tenantA, limit); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if repo.lastLimit != 20 {
-				t.Errorf("limit = %d, want 20", repo.lastLimit)
+			if repo.lastLimit != want {
+				t.Errorf("limit = %d, want %d", repo.lastLimit, want)
 			}
 		})
 	}

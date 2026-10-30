@@ -319,16 +319,19 @@ func main() {
 	ledgerChecker := reconciliationreaders.NewLedgerChecker(pool)
 	csvParser := reconciliationreaders.NewCSVReportParser()
 
-	startRun := reconciliationapp.NewStartReconciliationUseCase(runRepo)
-	processReport := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, reconcPub)
-	processInternal := reconciliationapp.NewProcessInternalUseCase(runRepo, discrepancyRepo, ledgerChecker, reconcPub)
-	resolveDisc := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo)
+	startRun := reconciliationapp.NewStartReconciliationUseCase(runRepo, clock)
+	processReport := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, txManager, reconcPub, clock)
+	processInternal := reconciliationapp.NewProcessInternalUseCase(runRepo, discrepancyRepo, ledgerChecker, txManager, reconcPub, clock)
+	resolveDisc := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo, txManager, reconcPub, clock)
 	getReport := reconciliationapp.NewGetReportUseCase(runRepo, discrepancyRepo)
 	listRuns := reconciliationapp.NewListRunsUseCase(runRepo)
 
 	reconciliationhttp.RegisterRoutes(protected, reconciliationhttp.NewReconciliationHandler(
 		startRun, processReport, processInternal, resolveDisc, getReport, listRuns,
-	))
+	), reconciliationhttp.RouteGuards{
+		Read:    authttp.RequireRole(authdomain.RoleAdmin, authdomain.RoleAccountant, authdomain.RoleOperator),
+		Operate: authttp.RequireRole(authdomain.RoleAdmin, authdomain.RoleAccountant),
+	})
 
 	// ── Notifications ─────────────────────────────────────────────────────────
 

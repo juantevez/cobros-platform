@@ -209,7 +209,9 @@ var mappings = map[string]eventMapping{
 	"compliance.sanction.confirmed.v1":      {"aml_alert", "alert_id", "", nil},
 
 	// ── Reconciliation ──
-	"reconciliation.run.completed.v1": {"reconciliation_run", "run_id", "", nil},
+	"reconciliation.run.completed.v1":        {"reconciliation_run", "run_id", "", nil},
+	"reconciliation.run.failed.v1":           {"reconciliation_run", "run_id", "", []string{"error"}},
+	"reconciliation.discrepancy.resolved.v1": {"reconciliation_discrepancy", "discrepancy_id", "resolved_by", []string{"run_id", "status"}},
 }
 
 // versionSuffix es el sufijo de versión del subject (".v1", ".v2", ...).

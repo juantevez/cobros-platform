@@ -23,6 +23,8 @@ type Discrepancy struct {
 	resolvedBy    string
 	resolvedAt    *time.Time
 	createdAt     time.Time
+
+	events []Event
 }
 
 // NewDiscrepancy crea una discrepancia encontrada durante la comparación.
@@ -34,6 +36,7 @@ func NewDiscrepancy(
 	recordID string,
 	systemValue string,
 	externalValue string,
+	now time.Time,
 ) *Discrepancy {
 	return &Discrepancy{
 		id:            id,
@@ -44,7 +47,7 @@ func NewDiscrepancy(
 		systemValue:   systemValue,
 		externalValue: externalValue,
 		status:        DiscrepancyOpen,
-		createdAt:     time.Now().UTC(),
+		createdAt:     now.UTC(),
 	}
 }
 
@@ -66,29 +69,50 @@ func ReconstituteDiscrepancy(
 }
 
 // Resolve marca la discrepancia como resuelta.
-func (d *Discrepancy) Resolve(resolvedBy, notes string) error {
+func (d *Discrepancy) Resolve(resolvedBy, notes string, now time.Time) error {
 	if d.status != DiscrepancyOpen {
 		return fmt.Errorf("%w: status is %q", ErrDiscrepancyAlreadyResolved, d.status)
 	}
-	now := time.Now().UTC()
+	now = now.UTC()
 	d.status = DiscrepancyResolved
 	d.resolvedBy = resolvedBy
 	d.notes = notes
 	d.resolvedAt = &now
+	d.recordResolution()
 	return nil
 }
 
 // Ignore marca la discrepancia como conocida y aceptada (no requiere corrección).
-func (d *Discrepancy) Ignore(resolvedBy, notes string) error {
+func (d *Discrepancy) Ignore(resolvedBy, notes string, now time.Time) error {
 	if d.status != DiscrepancyOpen {
 		return fmt.Errorf("%w: status is %q", ErrDiscrepancyAlreadyResolved, d.status)
 	}
-	now := time.Now().UTC()
+	now = now.UTC()
 	d.status = DiscrepancyIgnored
 	d.resolvedBy = resolvedBy
 	d.notes = notes
 	d.resolvedAt = &now
+	d.recordResolution()
 	return nil
+}
+
+func (d *Discrepancy) recordResolution() {
+	d.events = append(d.events, DiscrepancyResolvedEvent{
+		baseEvent:     newBase(d.tenantID.String(), *d.resolvedAt),
+		DiscrepancyID: d.id.String(),
+		RunID:         d.runID.String(),
+		TenantID:      d.tenantID.String(),
+		Type:          d.discType.String(),
+		Status:        d.status.String(),
+		ResolvedBy:    d.resolvedBy,
+	})
+}
+
+// PullEvents retorna y limpia los eventos pendientes.
+func (d *Discrepancy) PullEvents() []Event {
+	evs := d.events
+	d.events = nil
+	return evs
 }
 
 // ── Getters ───────────────────────────────────────────────────────────────────

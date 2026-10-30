@@ -24,7 +24,7 @@ import (
 // - transaction_id: equivale al psp_reference almacenado en payments
 // - amount: en centavos (unidades mínimas)
 // - status: "captured" | "rejected" | "refunded" | "pending"
-// - processed_at: RFC3339
+// - processed_at: RFC3339, opcional
 type CSVReportParser struct{}
 
 func NewCSVReportParser() *CSVReportParser { return &CSVReportParser{} }
@@ -119,14 +119,23 @@ func parseRow(row []string, col columnMapping, line int) (application.PSPRecord,
 	}
 
 	amount, err := strconv.ParseInt(strings.TrimSpace(row[col.amount]), 10, 64)
-	if err != nil {
-		return application.PSPRecord{}, fmt.Errorf("row %d: invalid amount %q: %w", line, row[col.amount], err)
+	if err != nil || amount <= 0 {
+		return application.PSPRecord{}, fmt.Errorf("%w: row %d: invalid amount %q: must be a positive integer in cents",
+			domain.ErrInvalidReportFormat, line, row[col.amount])
 	}
 
-	processedAt := time.Now().UTC()
+	// processed_at es opcional: sin columna o vacío queda nil (el matching
+	// asume que cae en el período). Un valor ilegible invalida el informe.
+	var processedAt *time.Time
 	if col.processedAt >= 0 && col.processedAt < len(row) {
-		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(row[col.processedAt])); err == nil {
-			processedAt = t.UTC()
+		if raw := strings.TrimSpace(row[col.processedAt]); raw != "" {
+			t, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return application.PSPRecord{}, fmt.Errorf("%w: row %d: invalid processed_at %q: use RFC3339",
+					domain.ErrInvalidReportFormat, line, raw)
+			}
+			t = t.UTC()
+			processedAt = &t
 		}
 	}
 

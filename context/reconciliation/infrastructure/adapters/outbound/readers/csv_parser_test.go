@@ -23,19 +23,24 @@ func TestCSVReportParser_Parse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := []application.PSPRecord{
-			{TransactionID: "PSP-1", Amount: 10000, Currency: "ARS", Status: "captured", ProcessedAt: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)},
-			{TransactionID: "PSP-2", Amount: 5000, Currency: "ARS", Status: "rejected", ProcessedAt: time.Date(2026, 6, 1, 12, 5, 0, 0, time.UTC)},
+		want := []struct {
+			rec application.PSPRecord
+			at  time.Time
+		}{
+			{application.PSPRecord{TransactionID: "PSP-1", Amount: 10000, Currency: "ARS", Status: "captured"}, time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)},
+			{application.PSPRecord{TransactionID: "PSP-2", Amount: 5000, Currency: "ARS", Status: "rejected"}, time.Date(2026, 6, 1, 12, 5, 0, 0, time.UTC)},
 		}
 		if len(recs) != len(want) {
 			t.Fatalf("got %d records, want %d", len(recs), len(want))
 		}
-		for i := range want {
-			if recs[i] != want[i] {
-				t.Errorf("record %d = %+v\nwant %+v", i, recs[i], want[i])
+		for i, w := range want {
+			got := recs[i]
+			if got.ProcessedAt == nil || !got.ProcessedAt.Equal(w.at) || got.ProcessedAt.Location() != time.UTC {
+				t.Errorf("record %d processedAt = %v, want %v UTC", i, got.ProcessedAt, w.at)
 			}
-			if recs[i].ProcessedAt.Location() != time.UTC {
-				t.Errorf("record %d processedAt not UTC", i)
+			got.ProcessedAt = nil
+			if got != w.rec {
+				t.Errorf("record %d = %+v\nwant %+v", i, got, w.rec)
 			}
 		}
 	})
@@ -50,23 +55,24 @@ func TestCSVReportParser_Parse(t *testing.T) {
 		}
 	})
 
-	nowCases := []struct{ name, csv string }{
-		{"missing processed_at column", "transaction_id,amount,currency,status\nA,1,ARS,captured\n"},
-		{"unparseable processed_at", "transaction_id,amount,currency,status,processed_at\nA,1,ARS,captured,yesterday\n"},
-		{"empty processed_at", "transaction_id,amount,currency,status,processed_at\nA,1,ARS,captured,\n"},
-	}
-	for _, tc := range nowCases {
-		t.Run(tc.name+" defaults to now", func(t *testing.T) {
-			before := time.Now().UTC()
-			recs, err := parse(t, tc.csv)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(recs) != 1 || recs[0].ProcessedAt.Before(before) || recs[0].ProcessedAt.Location() != time.UTC {
-				t.Errorf("processedAt = %v, want UTC now", recs[0].ProcessedAt)
+	for name, csv := range map[string]string{
+		"missing processed_at column": "transaction_id,amount,currency,status\nA,1,ARS,captured\n",
+		"empty processed_at":          "transaction_id,amount,currency,status,processed_at\nA,1,ARS,captured,\n",
+	} {
+		t.Run(name+" leaves it nil", func(t *testing.T) {
+			recs, err := parse(t, csv)
+			if err != nil || len(recs) != 1 || recs[0].ProcessedAt != nil {
+				t.Fatalf("got %+v, %v", recs, err)
 			}
 		})
 	}
+
+	t.Run("unparseable processed_at invalidates the report", func(t *testing.T) {
+		_, err := parse(t, "transaction_id,amount,currency,status,processed_at\nA,1,ARS,captured,yesterday\n")
+		if !errors.Is(err, domain.ErrInvalidReportFormat) || !strings.Contains(err.Error(), "row 2") || !strings.Contains(err.Error(), `"yesterday"`) {
+			t.Fatalf("expected ErrInvalidReportFormat at row 2, got %v", err)
+		}
+	})
 
 	t.Run("headers only returns no records", func(t *testing.T) {
 		recs, err := parse(t, "transaction_id,amount,currency,status\n")
@@ -117,12 +123,14 @@ func TestCSVReportParser_Parse(t *testing.T) {
 		})
 	}
 
-	t.Run("invalid amount reports row number", func(t *testing.T) {
-		_, err := parse(t, "transaction_id,amount,currency,status\nA,1,ARS,captured\nB,12.50,ARS,captured\n")
-		if err == nil || !strings.Contains(err.Error(), "row 3") || !strings.Contains(err.Error(), `"12.50"`) {
-			t.Fatalf("expected row 3 amount error, got %v", err)
-		}
-	})
+	for _, amount := range []string{"12.50", "0", "-100", "abc"} {
+		t.Run("invalid amount "+amount+" reports row number", func(t *testing.T) {
+			_, err := parse(t, "transaction_id,amount,currency,status\nA,1,ARS,captured\nB,"+amount+",ARS,captured\n")
+			if !errors.Is(err, domain.ErrInvalidReportFormat) || !strings.Contains(err.Error(), "row 3") || !strings.Contains(err.Error(), `"`+amount+`"`) {
+				t.Fatalf("expected ErrInvalidReportFormat at row 3, got %v", err)
+			}
+		})
+	}
 }
 
 func TestParseRow_TooFewColumns(t *testing.T) {

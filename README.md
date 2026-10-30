@@ -143,7 +143,7 @@ La documentación técnico-funcional de cada contexto (modelo, casos de uso, API
 | Payment Processing | Cobros contra PSP con evaluación de riesgo y comisión | [PAYMENT.md](docs/technical/PAYMENT.md) |
 | Payouts | Desembolsos del saldo del comercio a su banco | [PAYOUT.md](docs/technical/PAYOUT.md) |
 | Billing & Fees | Planes de tarifas, asignación por tenant y cálculo de comisión | [BILLING.md](docs/technical/BILLING.md) |
-| Reconciliation | Conciliación de registros internos contra fuentes externas, con gestión de discrepancias | *(pendiente)* |
+| Reconciliation | Conciliación de registros internos contra fuentes externas, con gestión de discrepancias | [RECONCILIATION.md](docs/technical/RECONCILIATION.md) |
 | Webhooks | Entrega de eventos a endpoints del comercio con reintentos | *(pendiente)* |
 | Notifications | Emails transaccionales con preferencias por tenant | [NOTIFICATION.md](docs/technical/NOTIFICATION.md) |
 | Disputes | Disputas y contracargos con impacto en Ledger | [DISPUTE.md](docs/technical/DISPUTE.md) |
@@ -410,7 +410,7 @@ Subjects publicados hoy, por stream:
 | `PAYOUT` (`payout.>`) | `payout.{initiated,confirmed,failed,unknown}.v1` |
 | `BILLING` (`billing.>`) | `billing.plan.{created,assigned,updated,deactivated}.v1` |
 | `WEBHOOK` (`webhook.>`) | `webhook.endpoint.{registered,deactivated}.v1`, `webhook.delivery.exhausted.v1` |
-| `RECONCILIATION` (`reconciliation.>`) | `reconciliation.run.completed.v1` |
+| `RECONCILIATION` (`reconciliation.>`) | `reconciliation.run.{completed,failed}.v1`, `reconciliation.discrepancy.resolved.v1` |
 | `DISPUTE` (`dispute.>`) | `dispute.{opened,resolved}.v1` |
 | `COMPLIANCE` (`compliance.>`) | `compliance.alert.{raised,review_proposed,proposal_rejected,resolved}.v1`, `compliance.sanction.{matched,cleared,confirmed}.v1` (internos, los consume Auth) |
 | `NOTIFICATION` (`notification.>`) | *(stream creado; sin eventos publicados)* |

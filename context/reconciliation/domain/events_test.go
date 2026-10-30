@@ -13,10 +13,15 @@ func TestReconciliationCompletedEvent_EventType(t *testing.T) {
 	}
 }
 
+func TestDiscrepancyResolvedEvent_EventType(t *testing.T) {
+	if got := (DiscrepancyResolvedEvent{}).EventType(); got != "reconciliation.discrepancy.resolved.v1" {
+		t.Errorf("EventType() = %q", got)
+	}
+}
+
 func TestNewBase(t *testing.T) {
-	before := time.Now().UTC()
-	a := newBase("tenant-1")
-	b := newBase("tenant-1")
+	a := newBase("tenant-1", testNow)
+	b := newBase("tenant-1", testNow)
 
 	if _, err := uuid.Parse(a.EventID()); err != nil {
 		t.Errorf("event id is not a uuid: %v", err)
@@ -27,7 +32,7 @@ func TestNewBase(t *testing.T) {
 	if a.EventTenantID() != "tenant-1" {
 		t.Errorf("tenant = %q", a.EventTenantID())
 	}
-	if a.OccurredAt().Before(before) || a.OccurredAt().Location() != time.UTC {
-		t.Errorf("occurredAt = %v, want UTC now", a.OccurredAt())
+	if !a.OccurredAt().Equal(testNow) || a.OccurredAt().Location() != time.UTC {
+		t.Errorf("occurredAt = %v, want %v in UTC", a.OccurredAt(), testNow)
 	}
 }

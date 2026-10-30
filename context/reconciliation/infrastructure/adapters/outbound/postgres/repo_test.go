@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 var errBoom = errors.New("boom")
@@ -41,6 +43,17 @@ func anyArgs(n int) []any {
 
 func strPtr(s string) *string { return &s }
 
+// expectSession espera la tx efímera que fija app.current_tenant (RLS).
+func expectSession(mock pgxmock.PgxPoolIface, tenant string) {
+	mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	mock.ExpectExec("set_config").WithArgs(rlsTenantKey, tenant).WillReturnResult(pgxmock.NewResult("SELECT", 1))
+}
+
+// tenantCtx es el contexto de un request autenticado del tenant.
+func tenantCtx(tenant string) context.Context {
+	return pkgpostgres.WithTenantID(context.Background(), tenant)
+}
+
 func TestNullStrWrapErr(t *testing.T) {
 	if nullStr("") != nil {
 		t.Error("empty string should map to nil")
@@ -61,21 +74,21 @@ func TestNullStrWrapErr(t *testing.T) {
 var runCols = []string{
 	"id", "tenant_id", "type", "status", "period_from", "period_to",
 	"total_records", "matched_count", "discrepancy_count",
-	"error_msg", "created_at", "completed_at",
+	"error_msg", "created_at", "completed_at", "started_at", "version",
 }
 
 func runRow(id, tenantID string) []any {
 	completed := testCreated.Add(time.Hour)
 	return []any{
 		id, tenantID, "payment", "completed", testFrom, testTo,
-		10, 8, 2, "", testCreated, &completed,
+		10, 8, 2, "", testCreated, &completed, &testCreated, int64(4),
 	}
 }
 
 func TestRunRepository_Save(t *testing.T) {
 	t.Run("inserts run with NULL tenant and error for global pending run", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo, testCreated)
 
 		mock.ExpectExec("INSERT INTO reconciliation_runs").WithArgs(
 			run.ID().String(), (*string)(nil),
@@ -96,11 +109,13 @@ func TestRunRepository_Save(t *testing.T) {
 	t.Run("tenant run stores tenant id", func(t *testing.T) {
 		mock := newMock(t)
 		tenant := uuid.NewString()
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenant), domain.TypePayment, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenant), domain.TypePayment, testFrom, testTo, testCreated)
 		args := anyArgs(12)
 		args[1] = strPtr(tenant)
 
+		expectSession(mock, tenant)
 		mock.ExpectExec("INSERT INTO reconciliation_runs").WithArgs(args...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit()
 
 		if err := NewRunRepository(mock).Save(context.Background(), run); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -112,7 +127,7 @@ func TestRunRepository_Save(t *testing.T) {
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypeInternal, testFrom, testTo, testCreated)
 		mock.ExpectExec("INSERT INTO reconciliation_runs").WithArgs(anyArgs(12)...).WillReturnError(errBoom)
 
 		err := NewRunRepository(mock).Save(context.Background(), run)
@@ -123,30 +138,49 @@ func TestRunRepository_Save(t *testing.T) {
 }
 
 func TestRunRepository_Update(t *testing.T) {
-	t.Run("updates results of failed run", func(t *testing.T) {
+	t.Run("updates the run conditioned on its version and bumps it", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
-		_ = run.Start()
-		run.Fail("parse error")
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo, testCreated)
+		_ = run.Start(testCreated)
+		_ = run.Fail("parse error", testCreated)
 
-		mock.ExpectExec("UPDATE reconciliation_runs SET").WithArgs(
+		mock.ExpectExec("UPDATE reconciliation_runs SET .* started_at=\\$8, version=version\\+1\\s+WHERE id=\\$1 AND version=\\$9").WithArgs(
 			run.ID().String(), "failed",
 			0, 0, 0,
 			strPtr("parse error"), run.CompletedAt(),
+			run.StartedAt(), int64(0),
 		).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		if err := NewRunRepository(mock).Update(context.Background(), run); err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if run.Version() != 1 {
+			t.Errorf("version = %d, want 1 after a persisted update", run.Version())
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("expectations: %v", err)
 		}
 	})
 
+	t.Run("no rows affected means another process changed the run", func(t *testing.T) {
+		mock := newMock(t)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo, testCreated)
+		_ = run.Start(testCreated)
+		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(9)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err := NewRunRepository(mock).Update(context.Background(), run)
+		if !errors.Is(err, domain.ErrRunAlreadyRunning) || !strings.Contains(err.Error(), "modified by another process") {
+			t.Fatalf("expected ErrRunAlreadyRunning, got %v", err)
+		}
+		if run.Version() != 0 {
+			t.Error("version must not move when the update did not apply")
+		}
+	})
+
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
-		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
-		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(7)...).WillReturnError(errBoom)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo, testCreated)
+		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(9)...).WillReturnError(errBoom)
 
 		err := NewRunRepository(mock).Update(context.Background(), run)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "reconciliation update run") {
@@ -175,6 +209,9 @@ func TestRunRepository_FindByID(t *testing.T) {
 		}
 		if run.TotalRecords() != 10 || run.MatchedCount() != 8 || run.DiscrepancyCount() != 2 || run.ErrorMsg() != "" {
 			t.Error("results not mapped")
+		}
+		if run.StartedAt() == nil || !run.StartedAt().Equal(testCreated) || run.Version() != 4 {
+			t.Errorf("lease not mapped: startedAt=%v version=%d", run.StartedAt(), run.Version())
 		}
 		if !run.CreatedAt().Equal(testCreated) || run.CompletedAt() == nil {
 			t.Error("timestamps not mapped")
@@ -208,8 +245,10 @@ func TestRunRepository_List(t *testing.T) {
 	t.Run("filters by tenant", func(t *testing.T) {
 		mock := newMock(t)
 		id1, id2 := uuid.NewString(), uuid.NewString()
+		expectSession(mock, tenant)
 		mock.ExpectQuery("WHERE tenant_id=\\$1 ORDER BY created_at DESC LIMIT \\$2").WithArgs(tenant, 5).
 			WillReturnRows(pgxmock.NewRows(runCols).AddRow(runRow(id1, tenant)...).AddRow(runRow(id2, tenant)...))
+		mock.ExpectCommit()
 
 		runs, err := NewRunRepository(mock).List(context.Background(), domain.TenantID(tenant), 5)
 		if err != nil {
@@ -248,7 +287,9 @@ func TestRunRepository_List(t *testing.T) {
 		mock := newMock(t)
 		bad := runRow(uuid.NewString(), tenant)
 		bad[6] = "not-a-number"
+		expectSession(mock, tenant)
 		mock.ExpectQuery("FROM reconciliation_runs").WithArgs(tenant, 5).WillReturnRows(pgxmock.NewRows(runCols).AddRow(bad...))
+		mock.ExpectRollback()
 
 		_, err := NewRunRepository(mock).List(context.Background(), domain.TenantID(tenant), 5)
 		if err == nil || !strings.Contains(err.Error(), "run repo: scan") {
@@ -258,8 +299,10 @@ func TestRunRepository_List(t *testing.T) {
 
 	t.Run("rows error is returned", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock, tenant)
 		mock.ExpectQuery("FROM reconciliation_runs").WithArgs(tenant, 5).
 			WillReturnRows(pgxmock.NewRows(runCols).AddRow(runRow(uuid.NewString(), tenant)...).RowError(0, errBoom))
+		mock.ExpectRollback()
 
 		_, err := NewRunRepository(mock).List(context.Background(), domain.TenantID(tenant), 5)
 		if !errors.Is(err, errBoom) {
@@ -289,8 +332,8 @@ func discRow(id, runID string) []any {
 
 func TestDiscrepancyRepository_SaveAll(t *testing.T) {
 	runID := domain.NewRunID()
-	d1 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, "", domain.DiscrepancyMissingInPSP, "A", "{}", "")
-	d2 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, domain.TenantID(uuid.NewString()), domain.DiscrepancyAmountMismatch, "B", "1 ARS", "2 ARS")
+	d1 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, "", domain.DiscrepancyMissingInPSP, "A", "{}", "", testCreated)
+	d2 := domain.NewDiscrepancy(domain.NewDiscrepancyID(), runID, domain.TenantID(uuid.NewString()), domain.DiscrepancyAmountMismatch, "B", "1 ARS", "2 ARS", testCreated)
 
 	t.Run("inserts each discrepancy", func(t *testing.T) {
 		mock := newMock(t)
@@ -338,8 +381,8 @@ func TestDiscrepancyRepository_SaveAll(t *testing.T) {
 func TestDiscrepancyRepository_Update(t *testing.T) {
 	t.Run("updates resolution columns", func(t *testing.T) {
 		mock := newMock(t)
-		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "")
-		_ = d.Ignore("op-1", "")
+		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "", testCreated)
+		_ = d.Ignore("op-1", "", testCreated)
 
 		mock.ExpectExec("UPDATE reconciliation_discrepancies SET").WithArgs(
 			d.ID().String(), "ignored", (*string)(nil), strPtr("op-1"), d.ResolvedAt(),
@@ -355,7 +398,7 @@ func TestDiscrepancyRepository_Update(t *testing.T) {
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
-		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "")
+		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), "", domain.DiscrepancyAmountMismatch, "A", "", "", testCreated)
 		mock.ExpectExec("UPDATE reconciliation_discrepancies").WithArgs(anyArgs(5)...).WillReturnError(errBoom)
 
 		err := NewDiscrepancyRepository(mock).Update(context.Background(), d)
@@ -472,6 +515,110 @@ func TestDiscrepancyRepository_ListByRun(t *testing.T) {
 
 		_, err := NewDiscrepancyRepository(mock).ListByRun(context.Background(), domain.RunID(runID), "", 100)
 		if !errors.Is(err, errBoom) {
+			t.Fatalf("expected errBoom, got %v", err)
+		}
+	})
+}
+
+// ── Sesión RLS ────────────────────────────────────────────────────────────────
+
+func TestRepositories_RunInTenantSession(t *testing.T) {
+	tenant := uuid.NewString()
+
+	t.Run("run update uses the run tenant", func(t *testing.T) {
+		mock := newMock(t)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenant), domain.TypePayment, testFrom, testTo, testCreated)
+		_ = run.Start(testCreated)
+		expectSession(mock, tenant)
+		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(9)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectCommit()
+
+		if err := NewRunRepository(mock).Update(context.Background(), run); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("run lookup uses the caller tenant", func(t *testing.T) {
+		mock := newMock(t)
+		id := uuid.NewString()
+		expectSession(mock, tenant)
+		mock.ExpectQuery("FROM reconciliation_runs WHERE id=\\$1").WithArgs(id).
+			WillReturnRows(pgxmock.NewRows(runCols).AddRow(runRow(id, tenant)...))
+		mock.ExpectCommit()
+
+		if _, err := NewRunRepository(mock).FindByID(tenantCtx(tenant), domain.RunID(id)); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("run hidden by RLS is not found", func(t *testing.T) {
+		mock := newMock(t)
+		expectSession(mock, tenant)
+		mock.ExpectQuery("FROM reconciliation_runs").WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(runCols))
+		mock.ExpectRollback()
+
+		if _, err := NewRunRepository(mock).FindByID(tenantCtx(tenant), domain.NewRunID()); !errors.Is(err, domain.ErrRunNotFound) {
+			t.Fatalf("expected ErrRunNotFound, got %v", err)
+		}
+	})
+
+	t.Run("discrepancies are saved and updated with their tenant", func(t *testing.T) {
+		mock := newMock(t)
+		d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(tenant), domain.DiscrepancyMissingInPSP, "A", "{}", "", testCreated)
+		expectSession(mock, tenant)
+		mock.ExpectExec("INSERT INTO reconciliation_discrepancies").WithArgs(anyArgs(9)...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit()
+		expectSession(mock, tenant)
+		mock.ExpectExec("UPDATE reconciliation_discrepancies").WithArgs(anyArgs(5)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectCommit()
+
+		repo := NewDiscrepancyRepository(mock)
+		if err := repo.SaveAll(context.Background(), []*domain.Discrepancy{d}); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		if err := repo.Update(context.Background(), d); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("discrepancy lookups use the caller tenant", func(t *testing.T) {
+		mock := newMock(t)
+		runID := domain.NewRunID()
+		expectSession(mock, tenant)
+		mock.ExpectQuery("FROM reconciliation_discrepancies WHERE id=\\$1").WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(discCols))
+		mock.ExpectRollback()
+		expectSession(mock, tenant)
+		mock.ExpectQuery("WHERE run_id=\\$1 ORDER BY").WithArgs(runID.String(), 10).WillReturnRows(pgxmock.NewRows(discCols))
+		mock.ExpectCommit()
+
+		repo := NewDiscrepancyRepository(mock)
+		if _, err := repo.FindByID(tenantCtx(tenant), domain.NewDiscrepancyID()); !errors.Is(err, domain.ErrDiscrepancyNotFound) {
+			t.Fatalf("expected ErrDiscrepancyNotFound, got %v", err)
+		}
+		if _, err := repo.ListByRun(tenantCtx(tenant), runID, "", 10); err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("session setup error is returned", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(anyArgs(2)...).WillReturnError(errBoom)
+		mock.ExpectRollback()
+
+		if _, err := NewRunRepository(mock).List(context.Background(), domain.TenantID(tenant), 5); !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
 	})

@@ -10,12 +10,12 @@ import (
 // StartReconciliationUseCase crea un nuevo run de reconciliación en estado pending.
 // El run queda listo para ser procesado con ProcessReport o ProcessInternal.
 type StartReconciliationUseCase struct {
-	runRepo TxManager
-	repo    RunRepository
+	repo  RunRepository
+	clock Clock
 }
 
-func NewStartReconciliationUseCase(repo RunRepository) *StartReconciliationUseCase {
-	return &StartReconciliationUseCase{repo: repo}
+func NewStartReconciliationUseCase(repo RunRepository, clock Clock) *StartReconciliationUseCase {
+	return &StartReconciliationUseCase{repo: repo, clock: clock}
 }
 
 func (uc *StartReconciliationUseCase) Execute(ctx context.Context, cmd StartReconciliationCmd) (StartReconciliationResult, error) {
@@ -25,7 +25,7 @@ func (uc *StartReconciliationUseCase) Execute(ctx context.Context, cmd StartReco
 	}
 
 	if cmd.PeriodFrom.IsZero() || cmd.PeriodTo.IsZero() {
-		return StartReconciliationResult{}, fmt.Errorf("period_from and period_to are required")
+		return StartReconciliationResult{}, fmt.Errorf("%w: period_from and period_to are required", domain.ErrInvalidArgument)
 	}
 
 	var tenantID domain.TenantID
@@ -37,7 +37,7 @@ func (uc *StartReconciliationUseCase) Execute(ctx context.Context, cmd StartReco
 	}
 
 	id := domain.NewRunID()
-	run, err := domain.NewReconciliationRun(id, tenantID, reconcType, cmd.PeriodFrom, cmd.PeriodTo)
+	run, err := domain.NewReconciliationRun(id, tenantID, reconcType, cmd.PeriodFrom, cmd.PeriodTo, uc.clock.Now())
 	if err != nil {
 		return StartReconciliationResult{}, err
 	}

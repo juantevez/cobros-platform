@@ -122,7 +122,11 @@ func (h *ReconciliationHandler) GetReport(c *gin.Context) {
 	c.JSON(http.StatusOK, report)
 }
 
-// UploadReport procesa el CSV del PSP para un run de tipo "payment".
+// maxReportBytes es el tamaño máximo del CSV del PSP.
+const maxReportBytes = 50 << 20 // 50 MB
+
+// UploadReport procesa el CSV del PSP para un run de tipo "payment". El
+// procesamiento es síncrono: responde con el run ya terminado.
 //
 //	POST /api/v1/reconciliation/runs/:runID/report
 //	Content-Type: text/csv
@@ -131,8 +135,16 @@ func (h *ReconciliationHandler) UploadReport(c *gin.Context) {
 	if !ok {
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(c.Request.Body, 50*1024*1024)) // 50 MB max
+
+	// MaxBytesReader falla si el body supera el tope. Un LimitReader lo
+	// truncaría en silencio y se conciliaría un informe incompleto.
+	data, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxReportBytes))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "report exceeds 50 MB"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read request body"})
 		return
 	}
@@ -141,18 +153,20 @@ func (h *ReconciliationHandler) UploadReport(c *gin.Context) {
 		return
 	}
 
-	if err := h.processReport.Execute(c.Request.Context(), application.ProcessReportCmd{
+	run, err := h.processReport.Execute(c.Request.Context(), application.ProcessReportCmd{
 		TenantID:   tenantID,
 		RunID:      c.Param("runID"),
 		ReportData: data,
-	}); err != nil {
+	})
+	if err != nil {
 		respondError(c, err)
 		return
 	}
-	c.Status(http.StatusAccepted)
+	c.JSON(http.StatusOK, run)
 }
 
-// ProcessInternal ejecuta la reconciliación interna del Ledger.
+// ProcessInternal ejecuta la reconciliación interna del Ledger y responde con
+// el run ya terminado.
 //
 //	POST /api/v1/reconciliation/runs/:runID/process-internal
 func (h *ReconciliationHandler) ProcessInternal(c *gin.Context) {
@@ -160,17 +174,20 @@ func (h *ReconciliationHandler) ProcessInternal(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := h.processInternal.Execute(c.Request.Context(), application.ProcessInternalCmd{
+
+	run, err := h.processInternal.Execute(c.Request.Context(), application.ProcessInternalCmd{
 		TenantID: tenantID,
 		RunID:    c.Param("runID"),
-	}); err != nil {
+	})
+	if err != nil {
 		respondError(c, err)
 		return
 	}
-	c.Status(http.StatusAccepted)
+	c.JSON(http.StatusOK, run)
 }
 
-// ResolveDiscrepancy resuelve o ignora una discrepancia.
+// ResolveDiscrepancy resuelve o ignora una discrepancia. Queda firmada por el
+// usuario autenticado (actor del contexto), nunca por un dato del body.
 //
 //	POST /api/v1/reconciliation/discrepancies/:discrepancyID/resolve
 func (h *ReconciliationHandler) ResolveDiscrepancy(c *gin.Context) {
@@ -178,26 +195,28 @@ func (h *ReconciliationHandler) ResolveDiscrepancy(c *gin.Context) {
 	if !ok {
 		return
 	}
+
 	var req struct {
-		Action     string `json:"action"      binding:"required"` // "resolve" | "ignore"
-		ResolvedBy string `json:"resolved_by" binding:"required"`
-		Notes      string `json:"notes"`
+		Action string `json:"action" binding:"required"` // "resolve" | "ignore"
+		Notes  string `json:"notes"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
-	if err := h.resolveDisc.Execute(c.Request.Context(), application.ResolveDiscrepancyCmd{
+	ctx := c.Request.Context()
+	if err := h.resolveDisc.Execute(ctx, application.ResolveDiscrepancyCmd{
 		TenantID:      tenantID,
 		DiscrepancyID: c.Param("discrepancyID"),
 		Action:        req.Action,
-		ResolvedBy:    req.ResolvedBy,
+		ResolvedBy:    postgres.ActorFromContext(ctx),
 		Notes:         req.Notes,
 	}); err != nil {
 		respondError(c, err)
 		return
 	}
+
 	c.Status(http.StatusNoContent)
 }
 
@@ -223,7 +242,10 @@ func respondError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrRunAlreadyRunning),
 		errors.Is(err, domain.ErrDiscrepancyAlreadyResolved):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrRunTypeMismatch):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidPeriod),
+		errors.Is(err, domain.ErrInvalidArgument),
 		errors.Is(err, domain.ErrEmptyReport),
 		errors.Is(err, domain.ErrInvalidReportFormat):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -232,15 +254,26 @@ func respondError(c *gin.Context, err error) {
 	}
 }
 
+// RouteGuards autoriza cada operación. Se inyectan desde el composition root
+// para no acoplar este contexto con Auth.
+type RouteGuards struct {
+	Read    gin.HandlerFunc // consultar runs y discrepancias
+	Operate gin.HandlerFunc // crear y procesar runs, resolver discrepancias
+}
+
 // RegisterRoutes registra las rutas de Reconciliation en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *ReconciliationHandler) {
+func RegisterRoutes(rg *gin.RouterGroup, h *ReconciliationHandler, guards RouteGuards) {
+	if guards.Read == nil || guards.Operate == nil {
+		panic("reconciliation: RegisterRoutes requires Read and Operate guards")
+	}
+
 	rec := rg.Group("/reconciliation")
 	{
-		rec.POST("/runs", h.StartRun)
-		rec.GET("/runs", h.ListRuns)
-		rec.GET("/runs/:runID", h.GetReport)
-		rec.POST("/runs/:runID/report", h.UploadReport)
-		rec.POST("/runs/:runID/process-internal", h.ProcessInternal)
-		rec.POST("/discrepancies/:discrepancyID/resolve", h.ResolveDiscrepancy)
+		rec.POST("/runs", guards.Operate, h.StartRun)
+		rec.GET("/runs", guards.Read, h.ListRuns)
+		rec.GET("/runs/:runID", guards.Read, h.GetReport)
+		rec.POST("/runs/:runID/report", guards.Operate, h.UploadReport)
+		rec.POST("/runs/:runID/process-internal", guards.Operate, h.ProcessInternal)
+		rec.POST("/discrepancies/:discrepancyID/resolve", guards.Operate, h.ResolveDiscrepancy)
 	}
 }

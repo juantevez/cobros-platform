@@ -17,21 +17,21 @@ func NewDiscrepancyID() DiscrepancyID { return DiscrepancyID(uuid.NewString()) }
 
 func ParseRunID(s string) (RunID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid run id: %w", err)
+		return "", fmt.Errorf("%w: invalid run id: %w", ErrInvalidArgument, err)
 	}
 	return RunID(s), nil
 }
 
 func ParseDiscrepancyID(s string) (DiscrepancyID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid discrepancy id: %w", err)
+		return "", fmt.Errorf("%w: invalid discrepancy id: %w", ErrInvalidArgument, err)
 	}
 	return DiscrepancyID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: invalid tenant id: %w", ErrInvalidArgument, err)
 	}
 	return TenantID(s), nil
 }
@@ -58,7 +58,7 @@ func ParseReconciliationType(s string) (ReconciliationType, error) {
 	case TypePayment, TypeInternal:
 		return t, nil
 	}
-	return "", fmt.Errorf("invalid reconciliation type: %q", s)
+	return "", fmt.Errorf("%w: invalid reconciliation type: %q", ErrInvalidArgument, s)
 }
 
 func (t ReconciliationType) String() string { return string(t) }
@@ -98,9 +98,18 @@ const (
 	// Ejemplo: sistema dice "captured" pero PSP dice "rejected".
 	DiscrepancyStatusMismatch DiscrepancyType = "status_mismatch"
 
-	// LedgerImbalance: el Ledger no balancea (sum débitos ≠ sum créditos).
+	// LedgerImbalance: un asiento no balancea en una moneda (sum débitos ≠
+	// sum créditos) o no tiene postings.
 	// Indica un bug en la lógica de asientos o corrupción de datos.
 	DiscrepancyLedgerImbalance DiscrepancyType = "ledger_imbalance"
+
+	// DuplicateReference: la misma referencia aparece más de una vez en el
+	// informe o en el sistema; no se puede decidir con qué registro comparar.
+	DiscrepancyDuplicateReference DiscrepancyType = "duplicate_reference"
+
+	// MissingInLedger: un pago capturado no tiene su asiento en el Ledger
+	// (el dinero entró pero no quedó contabilizado).
+	DiscrepancyMissingInLedger DiscrepancyType = "missing_in_ledger"
 )
 
 func (t DiscrepancyType) String() string { return string(t) }

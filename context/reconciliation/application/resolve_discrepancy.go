@@ -8,18 +8,22 @@ import (
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 )
 
-// ResolveDiscrepancyUseCase permite al operador resolver o ignorar una discrepancia.
+// ResolveDiscrepancyUseCase permite al operador resolver o ignorar una
+// discrepancia. El cambio y su evento se escriben en la misma transacción.
 type ResolveDiscrepancyUseCase struct {
 	discrepancyRepo DiscrepancyRepository
+	txManager       TxManager
+	publisher       EventPublisher
+	clock           Clock
 }
 
-func NewResolveDiscrepancyUseCase(repo DiscrepancyRepository) *ResolveDiscrepancyUseCase {
-	return &ResolveDiscrepancyUseCase{discrepancyRepo: repo}
+func NewResolveDiscrepancyUseCase(repo DiscrepancyRepository, txManager TxManager, publisher EventPublisher, clock Clock) *ResolveDiscrepancyUseCase {
+	return &ResolveDiscrepancyUseCase{discrepancyRepo: repo, txManager: txManager, publisher: publisher, clock: clock}
 }
 
 func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDiscrepancyCmd) error {
 	if cmd.ResolvedBy == "" {
-		return fmt.Errorf("resolved_by is required")
+		return fmt.Errorf("%w: resolved_by is required", domain.ErrInvalidArgument)
 	}
 
 	id, err := domain.ParseDiscrepancyID(cmd.DiscrepancyID)
@@ -38,18 +42,40 @@ func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDis
 
 	switch cmd.Action {
 	case "resolve":
-		if err := d.Resolve(cmd.ResolvedBy, cmd.Notes); err != nil {
+		if err := d.Resolve(cmd.ResolvedBy, cmd.Notes, uc.clock.Now()); err != nil {
 			return err
 		}
 	case "ignore":
-		if err := d.Ignore(cmd.ResolvedBy, cmd.Notes); err != nil {
+		if err := d.Ignore(cmd.ResolvedBy, cmd.Notes, uc.clock.Now()); err != nil {
 			return err
 		}
 	default:
-		return fmt.Errorf("invalid action %q: must be 'resolve' or 'ignore'", cmd.Action)
+		return fmt.Errorf("%w: invalid action %q: must be 'resolve' or 'ignore'", domain.ErrInvalidArgument, cmd.Action)
 	}
 
-	return uc.discrepancyRepo.Update(ctx, d)
+	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.discrepancyRepo.Update(ctx, d); err != nil {
+			return err
+		}
+		return uc.publisher.Publish(ctx, d.PullEvents()...)
+	})
+}
+
+// Topes de paginación: limit ≤ 0 usa el default, y nunca se devuelve más que
+// el máximo.
+const (
+	defaultReportLimit = 100
+	maxReportLimit     = 500
+	defaultRunsLimit   = 20
+	maxRunsLimit       = 100
+)
+
+// clampLimit aplica el default y el tope a un limit pedido.
+func clampLimit(limit, def, max int) int {
+	if limit <= 0 {
+		return def
+	}
+	return min(limit, max)
 }
 
 // ── GetReport ─────────────────────────────────────────────────────────────────
@@ -69,6 +95,11 @@ func (uc *GetReportUseCase) Execute(ctx context.Context, q GetReportQuery) (Repo
 	if err != nil {
 		return ReportView{}, err
 	}
+	switch domain.DiscrepancyStatus(q.StatusFilter) {
+	case "", domain.DiscrepancyOpen, domain.DiscrepancyResolved, domain.DiscrepancyIgnored:
+	default:
+		return ReportView{}, fmt.Errorf("%w: invalid status filter %q: must be open, resolved or ignored", domain.ErrInvalidArgument, q.StatusFilter)
+	}
 
 	run, err := uc.runRepo.FindByID(ctx, runID)
 	if err != nil {
@@ -78,10 +109,7 @@ func (uc *GetReportUseCase) Execute(ctx context.Context, q GetReportQuery) (Repo
 		return ReportView{}, domain.ErrRunNotFound
 	}
 
-	limit := q.Limit
-	if limit <= 0 {
-		limit = 100
-	}
+	limit := clampLimit(q.Limit, defaultReportLimit, maxReportLimit)
 
 	discrepancies, err := uc.discrepancyRepo.ListByRun(ctx, runID, q.StatusFilter, limit)
 	if err != nil {
@@ -112,9 +140,7 @@ func (uc *ListRunsUseCase) Execute(ctx context.Context, tenantID string, limit i
 			return nil, err
 		}
 	}
-	if limit <= 0 {
-		limit = 20
-	}
+	limit = clampLimit(limit, defaultRunsLimit, maxRunsLimit)
 
 	runs, err := uc.runRepo.List(ctx, tid, limit)
 	if err != nil {

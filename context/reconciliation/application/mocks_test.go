@@ -18,7 +18,15 @@ const (
 var (
 	periodFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	periodTo   = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	testNow    = time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
 )
+
+// fixedClock devuelve siempre la misma hora.
+type fixedClock struct{ t time.Time }
+
+func (c fixedClock) Now() time.Time { return c.t }
+
+var clock = fixedClock{testNow}
 
 // ── Fakes de puertos ──────────────────────────────────────────────────────────
 
@@ -28,6 +36,7 @@ type fakeRunRepo struct {
 	byID        map[domain.RunID]*domain.ReconciliationRun
 	saved       []*domain.ReconciliationRun
 	updates     []domain.RunStatus
+	versions    []int64 // versión leída en cada Update
 	list        []*domain.ReconciliationRun
 	saveErr     error
 	updateErr   error
@@ -59,9 +68,11 @@ func (r *fakeRunRepo) Save(ctx context.Context, run *domain.ReconciliationRun) e
 
 func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun) error {
 	r.updates = append(r.updates, run.Status())
+	r.versions = append(r.versions, run.Version())
 	if r.updateErr != nil && (r.updateErrAt == 0 || r.updateErrAt == len(r.updates)) {
 		return r.updateErr
 	}
+	run.MarkVersionPersisted()
 	return nil
 }
 
@@ -194,21 +205,21 @@ func (f *fakeParser) Parse(data []byte) ([]PSPRecord, error) {
 	return f.records, nil
 }
 
-// fakeLedger devuelve un imbalance fijo o un error.
+// fakeLedger devuelve un resultado fijo o un error.
 type fakeLedger struct {
-	imbalance  int64
+	check      LedgerCheck
 	err        error
 	lastTenant domain.TenantID
 	lastFrom   time.Time
 	lastTo     time.Time
 }
 
-func (f *fakeLedger) CheckBalance(ctx context.Context, tenantID domain.TenantID, from, to time.Time) (int64, error) {
+func (f *fakeLedger) Check(ctx context.Context, tenantID domain.TenantID, from, to time.Time) (LedgerCheck, error) {
 	f.lastTenant, f.lastFrom, f.lastTo = tenantID, from, to
 	if f.err != nil {
-		return 0, f.err
+		return LedgerCheck{}, f.err
 	}
-	return f.imbalance, nil
+	return f.check, nil
 }
 
 // fakePublisher acumula eventos publicados o falla con err.
@@ -227,24 +238,44 @@ func (p *fakePublisher) Publish(ctx context.Context, events ...domain.Event) err
 	return nil
 }
 
+// fakeTx ejecuta fn directamente, o falla antes con err. Cuenta las
+// transacciones y si fn falló dentro de alguna (rollback).
+type fakeTx struct {
+	calls     int
+	rollbacks int
+	err       error
+}
+
+func (f *fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	f.calls++
+	if f.err != nil {
+		return f.err
+	}
+	if err := fn(ctx); err != nil {
+		f.rollbacks++
+		return err
+	}
+	return nil
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // pendingRun crea un run real en estado pending para el tenant dado.
 func pendingRun(tenantID string, t domain.ReconciliationType) *domain.ReconciliationRun {
-	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenantID), t, periodFrom, periodTo)
+	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(tenantID), t, periodFrom, periodTo, testNow)
 	return run
 }
 
 func runWithStatus(st domain.RunStatus) *domain.ReconciliationRun {
 	return domain.ReconstituteRun(
 		domain.NewRunID(), domain.TenantID(tenantA), domain.TypePayment, st,
-		periodFrom, periodTo, 0, 0, 0, "", periodTo, nil,
+		periodFrom, periodTo, 0, 0, 0, "", periodTo, nil, &testNow, 0,
 	)
 }
 
 func openDiscrepancy() *domain.Discrepancy {
 	return domain.NewDiscrepancy(
 		domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(tenantA),
-		domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS",
+		domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS", testNow,
 	)
 }

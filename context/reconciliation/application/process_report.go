@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/reconciliation/domain"
 )
@@ -11,20 +14,19 @@ import (
 // ProcessReportUseCase compara los pagos del sistema contra el informe del PSP
 // y genera discrepancias para cada inconsistencia encontrada.
 //
-// Algoritmo de matching:
-//  1. Parsear el CSV del PSP → []PSPRecord indexados por TransactionID (= psp_reference)
-//  2. Cargar los pagos del sistema del período → []SystemPayment indexados por PSPReference
-//  3. Comparar:
-//     - En sistema, no en PSP → MissingInPSP
-//     - En PSP, no en sistema → MissingInSystem
-//     - En ambos, monto distinto → AmountMismatch
-//     - En ambos, estado inconsistente → StatusMismatch
+// Algoritmo de matching (por referencia: transaction_id = psp_reference):
+//   - Referencia repetida en el informe o en el sistema → DuplicateReference
+//   - En sistema, no en PSP → MissingInPSP
+//   - En PSP, no en sistema → MissingInSystem, salvo que el informe la ubique
+//     fuera del período (processed_at): esa queda para el run que corresponda
+//   - En ambos, monto o moneda distintos → AmountMismatch
+//   - En ambos, estados que no se corresponden → StatusMismatch
+//
+// total_records = referencias evaluadas = matched + discrepancias.
 type ProcessReportUseCase struct {
-	runRepo          RunRepository
-	discrepancyRepo  DiscrepancyRepository
-	paymentReader    PaymentReader
-	reportParser     ReportParser
-	publisher        EventPublisher
+	lifecycle
+	paymentReader PaymentReader
+	reportParser  ReportParser
 }
 
 func NewProcessReportUseCase(
@@ -32,81 +34,63 @@ func NewProcessReportUseCase(
 	discrepancyRepo DiscrepancyRepository,
 	paymentReader PaymentReader,
 	reportParser ReportParser,
+	txManager TxManager,
 	publisher EventPublisher,
+	clock Clock,
 ) *ProcessReportUseCase {
 	return &ProcessReportUseCase{
-		runRepo:         runRepo,
-		discrepancyRepo: discrepancyRepo,
-		paymentReader:   paymentReader,
-		reportParser:    reportParser,
-		publisher:       publisher,
+		lifecycle:     lifecycle{runs: runRepo, discs: discrepancyRepo, tx: txManager, pub: publisher, clock: clock},
+		paymentReader: paymentReader,
+		reportParser:  reportParser,
 	}
 }
 
-func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCmd) error {
+func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCmd) (RunView, error) {
 	if len(cmd.ReportData) == 0 {
-		return domain.ErrEmptyReport
+		return RunView{}, domain.ErrEmptyReport
 	}
 
 	runID, err := domain.ParseRunID(cmd.RunID)
 	if err != nil {
-		return err
+		return RunView{}, err
 	}
 
-	run, err := uc.runRepo.FindByID(ctx, runID)
+	// Parsear antes de tomar el run: un informe mal formado es un error del
+	// cliente y no debe dejar el run failed.
+	pspRecords, err := uc.reportParser.Parse(cmd.ReportData)
 	if err != nil {
-		return fmt.Errorf("find run: %w", err)
+		return RunView{}, fmt.Errorf("parse report: %w", err)
+	}
+
+	run, err := uc.runs.FindByID(ctx, runID)
+	if err != nil {
+		return RunView{}, fmt.Errorf("find run: %w", err)
 	}
 	if !ownedBy(run, cmd.TenantID) {
-		return domain.ErrRunNotFound
+		return RunView{}, domain.ErrRunNotFound
 	}
 
-	if err := run.Start(); err != nil {
-		return err
-	}
-	if err := uc.runRepo.Update(ctx, run); err != nil {
-		return fmt.Errorf("update run to running: %w", err)
+	if err := uc.claim(ctx, run, domain.TypePayment); err != nil {
+		return RunView{}, err
 	}
 
-	// Delegar el procesamiento. Si falla, marcar el run como failed.
-	discrepancies, total, matched, err := uc.compare(ctx, run, cmd.ReportData)
+	discrepancies, total, matched, err := uc.compare(ctx, run, pspRecords)
 	if err != nil {
-		run.Fail(err.Error())
-		_ = uc.runRepo.Update(ctx, run)
-		return fmt.Errorf("compare: %w", err)
+		return RunView{}, uc.fail(ctx, run, fmt.Errorf("compare: %w", err))
 	}
 
-	// Guardar discrepancias y completar el run en una sola tx.
-	if len(discrepancies) > 0 {
-		if err := uc.discrepancyRepo.SaveAll(ctx, discrepancies); err != nil {
-			run.Fail(err.Error())
-			_ = uc.runRepo.Update(ctx, run)
-			return fmt.Errorf("save discrepancies: %w", err)
-		}
+	if err := uc.complete(ctx, run, discrepancies, total, matched); err != nil {
+		return RunView{}, err
 	}
-
-	run.Complete(total, matched, len(discrepancies))
-	if err := uc.runRepo.Update(ctx, run); err != nil {
-		return fmt.Errorf("update run completed: %w", err)
-	}
-
-	_ = uc.publisher.Publish(ctx, run.PullEvents()...)
-	return nil
+	return toRunView(run), nil
 }
 
 func (uc *ProcessReportUseCase) compare(
 	ctx context.Context,
 	run *domain.ReconciliationRun,
-	reportData []byte,
+	pspRecords []PSPRecord,
 ) (discrepancies []*domain.Discrepancy, total, matched int, err error) {
 
-	// 1. Parsear el informe del PSP.
-	pspRecords, err := uc.reportParser.Parse(reportData)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("parse report: %w", err)
-	}
-
-	// 2. Cargar pagos del sistema para el período.
 	systemPayments, err := uc.paymentReader.ReadByPeriod(
 		ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo(),
 	)
@@ -114,89 +98,116 @@ func (uc *ProcessReportUseCase) compare(
 		return nil, 0, 0, fmt.Errorf("read payments: %w", err)
 	}
 
-	// 3. Indexar por psp_reference / transaction_id para O(1) lookup.
-	pspIndex := make(map[string]PSPRecord, len(pspRecords))
+	// Indexar ambos lados por referencia. Los pagos sin psp_reference no
+	// llegaron al PSP: no hay contra qué compararlos.
+	pspIndex := make(map[string][]PSPRecord, len(pspRecords))
 	for _, r := range pspRecords {
-		pspIndex[r.TransactionID] = r
+		pspIndex[r.TransactionID] = append(pspIndex[r.TransactionID], r)
 	}
-
-	systemIndex := make(map[string]SystemPayment, len(systemPayments))
+	systemIndex := make(map[string][]SystemPayment, len(systemPayments))
 	for _, p := range systemPayments {
 		if p.PSPReference != "" {
-			systemIndex[p.PSPReference] = p
+			systemIndex[p.PSPReference] = append(systemIndex[p.PSPReference], p)
 		}
 	}
 
-	total = max(len(pspRecords), len(systemPayments))
-
-	// 4. Recorrer sistema → buscar en PSP.
-	for ref, sysPayment := range systemIndex {
-		pspRec, found := pspIndex[ref]
-		if !found {
-			// El sistema tiene el pago pero el PSP no lo reporta.
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyMissingInPSP,
-				ref,
-				toJSON(sysPayment),
-				"",
-			))
-			continue
+	refs := make([]string, 0, len(pspIndex)+len(systemIndex))
+	for ref := range systemIndex {
+		refs = append(refs, ref)
+	}
+	for ref := range pspIndex {
+		if _, ok := systemIndex[ref]; !ok {
+			refs = append(refs, ref)
 		}
+	}
+	sort.Strings(refs) // orden estable de las discrepancias
 
-		// Comparar monto.
-		if sysPayment.Amount != pspRec.Amount {
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyAmountMismatch,
-				ref,
-				fmt.Sprintf("%d %s", sysPayment.Amount, sysPayment.Currency),
-				fmt.Sprintf("%d %s", pspRec.Amount, pspRec.Currency),
-			))
-			continue
-		}
-
-		// Comparar estado.
-		if isStatusMismatch(sysPayment.Status, pspRec.Status) {
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyStatusMismatch,
-				ref,
-				sysPayment.Status,
-				pspRec.Status,
-			))
-			continue
-		}
-
-		matched++
+	now := uc.clock.Now()
+	newDisc := func(t domain.DiscrepancyType, ref, system, external string) {
+		discrepancies = append(discrepancies, domain.NewDiscrepancy(
+			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external, now,
+		))
 	}
 
-	// 5. Recorrer PSP → buscar los que no existen en sistema.
-	for ref, pspRec := range pspIndex {
-		if _, found := systemIndex[ref]; !found {
-			discrepancies = append(discrepancies, domain.NewDiscrepancy(
-				domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-				domain.DiscrepancyMissingInSystem,
-				ref,
-				"",
-				toJSON(pspRec),
-			))
+	for _, ref := range refs {
+		sys, psp := systemIndex[ref], pspIndex[ref]
+
+		if len(sys) == 0 && !inPeriod(psp[0], run) && len(psp) == 1 {
+			continue // procesado por el PSP en otro período
+		}
+		total++
+
+		switch {
+		case len(sys) > 1 || len(psp) > 1:
+			newDisc(domain.DiscrepancyDuplicateReference, ref, jsonOrEmpty(sys), jsonOrEmpty(psp))
+		case len(psp) == 0:
+			newDisc(domain.DiscrepancyMissingInPSP, ref, toJSON(sys[0]), "")
+		case len(sys) == 0:
+			newDisc(domain.DiscrepancyMissingInSystem, ref, "", toJSON(psp[0]))
+		case sys[0].Amount != psp[0].Amount || !strings.EqualFold(sys[0].Currency, psp[0].Currency):
+			newDisc(domain.DiscrepancyAmountMismatch, ref,
+				fmt.Sprintf("%d %s", sys[0].Amount, sys[0].Currency),
+				fmt.Sprintf("%d %s", psp[0].Amount, psp[0].Currency))
+		case isStatusMismatch(sys[0].Status, psp[0].Status):
+			newDisc(domain.DiscrepancyStatusMismatch, ref, sys[0].Status, psp[0].Status)
+		default:
+			matched++
 		}
 	}
 
 	return discrepancies, total, matched, nil
 }
 
-// isStatusMismatch detecta inconsistencias críticas de estado.
-// No todos los estados distintos son errores: ej. "refunded" en PSP puede
-// coincidir con "captured" en sistema si el reembolso aún no fue procesado.
-func isStatusMismatch(systemStatus, pspStatus string) bool {
-	criticalMismatches := map[[2]string]bool{
-		{"captured", "rejected"}: true,
-		{"captured", "failed"}:   true,
-		{"failed", "captured"}:   true,
+// inPeriod indica si el PSP procesó el registro dentro del período del run.
+// Sin processed_at no se puede saber: se asume que sí.
+func inPeriod(r PSPRecord, run *domain.ReconciliationRun) bool {
+	if r.ProcessedAt == nil {
+		return true
 	}
-	return criticalMismatches[[2]string{systemStatus, pspStatus}]
+	return !r.ProcessedAt.Before(run.PeriodFrom()) && r.ProcessedAt.Before(run.PeriodTo())
+}
+
+// Desenlace de un pago en cada lado. Los estados de ambos se traducen a estos
+// valores y se comparan; un estado del PSP desconocido nunca coincide.
+const (
+	outcomePending  = "pending"
+	outcomeCaptured = "captured"
+	outcomeFailed   = "failed"
+	outcomeRefunded = "refunded"
+)
+
+var systemOutcome = map[string]string{
+	"initiated":     outcomePending,
+	"processing":    outcomePending,
+	"captured":      outcomeCaptured,
+	"risk_rejected": outcomeFailed,
+	"failed":        outcomeFailed,
+	"refunded":      outcomeRefunded,
+}
+
+var pspOutcome = map[string]string{
+	"pending":  outcomePending,
+	"captured": outcomeCaptured,
+	"rejected": outcomeFailed,
+	"failed":   outcomeFailed,
+	"refunded": outcomeRefunded,
+}
+
+// isStatusMismatch indica si los estados de ambos lados no describen el mismo
+// desenlace. Incluye los reembolsos: si uno de los lados lo registra y el otro
+// no, el dinero devuelto no coincide (el operador decide si es un desfase).
+func isStatusMismatch(systemStatus, pspStatus string) bool {
+	sys, okSys := systemOutcome[systemStatus]
+	psp, okPSP := pspOutcome[pspStatus]
+	return !okSys || !okPSP || sys != psp
+}
+
+// jsonOrEmpty serializa los registros de un lado, o "" si no hay ninguno.
+func jsonOrEmpty[T any](records []T) string {
+	if len(records) == 0 {
+		return ""
+	}
+	return toJSON(records)
 }
 
 // ownedBy indica si el run pertenece al tenant del caller.
@@ -211,86 +222,88 @@ func toJSON(v any) string {
 	return string(b)
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // ── ProcessInternalUseCase ────────────────────────────────────────────────────
 
-// ProcessInternalUseCase verifica la coherencia matemática del Ledger.
-// Verifica que sum(débitos) == sum(créditos) para el período del run.
+// ProcessInternalUseCase verifica la coherencia del Ledger en el período del
+// run: cada asiento balancea por moneda (el trigger de la base solo valida
+// asientos con 2+ postings y suma todas las monedas juntas) y cada pago
+// capturado tiene su asiento. total_records = asientos + capturas revisados.
 type ProcessInternalUseCase struct {
-	runRepo         RunRepository
-	discrepancyRepo DiscrepancyRepository
-	ledgerChecker   LedgerChecker
-	publisher       EventPublisher
+	lifecycle
+	ledgerChecker LedgerChecker
 }
 
 func NewProcessInternalUseCase(
 	runRepo RunRepository,
 	discrepancyRepo DiscrepancyRepository,
 	ledgerChecker LedgerChecker,
+	txManager TxManager,
 	publisher EventPublisher,
+	clock Clock,
 ) *ProcessInternalUseCase {
 	return &ProcessInternalUseCase{
-		runRepo: runRepo, discrepancyRepo: discrepancyRepo,
-		ledgerChecker: ledgerChecker, publisher: publisher,
+		lifecycle:     lifecycle{runs: runRepo, discs: discrepancyRepo, tx: txManager, pub: publisher, clock: clock},
+		ledgerChecker: ledgerChecker,
 	}
 }
 
-func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessInternalCmd) error {
+func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessInternalCmd) (RunView, error) {
 	runID, err := domain.ParseRunID(cmd.RunID)
 	if err != nil {
-		return err
+		return RunView{}, err
 	}
 
-	run, err := uc.runRepo.FindByID(ctx, runID)
+	run, err := uc.runs.FindByID(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("find run: %w", err)
+		return RunView{}, fmt.Errorf("find run: %w", err)
 	}
 	if !ownedBy(run, cmd.TenantID) {
-		return domain.ErrRunNotFound
+		return RunView{}, domain.ErrRunNotFound
 	}
 
-	if err := run.Start(); err != nil {
-		return err
+	if err := uc.claim(ctx, run, domain.TypeInternal); err != nil {
+		return RunView{}, err
 	}
-	_ = uc.runRepo.Update(ctx, run)
 
-	// Verificar balance del Ledger para el período.
-	imbalance, err := uc.ledgerChecker.CheckBalance(ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo())
+	check, err := uc.ledgerChecker.Check(ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo())
 	if err != nil {
-		run.Fail(err.Error())
-		_ = uc.runRepo.Update(ctx, run)
-		return fmt.Errorf("check ledger balance: %w", err)
+		return RunView{}, uc.fail(ctx, run, fmt.Errorf("check ledger: %w", err))
 	}
 
+	discrepancies := ledgerDiscrepancies(run, check, uc.clock.Now())
+	total := check.EntriesChecked + check.CapturesChecked
+	if err := uc.complete(ctx, run, discrepancies, total, total-len(discrepancies)); err != nil {
+		return RunView{}, err
+	}
+	return toRunView(run), nil
+}
+
+// ledgerDiscrepancies arma una discrepancia por asiento desbalanceado (con el
+// imbalance de cada moneda) y una por captura sin asiento.
+func ledgerDiscrepancies(run *domain.ReconciliationRun, check LedgerCheck, now time.Time) []*domain.Discrepancy {
 	var discrepancies []*domain.Discrepancy
-	matched := 1
-	if imbalance != 0 {
-		matched = 0
+	newDisc := func(t domain.DiscrepancyType, ref, system, external string) {
 		discrepancies = append(discrepancies, domain.NewDiscrepancy(
-			domain.NewDiscrepancyID(), run.ID(), run.TenantID(),
-			domain.DiscrepancyLedgerImbalance,
-			"global",
-			"0",
-			fmt.Sprintf("%d (centavos fuera de balance)", imbalance),
+			domain.NewDiscrepancyID(), run.ID(), run.TenantID(), t, ref, system, external, now,
 		))
-		if err := uc.discrepancyRepo.SaveAll(ctx, discrepancies); err != nil {
-			run.Fail(err.Error())
-			_ = uc.runRepo.Update(ctx, run)
-			return fmt.Errorf("save discrepancies: %w", err)
+	}
+
+	for i := 0; i < len(check.Unbalanced); {
+		entryID := check.Unbalanced[i].EntryID
+		var parts []string
+		for ; i < len(check.Unbalanced) && check.Unbalanced[i].EntryID == entryID; i++ {
+			if c := check.Unbalanced[i]; c.Currency != "" {
+				parts = append(parts, fmt.Sprintf("%d %s", c.Imbalance, c.Currency))
+			}
 		}
+		external := "sin postings"
+		if len(parts) > 0 {
+			external = strings.Join(parts, ", ") + " (créditos - débitos)"
+		}
+		newDisc(domain.DiscrepancyLedgerImbalance, entryID, "0", external)
 	}
-
-	run.Complete(1, matched, len(discrepancies))
-	if err := uc.runRepo.Update(ctx, run); err != nil {
-		return fmt.Errorf("update run: %w", err)
+	for _, p := range check.MissingEntries {
+		newDisc(domain.DiscrepancyMissingInLedger, p.PaymentID, toJSON(p), "")
 	}
-
-	_ = uc.publisher.Publish(ctx, run.PullEvents()...)
-	return nil
+	return discrepancies
 }

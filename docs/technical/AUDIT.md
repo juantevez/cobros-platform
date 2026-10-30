@@ -170,7 +170,7 @@ Archivos: [domain/vo.go](../../context/audit/domain/vo.go),
 | Elemento | Regla |
 |---|---|
 | `Action` | Formato `<contexto>.<hecho>`: dos o más segmentos en minúscula separados por punto (`ParseAction`). El catálogo cerrado vive en el mapeo de eventos; la acción se deriva del subject sin el sufijo de versión. `audit.unmapped_event` = evento sin mapeo. |
-| `ResourceType` | `tenant`, `user`, `api_key`, `journal_entry`, `ledger_account`, `application`, `payment`, `payout`, `billing_plan`, `tenant_plan`, `dispute`, `webhook_endpoint`, `aml_alert`, `reconciliation_run`, `event` (evento sin mapeo) (`ParseResourceType` valida). |
+| `ResourceType` | `tenant`, `user`, `api_key`, `journal_entry`, `ledger_account`, `application`, `payment`, `payout`, `billing_plan`, `tenant_plan`, `dispute`, `webhook_endpoint`, `aml_alert`, `reconciliation_run`, `reconciliation_discrepancy`, `event` (evento sin mapeo) (`ParseResourceType` valida). |
 | `ErrInvalidAction` | Acción con formato inválido. |
 | `ErrInvalidResourceType` | Recurso fuera del catálogo. |
 
@@ -242,6 +242,8 @@ tipo de recurso y el campo del payload con su ID:
 | `compliance.alert.{raised,review_proposed,proposal_rejected,resolved}.v1` | `aml_alert` | `alert_id` | |
 | `compliance.sanction.{matched,cleared,confirmed}.v1` | `aml_alert` | `alert_id` | |
 | `reconciliation.run.completed.v1` | `reconciliation_run` | `run_id` | |
+| `reconciliation.run.failed.v1` | `reconciliation_run` | `run_id` | `metadata.error` |
+| `reconciliation.discrepancy.resolved.v1` | `reconciliation_discrepancy` | `discrepancy_id` | actor = `resolved_by` del payload; `metadata.run_id`, `metadata.status` |
 
 Agregar un evento auditado = una línea en `mappings` (y, si es de un stream
 nuevo, una entrada en `Subscriptions`). `TestCatalogConsistency` falla si un

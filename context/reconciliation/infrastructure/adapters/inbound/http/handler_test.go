@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +27,9 @@ var errBoom = errors.New("boom")
 // testTenant es el tenant autenticado de los requests y dueño de los datos sembrados.
 var testTenant = uuid.NewString()
 
+// testActor es el usuario autenticado de los requests con tenant.
+var testActor = uuid.NewString()
+
 var (
 	periodFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	periodTo   = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -46,7 +48,9 @@ func (r *fakeRunRepo) Save(ctx context.Context, run *domain.ReconciliationRun) e
 	r.byID[run.ID()] = run
 	return nil
 }
-func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun) error { return nil }
+func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun) error {
+	return nil
+}
 func (r *fakeRunRepo) FindByID(ctx context.Context, id domain.RunID) (*domain.ReconciliationRun, error) {
 	run, ok := r.byID[id]
 	if !ok {
@@ -91,15 +95,23 @@ func (f fakePaymentReader) ReadByPeriod(ctx context.Context, t domain.TenantID, 
 	return f.payments, nil
 }
 
-type fakeLedger struct{ imbalance int64 }
+type fakeLedger struct{ check application.LedgerCheck }
 
-func (f fakeLedger) CheckBalance(ctx context.Context, t domain.TenantID, from, to time.Time) (int64, error) {
-	return f.imbalance, nil
+func (f fakeLedger) Check(ctx context.Context, t domain.TenantID, from, to time.Time) (application.LedgerCheck, error) {
+	return f.check, nil
 }
 
 type fakePublisher struct{}
 
 func (fakePublisher) Publish(ctx context.Context, events ...domain.Event) error { return nil }
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+type fakeTx struct{}
+
+func (fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -109,14 +121,20 @@ type env struct {
 	h     *ReconciliationHandler
 }
 
-func newEnv(payments []application.SystemPayment, imbalance int64) *env {
+// newEnv arma el handler con fakes; unbalanced es la cantidad de asientos
+// desbalanceados que informa el Ledger.
+func newEnv(payments []application.SystemPayment, unbalanced int) *env {
+	check := application.LedgerCheck{EntriesChecked: unbalanced}
+	for i := 0; i < unbalanced; i++ {
+		check.Unbalanced = append(check.Unbalanced, application.LedgerImbalance{EntryID: fmt.Sprint("E", i), Currency: "ARS", Imbalance: 1})
+	}
 	runs := &fakeRunRepo{byID: map[domain.RunID]*domain.ReconciliationRun{}}
 	discs := &fakeDiscRepo{byID: map[domain.DiscrepancyID]*domain.Discrepancy{}}
 	h := NewReconciliationHandler(
-		application.NewStartReconciliationUseCase(runs),
-		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakePublisher{}),
-		application.NewProcessInternalUseCase(runs, discs, fakeLedger{imbalance}, fakePublisher{}),
-		application.NewResolveDiscrepancyUseCase(discs),
+		application.NewStartReconciliationUseCase(runs, realClock{}),
+		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakeTx{}, fakePublisher{}, realClock{}),
+		application.NewProcessInternalUseCase(runs, discs, fakeLedger{check}, fakeTx{}, fakePublisher{}, realClock{}),
+		application.NewResolveDiscrepancyUseCase(discs, fakeTx{}, fakePublisher{}, realClock{}),
 		application.NewGetReportUseCase(runs, discs),
 		application.NewListRunsUseCase(runs),
 	)
@@ -124,13 +142,13 @@ func newEnv(payments []application.SystemPayment, imbalance int64) *env {
 }
 
 func (e *env) seedRun(t domain.ReconciliationType) *domain.ReconciliationRun {
-	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(testTenant), t, periodFrom, periodTo)
+	run, _ := domain.NewReconciliationRun(domain.NewRunID(), domain.TenantID(testTenant), t, periodFrom, periodTo, time.Now())
 	e.runs.byID[run.ID()] = run
 	return run
 }
 
 func (e *env) seedDiscrepancy() *domain.Discrepancy {
-	d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(testTenant), domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS")
+	d := domain.NewDiscrepancy(domain.NewDiscrepancyID(), domain.NewRunID(), domain.TenantID(testTenant), domain.DiscrepancyAmountMismatch, "PSP-1", "100 ARS", "90 ARS", time.Now())
 	e.discs.byID[d.ID()] = d
 	return d
 }
@@ -140,7 +158,7 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 	c, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	if tenantID != "" {
-		req = req.WithContext(postgres.WithTenantID(req.Context(), tenantID))
+		req = req.WithContext(postgres.WithActor(postgres.WithTenantID(req.Context(), tenantID), testActor))
 	}
 	c.Request = req
 	c.Params = params
@@ -316,13 +334,18 @@ func TestGetReport(t *testing.T) {
 func TestUploadReport(t *testing.T) {
 	csv := "transaction_id,amount,currency,status\nPSP-1,100,ARS,captured\nPSP-2,50,ARS,captured\n"
 
-	t.Run("processes CSV and returns 202", func(t *testing.T) {
+	t.Run("processes CSV and returns the completed run", func(t *testing.T) {
 		e := newEnv([]application.SystemPayment{{PaymentID: "p1", PSPReference: "PSP-1", Amount: 100, Currency: "ARS", Status: "captured"}}, 0)
 		run := e.seedRun(domain.TypePayment)
 
 		rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", csv, testTenant, runParam(run.ID().String()))
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body)
+		}
+		var view application.RunView
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil || view.ID != run.ID().String() ||
+			view.Status != "completed" || view.MatchedCount != 1 || view.DiscrepancyCount != 1 {
+			t.Errorf("body = %s (%v)", rec.Body, err)
 		}
 		if run.Status() != domain.RunStatusCompleted || run.MatchedCount() != 1 || run.DiscrepancyCount() != 1 {
 			t.Errorf("status=%q matched=%d discrepancies=%d", run.Status(), run.MatchedCount(), run.DiscrepancyCount())
@@ -347,17 +370,22 @@ func TestUploadReport(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid CSV format returns 400", func(t *testing.T) {
-		e := newEnv(nil, 0)
-		run := e.seedRun(domain.TypePayment)
-		rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", "id,amount\nA,1\n", testTenant, runParam(run.ID().String()))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body)
-		}
-		if run.Status() != domain.RunStatusFailed {
-			t.Errorf("status = %q, want failed", run.Status())
-		}
-	})
+	for name, csv := range map[string]string{
+		"missing columns": "id,amount\nA,1\n",
+		"decimal amount":  "transaction_id,amount,currency,status\nA,12.50,ARS,captured\n",
+	} {
+		t.Run("invalid CSV ("+name+") returns 400 and leaves the run untouched", func(t *testing.T) {
+			e := newEnv(nil, 0)
+			run := e.seedRun(domain.TypePayment)
+			rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", csv, testTenant, runParam(run.ID().String()))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body)
+			}
+			if run.Status() != domain.RunStatusPending {
+				t.Errorf("status = %q, want pending (reprocesable con un CSV corregido)", run.Status())
+			}
+		})
+	}
 
 	t.Run("unknown run returns 404", func(t *testing.T) {
 		e := newEnv(nil, 0)
@@ -370,10 +398,44 @@ func TestUploadReport(t *testing.T) {
 	t.Run("already processed run returns 409", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		run := e.seedRun(domain.TypePayment)
-		_ = run.Start()
+		_ = run.Start(time.Now())
 		rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", csv, testTenant, runParam(run.ID().String()))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", rec.Code)
+		}
+	})
+
+	t.Run("report over 50 MB returns 413 instead of being truncated", func(t *testing.T) {
+		e := newEnv(nil, 0)
+		run := e.seedRun(domain.TypePayment)
+		// Filas completas hasta pasar el tope por un byte: truncado justo en
+		// un salto de línea, un LimitReader lo habría aceptado.
+		row := "PSP-X,1,ARS,captured\n"
+		header := "transaction_id,amount,currency,status\n"
+		body := header + strings.Repeat(row, (maxReportBytes-len(header))/len(row)+1)
+
+		rec := doRequest(e.h.UploadReport, http.MethodPost, "/x", body, testTenant, runParam(run.ID().String()))
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", rec.Code)
+		}
+		if run.Status() != domain.RunStatusPending {
+			t.Error("run must not be touched")
+		}
+	})
+
+	t.Run("report of exactly 50 MB is accepted", func(t *testing.T) {
+		e := newEnv(nil, 0)
+		run := e.seedRun(domain.TypePayment)
+		header, tail := "transaction_id,amount,currency,status\n", ",1,ARS,captured\n"
+		// Una sola fila con un transaction_id largo completa los 50 MB exactos.
+		body := header + strings.Repeat("X", maxReportBytes-len(header)-len(tail)) + tail
+		if len(body) != maxReportBytes {
+			t.Fatalf("body is %d bytes", len(body))
+		}
+
+		rec := doRequest(e.h.UploadReport, http.MethodPost, "/x", body, testTenant, runParam(run.ID().String()))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%.200s", rec.Code, rec.Body)
 		}
 	})
 
@@ -402,13 +464,17 @@ func (errReader) Read([]byte) (int, error) { return 0, errBoom }
 // ── ProcessInternal ───────────────────────────────────────────────────────────
 
 func TestProcessInternal(t *testing.T) {
-	t.Run("runs ledger check and returns 202", func(t *testing.T) {
-		e := newEnv(nil, 42)
+	t.Run("runs ledger check and returns the completed run", func(t *testing.T) {
+		e := newEnv(nil, 1)
 		run := e.seedRun(domain.TypeInternal)
 
 		rec := doRequest(e.h.ProcessInternal, http.MethodPost, "/runs/x/process-internal", "", testTenant, runParam(run.ID().String()))
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body)
+		}
+		var view application.RunView
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil || view.Status != "completed" || view.DiscrepancyCount != 1 {
+			t.Errorf("body = %s (%v)", rec.Body, err)
 		}
 		if run.Status() != domain.RunStatusCompleted || len(e.discs.saved) != 1 {
 			t.Errorf("status=%q saved=%d", run.Status(), len(e.discs.saved))
@@ -426,7 +492,8 @@ func TestProcessInternal(t *testing.T) {
 	t.Run("already processed run returns 409", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		run := e.seedRun(domain.TypeInternal)
-		run.Complete(1, 1, 0)
+		_ = run.Start(time.Now())
+		_ = run.Complete(1, 1, 0, time.Now())
 		rec := doRequest(e.h.ProcessInternal, http.MethodPost, "/x", "", testTenant, runParam(run.ID().String()))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", rec.Code)
@@ -437,21 +504,22 @@ func TestProcessInternal(t *testing.T) {
 // ── ResolveDiscrepancy ────────────────────────────────────────────────────────
 
 func TestResolveDiscrepancy(t *testing.T) {
-	t.Run("resolves and returns 204", func(t *testing.T) {
+	t.Run("resolves as the authenticated user and returns 204", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		d := e.seedDiscrepancy()
 
+		// resolved_by en el body se ignora: firma el actor autenticado.
 		rec := doRequest(e.h.ResolveDiscrepancy, http.MethodPost, "/x",
-			`{"action":"ignore","resolved_by":"op-1","notes":"known"}`, testTenant, discParam(d.ID().String()))
+			`{"action":"ignore","resolved_by":"someone-else","notes":"known"}`, testTenant, discParam(d.ID().String()))
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body)
 		}
-		if d.Status() != domain.DiscrepancyIgnored || d.ResolvedBy() != "op-1" || d.Notes() != "known" {
+		if d.Status() != domain.DiscrepancyIgnored || d.ResolvedBy() != testActor || d.Notes() != "known" {
 			t.Errorf("status=%q by=%q notes=%q", d.Status(), d.ResolvedBy(), d.Notes())
 		}
 	})
 
-	for _, body := range []string{`{bad`, `{"resolved_by":"op"}`, `{"action":"resolve"}`} {
+	for _, body := range []string{`{bad`, `{"notes":"x"}`} {
 		t.Run("400 on "+body, func(t *testing.T) {
 			e := newEnv(nil, 0)
 			d := e.seedDiscrepancy()
@@ -474,7 +542,7 @@ func TestResolveDiscrepancy(t *testing.T) {
 	t.Run("already resolved returns 409", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		d := e.seedDiscrepancy()
-		_ = d.Resolve("someone", "")
+		_ = d.Resolve("someone", "", time.Now())
 		rec := doRequest(e.h.ResolveDiscrepancy, http.MethodPost, "/x",
 			`{"action":"resolve","resolved_by":"op"}`, testTenant, discParam(d.ID().String()))
 		if rec.Code != http.StatusConflict {
@@ -570,6 +638,38 @@ func TestOtherTenantGets404(t *testing.T) {
 	})
 }
 
+// ── Errores de cliente ────────────────────────────────────────────────────────
+
+func TestClientErrorsReturn400(t *testing.T) {
+	e := newEnv(nil, 0)
+	run := e.seedRun(domain.TypePayment)
+	d := e.seedDiscrepancy()
+
+	cases := []struct {
+		name   string
+		h      gin.HandlerFunc
+		target string
+		body   string
+		params gin.Params
+	}{
+		{"invalid run id", e.h.GetReport, "/x", "", runParam("not-a-uuid")},
+		{"invalid status filter", e.h.GetReport, "/x?status=closed", "", runParam(run.ID().String())},
+		{"invalid run type", e.h.StartRun, "/x", `{"type":"payout","period_from":"2026-09-01T00:00:00Z","period_to":"2026-10-01T00:00:00Z"}`, nil},
+		{"invalid discrepancy id", e.h.ResolveDiscrepancy, "/x", `{"action":"resolve"}`, discParam("nope")},
+		{"invalid action", e.h.ResolveDiscrepancy, "/x", `{"action":"delete"}`, discParam(d.ID().String())},
+		{"invalid run id on upload", e.h.UploadReport, "/x", "transaction_id,amount,currency,status\nA,1,ARS,captured\n", runParam("nope")},
+		{"invalid run id on process-internal", e.h.ProcessInternal, "/x", "", runParam("nope")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(tc.h, http.MethodPost, tc.target, tc.body, testTenant, tc.params)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
 // ── respondError ──────────────────────────────────────────────────────────────
 
 func TestRespondError(t *testing.T) {
@@ -584,8 +684,10 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrInvalidPeriod, http.StatusBadRequest},
 		{domain.ErrEmptyReport, http.StatusBadRequest},
 		{domain.ErrInvalidReportFormat, http.StatusBadRequest},
+		{domain.ErrRunTypeMismatch, http.StatusUnprocessableEntity},
+		{domain.ErrInvalidArgument, http.StatusBadRequest},
 		{fmt.Errorf("find run: %w", domain.ErrRunNotFound), http.StatusNotFound},
-		{domain.ErrRunNotCompleted, http.StatusInternalServerError},
+		{domain.ErrRunNotRunning, http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
@@ -610,25 +712,56 @@ func TestRespondError(t *testing.T) {
 
 // ── RegisterRoutes ────────────────────────────────────────────────────────────
 
+// guard registra el nombre del guard que atendió el request y lo corta.
+func guard(name string) gin.HandlerFunc {
+	return func(c *gin.Context) { c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"guard": name}) }
+}
+
 func TestRegisterRoutes(t *testing.T) {
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newEnv(nil, 0).h)
+	RegisterRoutes(engine.Group("/api/v1"), newEnv(nil, 0).h, RouteGuards{Read: guard("read"), Operate: guard("operate")})
 
+	want := map[string]string{
+		"GET /api/v1/reconciliation/runs":                                  "read",
+		"GET /api/v1/reconciliation/runs/:runID":                           "read",
+		"POST /api/v1/reconciliation/discrepancies/:discrepancyID/resolve": "operate",
+		"POST /api/v1/reconciliation/runs":                                 "operate",
+		"POST /api/v1/reconciliation/runs/:runID/process-internal":         "operate",
+		"POST /api/v1/reconciliation/runs/:runID/report":                   "operate",
+	}
 	var got []string
 	for _, r := range engine.Routes() {
 		got = append(got, r.Method+" "+r.Path)
 	}
-	sort.Strings(got)
-
-	want := []string{
-		"GET /api/v1/reconciliation/runs",
-		"GET /api/v1/reconciliation/runs/:runID",
-		"POST /api/v1/reconciliation/discrepancies/:discrepancyID/resolve",
-		"POST /api/v1/reconciliation/runs",
-		"POST /api/v1/reconciliation/runs/:runID/process-internal",
-		"POST /api/v1/reconciliation/runs/:runID/report",
+	if len(got) != len(want) {
+		t.Fatalf("routes = %v", got)
 	}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("routes = %v\nwant %v", got, want)
+
+	for route, wantGuard := range want {
+		method, path, _ := strings.Cut(route, " ")
+		path = strings.NewReplacer(":runID", uuid.NewString(), ":discrepancyID", uuid.NewString()).Replace(path)
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		var body struct{ Guard string }
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != http.StatusForbidden || body.Guard != wantGuard {
+			t.Errorf("%s: guard = %q (status %d), want %q", route, body.Guard, rec.Code, wantGuard)
+		}
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	for name, g := range map[string]RouteGuards{
+		"no read":    {Operate: guard("operate")},
+		"no operate": {Read: guard("read")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("expected panic")
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/"), newEnv(nil, 0).h, g)
+		})
 	}
 }
