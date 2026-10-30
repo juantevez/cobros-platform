@@ -369,7 +369,9 @@ func main() {
 	reportRepo := reportingpg.NewReportRepository(pool)
 	getReports := reportingapp.NewGetReportsUseCase(reportRepo)
 
-	reportinghttp.RegisterRoutes(protected, reportinghttp.NewReportingHandler(getReports))
+	reportinghttp.RegisterRoutes(protected, reportinghttp.NewReportingHandler(getReports), reportinghttp.RouteGuards{
+		Read: authttp.RequirePermission(authdomain.ActionReadReports, authdomain.ScopeReports),
+	})
 
 	// ── Compliance & AML ──────────────────────────────────────────────────────
 	// Revisión de alertas (four-eyes) y gestión de la watchlist: uso interno de

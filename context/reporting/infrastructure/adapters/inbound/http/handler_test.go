@@ -272,8 +272,11 @@ func TestRespondReportError(t *testing.T) {
 }
 
 func TestRegisterRoutes(t *testing.T) {
+	denied := 0
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(&fakeReader{}))
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(&fakeReader{}), RouteGuards{
+		Read: func(c *gin.Context) { denied++; c.AbortWithStatus(http.StatusForbidden) },
+	})
 
 	var got []string
 	for _, r := range engine.Routes() {
@@ -289,4 +292,25 @@ func TestRegisterRoutes(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("routes = %v, want %v", got, want)
 	}
+
+	// Cada ruta pasa por el guard antes del handler.
+	for _, route := range want {
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, strings.TrimPrefix(route, "GET "), nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403 from the guard", route, rec.Code)
+		}
+	}
+	if denied != len(want) {
+		t.Errorf("guard ran %d times, want %d", denied, len(want))
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuard(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic")
+		}
+	}()
+	RegisterRoutes(gin.New().Group("/"), newHandler(&fakeReader{}), RouteGuards{})
 }

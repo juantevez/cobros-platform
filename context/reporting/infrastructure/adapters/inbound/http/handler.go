@@ -113,9 +113,20 @@ func respondReportError(c *gin.Context, err error) {
 	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 }
 
+// RouteGuards autoriza las consultas. Se inyecta desde el composition root
+// para no acoplar este contexto con Auth; en producción es
+// RequirePermission(reports:read).
+type RouteGuards struct {
+	Read gin.HandlerFunc
+}
+
 // RegisterRoutes registra las rutas de Reporting en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *ReportingHandler) {
-	reports := rg.Group("/reports")
+func RegisterRoutes(rg *gin.RouterGroup, h *ReportingHandler, guards RouteGuards) {
+	if guards.Read == nil {
+		panic("reporting: RegisterRoutes requires a Read guard")
+	}
+
+	reports := rg.Group("/reports", guards.Read)
 	{
 		reports.GET("/volume", h.GetVolume)
 		reports.GET("/revenue", h.GetRevenue)
