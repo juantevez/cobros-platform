@@ -116,6 +116,10 @@ func (s *fakeSMTP) handleConn(conn net.Conn) {
 			s.mu.Lock()
 			s.messages = append(s.messages, body.Bytes())
 			s.mu.Unlock()
+			if s.rejectCmd == "DATAEND" { // rechazo al terminar el DATA (p. ej. contenido)
+				fmt.Fprint(conn, "554 5.7.1 message rejected\r\n")
+				continue
+			}
 			fmt.Fprint(conn, "250 OK\r\n")
 		case strings.HasPrefix(cmd, "QUIT"):
 			fmt.Fprint(conn, "221 Bye\r\n")

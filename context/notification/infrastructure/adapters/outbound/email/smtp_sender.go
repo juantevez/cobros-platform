@@ -2,12 +2,22 @@
 package email
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
+	"mime/quotedprintable"
 	"net/smtp"
+	"strings"
+	"time"
 )
+
+// ErrHeaderInjection: un valor de header (From/To/Subject) trae un salto de
+// línea, que permitiría inyectar headers o destinatarios extra.
+var ErrHeaderInjection = errors.New("email header contains a line break")
 
 // SMTPSender envía emails via SMTP con autenticación.
 // Soporta TLS (SMTPS en puerto 465) y STARTTLS (puerto 587).
@@ -23,6 +33,8 @@ type SMTPSender struct {
 	// un cert self-signed). En producción queda nil y se usa la config por
 	// defecto que verifica contra las CAs del sistema.
 	tlsConfig *tls.Config
+
+	now func() time.Time // header Date; inyectable en tests
 }
 
 type SMTPConfig struct {
@@ -42,11 +54,15 @@ func NewSMTPSender(cfg SMTPConfig) *SMTPSender {
 		password: cfg.Password,
 		from:     cfg.From,
 		useTLS:   cfg.UseTLS,
+		now:      time.Now,
 	}
 }
 
 func (s *SMTPSender) Send(_ context.Context, to, subject, body string) error {
-	msg := buildMessage(s.from, to, subject, body)
+	msg, err := buildMessage(s.from, to, subject, body, s.now())
+	if err != nil {
+		return err
+	}
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 
 	if s.useTLS {
@@ -91,11 +107,16 @@ func (s *SMTPSender) sendTLS(addr, to string, msg []byte) error {
 	if err != nil {
 		return fmt.Errorf("smtp data: %w", err)
 	}
-	defer w.Close()
 	if _, err := w.Write(msg); err != nil {
+		_ = w.Close()
 		return fmt.Errorf("smtp write: %w", err)
 	}
-	return nil
+	// Close termina el DATA y trae la respuesta del servidor: ahí acepta o
+	// rechaza el mensaje. Ignorarlo registraría como enviado un email rechazado.
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("smtp data rejected: %w", err)
+	}
+	return client.Quit()
 }
 
 // ── LogSender ─────────────────────────────────────────────────────────────────
@@ -120,9 +141,32 @@ func (s *LogSender) Send(_ context.Context, to, subject, _ string) error {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func buildMessage(from, to, subject, body string) []byte {
-	return []byte(fmt.Sprintf(
-		"From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/html; charset=UTF-8\r\nMIME-Version: 1.0\r\n\r\n%s",
-		from, to, subject, body,
-	))
+// buildMessage arma el mensaje RFC 5322. Rechaza saltos de línea en los
+// headers (inyección), codifica el Subject según RFC 2047 si no es ASCII
+// (los templates usan emojis y acentos) y envía el body HTML en
+// quoted-printable (líneas ≤ 76, sin depender de un transporte 8-bit).
+func buildMessage(from, to, subject, body string, date time.Time) ([]byte, error) {
+	for name, v := range map[string]string{"From": from, "To": to, "Subject": subject} {
+		if strings.ContainsAny(v, "\r\n") {
+			return nil, fmt.Errorf("%w: %s", ErrHeaderInjection, name)
+		}
+	}
+
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "From: %s\r\n", from)
+	fmt.Fprintf(&b, "To: %s\r\n", to)
+	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
+	fmt.Fprintf(&b, "Date: %s\r\n", date.Format(time.RFC1123Z))
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: quoted-printable\r\n\r\n")
+
+	qp := quotedprintable.NewWriter(&b)
+	if _, err := qp.Write([]byte(body)); err != nil {
+		return nil, fmt.Errorf("encode body: %w", err)
+	}
+	if err := qp.Close(); err != nil {
+		return nil, fmt.Errorf("encode body: %w", err)
+	}
+	return b.Bytes(), nil
 }
