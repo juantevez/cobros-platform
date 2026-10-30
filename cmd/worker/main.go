@@ -102,7 +102,7 @@ func main() {
 	// ── Audit consumers ───────────────────────────────────────────────────────
 
 	auditRepo    := auditpg.NewAuditLogRepository(pool)
-	recordAction := auditapp.NewRecordActionUseCase(auditRepo, auditcrypto.NewSHA256Hasher(), realClock{})
+	recordAction := auditapp.NewRecordActionUseCase(auditRepo, auditcrypto.NewSHA256Hasher(), realClock{}, postgres.NewTxManager(pool))
 	auditConsumer := auditnats.NewEventConsumer(
 		eventbus.NewConsumer(natsClient, logger.With("component", "audit")),
 		recordAction,

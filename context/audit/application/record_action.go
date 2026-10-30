@@ -11,26 +11,28 @@ import (
 //
 // Garantías:
 //   - Cada entrada incluye el hash de la anterior (hash chain tamper-evident).
-//   - La inserción es serializada: se lee el último hash y se inserta el nuevo
-//     dentro de la misma transacción con SELECT FOR UPDATE.
+//   - La lectura del último hash y la inserción ocurren en la misma
+//     transacción, bajo un lock de la cadena (LockChain). Los consumers de
+//     AUTH y LEDGER corren en paralelo (y puede haber varias instancias del
+//     worker): sin el lock, dos registros simultáneos leerían el mismo último
+//     hash y bifurcarían la cadena. Un SELECT … FOR UPDATE de la última fila
+//     no alcanza: en READ COMMITTED el segundo lector, al obtener el lock,
+//     revalida la misma fila vieja en vez de ver la recién insertada.
 //   - Si el sistema no tiene registros previos, el primer entry tiene prevHash=nil.
-//
-// Nota sobre concurrencia: en Fase 1 el consumer de NATS que llama a este
-// caso de uso es un único goroutine (pull consumer secuencial), por lo que
-// no hay contención. El FOR UPDATE en FindLast protege contra múltiples
-// instancias del worker en el futuro.
 type RecordActionUseCase struct {
-	repo   AuditLogRepository
-	hasher HashComputer
-	clock  Clock
+	repo      AuditLogRepository
+	hasher    HashComputer
+	clock     Clock
+	txManager TxManager
 }
 
 func NewRecordActionUseCase(
 	repo AuditLogRepository,
 	hasher HashComputer,
 	clock Clock,
+	txManager TxManager,
 ) *RecordActionUseCase {
-	return &RecordActionUseCase{repo: repo, hasher: hasher, clock: clock}
+	return &RecordActionUseCase{repo: repo, hasher: hasher, clock: clock, txManager: txManager}
 }
 
 func (uc *RecordActionUseCase) Execute(ctx context.Context, cmd RecordActionCmd) error {
@@ -44,36 +46,40 @@ func (uc *RecordActionUseCase) Execute(ctx context.Context, cmd RecordActionCmd)
 		return err
 	}
 
-	// Leer el último hash de la cadena. Si la tabla está vacía, prevHash = nil.
-	last, err := uc.repo.FindLast(ctx)
-	if err != nil {
-		return fmt.Errorf("record action: find last entry: %w", err)
-	}
+	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.repo.LockChain(ctx); err != nil {
+			return fmt.Errorf("record action: lock chain: %w", err)
+		}
 
-	var prevHash []byte
-	if last != nil {
-		prevHash = last.Hash()
-	}
+		// Último hash de la cadena (con el lock tomado). Tabla vacía → prevHash = nil.
+		last, err := uc.repo.FindLast(ctx)
+		if err != nil {
+			return fmt.Errorf("record action: find last entry: %w", err)
+		}
+		var prevHash []byte
+		if last != nil {
+			prevHash = last.Hash()
+		}
 
-	entry, err := domain.NewAuditLogEntry(
-		cmd.TenantID,
-		cmd.Actor,
-		action,
-		resourceType,
-		cmd.ResourceID,
-		cmd.Metadata,
-		cmd.CorrelationID,
-		prevHash,
-		uc.clock.Now(),
-		uc.hasher.Compute,
-	)
-	if err != nil {
-		return fmt.Errorf("record action: build entry: %w", err)
-	}
+		entry, err := domain.NewAuditLogEntry(
+			cmd.TenantID,
+			cmd.Actor,
+			action,
+			resourceType,
+			cmd.ResourceID,
+			cmd.Metadata,
+			cmd.CorrelationID,
+			prevHash,
+			uc.clock.Now(),
+			uc.hasher.Compute,
+		)
+		if err != nil {
+			return fmt.Errorf("record action: build entry: %w", err)
+		}
 
-	if err := uc.repo.Save(ctx, entry); err != nil {
-		return fmt.Errorf("record action: save: %w", err)
-	}
-
-	return nil
+		if err := uc.repo.Save(ctx, entry); err != nil {
+			return fmt.Errorf("record action: save: %w", err)
+		}
+		return nil
+	})
 }

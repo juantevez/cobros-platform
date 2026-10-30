@@ -29,6 +29,7 @@ func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error {
 	return nil
 }
 func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) { return nil, nil }
+func (r *fakeRepo) LockChain(ctx context.Context) error                          { return nil }
 func (r *fakeRepo) ListRecent(ctx context.Context, limit int) ([]*domain.AuditLogEntry, error) {
 	return nil, nil
 }
@@ -38,6 +39,10 @@ func (r *fakeRepo) ListByTenant(ctx context.Context, tenantID string, limit int)
 func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*domain.AuditLogEntry, error) {
 	return nil, nil
 }
+
+type fakeTx struct{}
+
+func (fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
 
 type sha256Hasher struct{}
 
@@ -61,7 +66,7 @@ func (c *fakeConsumer) Start(ctx context.Context, cfg eventbus.ConsumerConfig, h
 
 func newConsumer(repo *fakeRepo) (*EventConsumer, *fakeConsumer) {
 	fc := &fakeConsumer{}
-	uc := application.NewRecordActionUseCase(repo, sha256Hasher{}, fixedClock{})
+	uc := application.NewRecordActionUseCase(repo, sha256Hasher{}, fixedClock{}, fakeTx{})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return NewEventConsumer(fc, uc, logger), fc
 }

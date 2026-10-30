@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juantevez/cobros-platform/context/audit/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // pgxPool es el subconjunto de *pgxpool.Pool que usa el repositorio.
@@ -27,9 +28,9 @@ type pgxPool interface {
 // La tabla audit_log no usa RLS (es un log global). El aislamiento por
 // tenant se aplica en las queries con WHERE tenant_id = $1.
 //
-// Las inserciones se serializan con SELECT ... FOR UPDATE sobre el último
-// registro para garantizar la integridad del hash chain ante múltiples
-// instancias del worker.
+// Las inserciones se serializan con un advisory lock transaccional
+// (LockChain) tomado antes de leer el último hash; Save, FindLast y
+// LockChain usan la transacción del contexto (RunInTx).
 type pgAuditLogRepository struct {
 	pool pgxPool
 }
@@ -53,7 +54,7 @@ func (r *pgAuditLogRepository) Save(ctx context.Context, entry *domain.AuditLogE
 
 	// El RETURNING id permite que el dominio conozca su ID asignado,
 	// aunque en Fase 1 no lo necesitamos de vuelta.
-	_, err = r.pool.Exec(ctx, `
+	_, err = pkgpostgres.ConnFromContext(ctx, r.pool).Exec(ctx, `
 		INSERT INTO audit_log
 			(tenant_id, actor, action, resource_type, resource_id,
 			 metadata, correlation_id, prev_hash, hash, created_at)
@@ -75,16 +76,29 @@ func (r *pgAuditLogRepository) Save(ctx context.Context, entry *domain.AuditLogE
 	return nil
 }
 
+// chainLockKey identifica el advisory lock de la cadena (uno global).
+const chainLockKey = "audit_log_chain"
+
+// LockChain toma un advisory lock transaccional: se libera solo al terminar la
+// transacción, así que cubre la lectura del último hash y el INSERT. Fuera de
+// una transacción no tendría efecto (se liberaría al terminar la sentencia).
+func (r *pgAuditLogRepository) LockChain(ctx context.Context) error {
+	if _, err := pkgpostgres.ConnFromContext(ctx, r.pool).Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, chainLockKey); err != nil {
+		return fmt.Errorf("audit repo: lock chain: %w", err)
+	}
+	return nil
+}
+
 // FindLast retorna el último registro insertado para encadenar el hash.
-// Usa SELECT FOR UPDATE para serializar inserciones concurrentes.
+// La serialización la da LockChain (tomado antes, en la misma tx).
 func (r *pgAuditLogRepository) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := pkgpostgres.ConnFromContext(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, tenant_id, actor, action, resource_type, resource_id,
 		       metadata, correlation_id, prev_hash, hash, created_at
 		FROM audit_log
 		ORDER BY id DESC
-		LIMIT 1
-		FOR UPDATE`)
+		LIMIT 1`)
 
 	entry, err := scanEntry(row)
 	if err != nil {
@@ -144,12 +158,12 @@ func (r *pgAuditLogRepository) ListFromID(ctx context.Context, fromID int64, lim
 
 func scanEntry(row pgx.Row) (*domain.AuditLogEntry, error) {
 	var (
-		id                                               int64
-		tenantID, resourceID, correlationID              *string
-		actor, action, resourceType                      string
-		metadataJSON                                     []byte
-		prevHash, hash                                   []byte
-		createdAt                                        time.Time
+		id                                  int64
+		tenantID, resourceID, correlationID *string
+		actor, action, resourceType         string
+		metadataJSON                        []byte
+		prevHash, hash                      []byte
+		createdAt                           time.Time
 	)
 
 	if err := row.Scan(

@@ -115,6 +115,28 @@ func TestRepo_Save(t *testing.T) {
 	})
 }
 
+func TestRepo_LockChain(t *testing.T) {
+	t.Run("takes a transactional advisory lock on the chain", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectExec(`SELECT pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)`).
+			WithArgs("audit_log_chain").WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		if err := NewAuditLogRepository(mock).LockChain(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("db error propagated", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectExec("pg_advisory_xact_lock").WillReturnError(errors.New("boom"))
+		if err := NewAuditLogRepository(mock).LockChain(context.Background()); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
 func TestRepo_FindLast(t *testing.T) {
 	t.Run("returns last entry", func(t *testing.T) {
 		mock := newMock(t)
@@ -122,7 +144,7 @@ func TestRepo_FindLast(t *testing.T) {
 		tid := "tenant-1"
 		rid := "user-1"
 		rows := addRow(pgxmock.NewRows(repoCols), 42, &tid, &rid, nil, []byte{0xAA})
-		mock.ExpectQuery("FOR UPDATE").WillReturnRows(rows)
+		mock.ExpectQuery(`FROM audit_log\s+ORDER BY id DESC\s+LIMIT 1$`).WillReturnRows(rows)
 
 		e, err := repo.FindLast(context.Background())
 		if err != nil {
@@ -139,7 +161,7 @@ func TestRepo_FindLast(t *testing.T) {
 	t.Run("empty table returns nil,nil", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAuditLogRepository(mock)
-		mock.ExpectQuery("FOR UPDATE").WillReturnRows(pgxmock.NewRows(repoCols))
+		mock.ExpectQuery(`FROM audit_log\s+ORDER BY id DESC\s+LIMIT 1$`).WillReturnRows(pgxmock.NewRows(repoCols))
 
 		e, err := repo.FindLast(context.Background())
 		if err != nil {
@@ -153,7 +175,7 @@ func TestRepo_FindLast(t *testing.T) {
 	t.Run("db error propagated", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAuditLogRepository(mock)
-		mock.ExpectQuery("FOR UPDATE").WillReturnError(errors.New("boom"))
+		mock.ExpectQuery(`FROM audit_log\s+ORDER BY id DESC\s+LIMIT 1$`).WillReturnError(errors.New("boom"))
 
 		if _, err := repo.FindLast(context.Background()); err == nil {
 			t.Fatal("expected error")

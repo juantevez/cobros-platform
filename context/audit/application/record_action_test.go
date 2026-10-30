@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/juantevez/cobros-platform/context/audit/domain"
@@ -21,7 +22,7 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 
 	t.Run("first entry has nil prevHash and is saved", func(t *testing.T) {
 		repo := &fakeRepo{last: nil}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 
 		if err := uc.Execute(context.Background(), validCmd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -44,7 +45,7 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 	t.Run("subsequent entry links to last hash", func(t *testing.T) {
 		prev := buildEntry("t", domain.ActionTenantCreated, domain.ResourceTenant, "t1", nil)
 		repo := &fakeRepo{last: prev}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 
 		if err := uc.Execute(context.Background(), validCmd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -57,7 +58,7 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 
 	t.Run("invalid action rejected before touching repo", func(t *testing.T) {
 		repo := &fakeRepo{}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 		cmd := validCmd
 		cmd.Action = ""
 
@@ -72,7 +73,7 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 
 	t.Run("invalid resource type rejected", func(t *testing.T) {
 		repo := &fakeRepo{}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 		cmd := validCmd
 		cmd.ResourceType = "bogus"
 
@@ -87,7 +88,7 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 
 	t.Run("FindLast error propagated", func(t *testing.T) {
 		repo := &fakeRepo{findLastErr: errBoom}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 
 		err := uc.Execute(context.Background(), validCmd)
 		if !errors.Is(err, errBoom) {
@@ -97,7 +98,7 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 
 	t.Run("Save error propagated", func(t *testing.T) {
 		repo := &fakeRepo{saveErr: errBoom}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 
 		err := uc.Execute(context.Background(), validCmd)
 		if !errors.Is(err, errBoom) {
@@ -107,7 +108,7 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 
 	t.Run("empty actor defaults to system", func(t *testing.T) {
 		repo := &fakeRepo{}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 		cmd := validCmd
 		cmd.Actor = ""
 
@@ -121,13 +122,47 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 
 	t.Run("saved entry passes its own hash verification", func(t *testing.T) {
 		repo := &fakeRepo{}
-		uc := NewRecordActionUseCase(repo, newHasher(), newClock())
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
 
 		if err := uc.Execute(context.Background(), validCmd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !repo.saved[0].VerifyHash(newHasher().Compute) {
 			t.Error("recorded entry fails hash verification")
+		}
+	})
+
+	t.Run("lock, read last and insert happen in one transaction, in order", func(t *testing.T) {
+		repo := &fakeRepo{}
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
+		if err := uc.Execute(context.Background(), RecordActionCmd{
+			Action: "auth.tenant.created", ResourceType: "tenant", ResourceID: "t1",
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := "lock:tx,find:tx,save:tx"
+		if got := strings.Join(repo.calls, ","); got != want {
+			t.Errorf("calls = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("lock error aborts before reading", func(t *testing.T) {
+		repo := &fakeRepo{lockErr: errors.New("boom")}
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
+		err := uc.Execute(context.Background(), RecordActionCmd{
+			Action: "auth.tenant.created", ResourceType: "tenant", ResourceID: "t1",
+		})
+		if err == nil || len(repo.saved) != 0 || len(repo.calls) != 1 {
+			t.Fatalf("err=%v calls=%v", err, repo.calls)
+		}
+	})
+
+	t.Run("tx error propagated", func(t *testing.T) {
+		uc := NewRecordActionUseCase(&fakeRepo{}, newHasher(), newClock(), fakeTx{err: errors.New("db down")})
+		if err := uc.Execute(context.Background(), RecordActionCmd{
+			Action: "auth.tenant.created", ResourceType: "tenant", ResourceID: "t1",
+		}); err == nil {
+			t.Fatal("expected error")
 		}
 	})
 }

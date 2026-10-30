@@ -7,12 +7,21 @@ import (
 	"github.com/juantevez/cobros-platform/context/audit/domain"
 )
 
+// TxManager abstrae transacciones de base de datos.
+type TxManager interface {
+	RunInTx(ctx context.Context, fn func(context.Context) error) error
+}
+
 // AuditLogRepository persiste y recupera entradas del log de auditoría.
-// Las operaciones de escritura deben serializar las inserciones para
-// mantener la integridad del hash chain.
+// Las escrituras deben serializarse para mantener la integridad del hash
+// chain: LockChain + FindLast + Save en la misma transacción.
 type AuditLogRepository interface {
+	// LockChain serializa los registros concurrentes (de este y de otros
+	// procesos) hasta el fin de la transacción. Debe llamarse dentro de
+	// RunInTx, antes de FindLast.
+	LockChain(ctx context.Context) error
+
 	// Save persiste una nueva entrada. Asigna el ID secuencial (BIGSERIAL).
-	// Debe ejecutarse dentro de una tx serializable para el hash chain.
 	Save(ctx context.Context, entry *domain.AuditLogEntry) error
 
 	// FindLast retorna el último registro insertado (para obtener su hash).

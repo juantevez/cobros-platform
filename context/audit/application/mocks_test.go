@@ -26,14 +26,22 @@ type fakeRepo struct {
 	recentErr   error
 	tenantErr   error
 	fromIDErr   error
+	lockErr     error
 
 	// capturados para aserciones
+	calls        []string // orden de LockChain / FindLast / Save
 	lastLimit    int
 	lastTenantID string
 	lastFromID   int64
 }
 
+func (r *fakeRepo) LockChain(ctx context.Context) error {
+	r.calls = append(r.calls, "lock:"+txState(ctx))
+	return r.lockErr
+}
+
 func (r *fakeRepo) Save(ctx context.Context, entry *domain.AuditLogEntry) error {
+	r.calls = append(r.calls, "save:"+txState(ctx))
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -42,6 +50,7 @@ func (r *fakeRepo) Save(ctx context.Context, entry *domain.AuditLogEntry) error 
 }
 
 func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) {
+	r.calls = append(r.calls, "find:"+txState(ctx))
 	if r.findLastErr != nil {
 		return nil, r.findLastErr
 	}
@@ -75,6 +84,26 @@ func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*
 }
 
 // sha256Hasher es la implementación real de HashComputer para los tests.
+// fakeTx marca el contexto para que el repo fake registre si cada llamada
+// ocurrió dentro de la transacción.
+type fakeTx struct{ err error }
+
+type inTxKey struct{}
+
+func (t fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	if t.err != nil {
+		return t.err
+	}
+	return fn(context.WithValue(ctx, inTxKey{}, true))
+}
+
+func txState(ctx context.Context) string {
+	if ctx.Value(inTxKey{}) == true {
+		return "tx"
+	}
+	return "notx"
+}
+
 type sha256Hasher struct{}
 
 func (sha256Hasher) Compute(payload string) []byte {
