@@ -1,7 +1,8 @@
 # Audit — Documentación técnico-funcional
 
 > **Bounded Context:** `context/audit`
-> **Migración:** [`000004_audit_init`](../../migrations/000004_audit_init.up.sql)
+> **Migraciones:** [`000004_audit_init`](../../migrations/000004_audit_init.up.sql),
+> [`000024_audit_chain_integrity`](../../migrations/000024_audit_chain_integrity.up.sql)
 > **Streams NATS consumidos:** `AUTH` (`auth.>`), `LEDGER` (`ledger.>`) — no publica eventos
 
 ---
@@ -59,7 +60,7 @@ sequenceDiagram
     participant W as cmd/worker · EventConsumer
     participant UC as RecordActionUseCase
     participant DB as PostgreSQL (audit_log)
-    actor U as Usuario autenticado (JWT)
+    actor U as Admin del tenant / platform_support (JWT)
     participant API as cmd/api · AuditHandler
 
     SRC->>W: auth.* / ledger.* (JetStream)
@@ -68,17 +69,18 @@ sequenceDiagram
         W-->>SRC: ack (se descarta, con warning)
     else mapeado
         W->>UC: Execute(cmd)
-        UC->>DB: FindLast (SELECT … ORDER BY id DESC LIMIT 1 FOR UPDATE)
+        UC->>DB: BEGIN · pg_advisory_xact_lock(cadena)
+        UC->>DB: FindLast (SELECT … ORDER BY id DESC LIMIT 1)
         UC->>UC: NewAuditLogEntry(prev_hash = last.hash) → hash
-        UC->>DB: INSERT audit_log
+        UC->>DB: INSERT audit_log · COMMIT
         alt error
             W-->>SRC: nak → reintento (MaxDeliver 5)
         end
     end
 
-    U->>API: GET /audit/logs?tenant_id=&limit=
+    U->>API: GET /audit/logs (tenant del JWT) · GET /audit/platform/logs?tenant_id=
     API->>DB: SELECT … WHERE tenant_id=$1 ORDER BY id DESC
-    U->>API: GET /audit/verify?from_id=&limit=
+    U->>API: GET /audit/verify?from_id=&limit= (platform_support)
     API->>DB: SELECT … WHERE id >= $1 ORDER BY id ASC
     API-->>U: 200 válida | 409 rota
 ```
@@ -102,7 +104,7 @@ Archivo: [domain/log_entry.go](../../context/audit/domain/log_entry.go)
 | `correlationID` | `string` | Header `correlation-id` del mensaje. **No entra en el hash.** |
 | `prevHash` | `[]byte` | Hash de la entrada anterior; `nil` en la primera del sistema. |
 | `hash` | `[]byte` | SHA-256 del payload canónico (32 bytes). |
-| `createdAt` | `time.Time` | Reloj del worker al registrar (UTC), no la hora del evento. |
+| `createdAt` | `time.Time` | Reloj del worker al registrar, en UTC y **truncado a microsegundos** (`TruncateToStorage`), la precisión de `TIMESTAMPTZ`. No es la hora del evento. |
 
 API de la entidad:
 
@@ -122,7 +124,9 @@ No hay mutaciones: una entrada no cambia después de creada.
 1. **Append-only**: no hay UPDATE ni DELETE en el código. En la base **no**
    está reforzado (sin trigger ni permisos revocados, §10).
 2. **Encadenamiento**: `prev_hash(n) = hash(n−1)` según el orden de `id`.
-3. **Primera entrada**: `prev_hash` vacío.
+   Ningún eslabón tiene dos sucesores: `UNIQUE (prev_hash)` (migración 000024).
+3. **Primera entrada**: `prev_hash` vacío, y es única (índice único parcial
+   sobre `prev_hash IS NULL`).
 4. **Hash determinista**: mismo payload canónico ⇒ mismo hash.
 
 ### 4.3 Payload canónico y hash
@@ -132,7 +136,9 @@ hash_n = SHA-256( hex(prev_hash) | tenant_id | actor | action | resource_type | 
 ```
 
 Campos unidos con `|` en ese orden fijo (no debe cambiar: invalidaría toda la
-cadena existente). `metadata` y `correlation_id` **quedan fuera**: se pueden
+cadena existente). `created_at` se trunca a microsegundos **antes** de hashear:
+si se hasheara con los nanosegundos de `time.Now()`, al releer la fila desde
+`TIMESTAMPTZ` el payload cambiaría y la verificación fallaría siempre. `metadata` y `correlation_id` **quedan fuera**: se pueden
 modificar sin que la verificación lo detecte (§10).
 
 Implementación del hash: [crypto/sha256_hasher.go](../../context/audit/infrastructure/adapters/outbound/crypto/sha256_hasher.go)
@@ -170,16 +176,22 @@ Puertos ([application/ports.go](../../context/audit/application/ports.go)):
 
 ```
 1. ParseAction / ParseResourceType               → error si inválidos (nak)
-2. last := repo.FindLast()                        → nil si la tabla está vacía
-3. prevHash := last.hash (o nil)
-4. entry := NewAuditLogEntry(..., prevHash, clock.Now(), hasher.Compute)
-5. repo.Save(entry)
+2. txManager.RunInTx {
+3.   repo.LockChain()                             → pg_advisory_xact_lock (global)
+4.   last := repo.FindLast()                      → nil si la tabla está vacía
+5.   entry := NewAuditLogEntry(..., last.hash, clock.Now(), hasher.Compute)
+6.   repo.Save(entry)
+   }
 ```
 
-El comentario del caso de uso afirma que la inserción está serializada con
-`SELECT … FOR UPDATE` "dentro de la misma transacción". **No es así**: no hay
-`RunInTx`; `FindLast` y `Save` corren cada uno en autocommit sobre el pool, y
-el lock se libera al terminar la propia consulta (§10, #2).
+**Serialización**: los consumers de `AUTH` y `LEDGER` corren en paralelo (y
+puede haber varias instancias del worker). El advisory lock transaccional
+cubre la lectura del último hash y el INSERT, así dos registros simultáneos no
+se encadenan al mismo eslabón. Un `SELECT … FOR UPDATE` de la última fila **no
+alcanza**, ni siquiera dentro de la transacción: en READ COMMITTED el segundo
+lector, al obtener el lock, revalida la misma fila vieja en lugar de ver la
+recién insertada (reproducido contra PostgreSQL 16). Prueba de estrés: 8
+goroutines × 50 registros concurrentes → cadena válida, sin bifurcaciones.
 
 Mapeo evento → entrada ([inbound/nats/event_consumer.go](../../context/audit/infrastructure/adapters/inbound/nats/event_consumer.go)):
 
@@ -237,21 +249,23 @@ Alcance real de la verificación:
 ## 6. API HTTP
 
 Archivo: [inbound/http/audit_handler.go](../../context/audit/infrastructure/adapters/inbound/http/audit_handler.go)
-Cableado: [cmd/api/main.go](../../cmd/api/main.go) (sección *Audit*),
-`audithttp.RegisterRoutes(protected, …)` — **sin guards de rol**.
+Cableado: [cmd/api/main.go](../../cmd/api/main.go) (sección *Audit*). Cada
+ruta exige un guard de rol (`RouteGuards`, inyectados desde `cmd/api`;
+`RegisterRoutes` entra en pánico si falta alguno). Sin el rol → `403`.
 
-| Método | Ruta | Descripción | Éxito |
-|---|---|---|---|
-| `GET` | `/api/v1/audit/logs?tenant_id=&limit=` | Entradas recientes. Sin `tenant_id`, usa el tenant del JWT. | `200 {entries, count}` |
-| `GET` | `/api/v1/audit/verify?from_id=&limit=` | Verifica un lote de la cadena. | `200 VerifyChainResult` si es válida, `409` si está rota |
+| Método | Ruta | Descripción | Rol | Éxito |
+|---|---|---|---|---|
+| `GET` | `/api/v1/audit/logs?limit=` | Bitácora **del comercio autenticado** (tenant del JWT). | `admin`, `platform_support` | `200 {entries, count}` |
+| `GET` | `/api/v1/audit/platform/logs?tenant_id=&limit=` | Vista de plataforma: un comercio con `tenant_id`, toda la plataforma sin él. | `platform_support` | `200 {entries, count}` |
+| `GET` | `/api/v1/audit/verify?from_id=&limit=` | Verifica un lote de la cadena (global). | `platform_support` | `200 VerifyChainResult` si es válida, `409` si está rota |
+
+Aislamiento en `/audit/logs`: el tenant sale **siempre** del JWT. Un
+`tenant_id` en la query distinto del propio → `403` (leer otro comercio solo
+por la ruta de plataforma). Sin tenant en el contexto → `403`: nunca cae a la
+vista de toda la plataforma.
 
 Errores: cualquier fallo del caso de uso → `500 {"error":"internal server error"}`.
 Parámetros numéricos inválidos se ignoran (quedan en su default).
-
-Los comentarios de `RegisterRoutes` dicen "admin" / "solo platform_support",
-pero **no hay `RequireRole`**: cualquier usuario autenticado puede leer la
-bitácora de **otro** comercio pasando `tenant_id`, y verificar la cadena
-global (§10, #3).
 
 Ejemplo de `LogEntryView`:
 
@@ -283,7 +297,8 @@ Audit **no publica** eventos de dominio.
 ### 7.1 Consumidores (este BC consume)
 
 Se arrancan en [cmd/worker/main.go](../../cmd/worker/main.go) como dos
-goroutines durables **concurrentes**:
+goroutines durables **concurrentes** (serializadas al escribir por
+`LockChain`, §5.1):
 
 | Consumer | Stream | Filtro | MaxDeliver |
 |---|---|---|---|
@@ -317,7 +332,11 @@ erDiagram
 ```
 
 Índices: `idx_audit_log_tenant_created (tenant_id, created_at DESC) WHERE
-tenant_id IS NOT NULL`, `idx_audit_log_id_asc (id)` (redundante con la PK).
+tenant_id IS NOT NULL`, `idx_audit_log_id_asc (id)` (redundante con la PK),
+`uq_audit_log_prev_hash (prev_hash) WHERE prev_hash IS NOT NULL` y
+`uq_audit_log_genesis ((prev_hash IS NULL)) WHERE prev_hash IS NULL` (000024):
+una bifurcación de la cadena falla con violación de unicidad en vez de
+persistirse.
 
 Sin RLS: es un log global; el aislamiento por tenant depende del `WHERE` de
 cada consulta. La migración deja como comentario que en producción habría que
@@ -328,8 +347,9 @@ Queries ([outbound/postgres/audit_log_repo.go](../../context/audit/infrastructur
 
 | Método | Query | Notas |
 |---|---|---|
-| `Save` | `INSERT INTO audit_log (…) VALUES (…)` | Autocommit sobre el pool. Vacíos → `NULL`. No lee el `id` asignado. |
-| `FindLast` | `SELECT … ORDER BY id DESC LIMIT 1 FOR UPDATE` | Fuera de transacción: el lock no persiste hasta el `Save`. |
+| `LockChain` | `SELECT pg_advisory_xact_lock(hashtextextended('audit_log_chain', 0))` | Lock transaccional global de la cadena; se libera al commit/rollback. |
+| `Save` | `INSERT INTO audit_log (…) VALUES (…)` | En la tx del contexto. Vacíos → `NULL`. No lee el `id` asignado. |
+| `FindLast` | `SELECT … ORDER BY id DESC LIMIT 1` | En la tx del contexto, después de `LockChain`. |
 | `ListRecent` | `SELECT … ORDER BY id DESC LIMIT $1` | |
 | `ListByTenant` | `SELECT … WHERE tenant_id=$1 ORDER BY id DESC LIMIT $2` | |
 | `ListFromID` | `SELECT … WHERE id >= $1 ORDER BY id ASC LIMIT $2` | Base de `VerifyChain`. |
@@ -346,8 +366,9 @@ catálogo se reconstituye como vacío.
   `metadata`/`correlation_id`, borrado de la cola ni la reescritura completa
   de la cadena (no hay anclaje externo).
 - **Inmutabilidad**: solo por convención del código (§4.2).
-- **Aislamiento**: por `WHERE tenant_id` en la consulta. La API **no**
-  restringe el parámetro `tenant_id` (§6).
+- **Aislamiento**: por `WHERE tenant_id` en la consulta, con el tenant tomado
+  del JWT en `/audit/logs`. La lectura de otros comercios y la verificación
+  global requieren `platform_support` (§6).
 - **Datos**: `metadata` y `resource_id` no contienen datos sensibles hoy (IDs
   y el subject del evento).
 
@@ -357,17 +378,15 @@ catálogo se reconstituye como vacío.
 
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
-| 1 | **La verificación falla siempre** | El hash se calcula con `created_at` en nanosegundos (`time.Now()`, formato RFC3339Nano), pero `TIMESTAMPTZ` guarda microsegundos. Al releer, el payload canónico cambia y `VerifyHash` falla. Verificado en la base de desarrollo: las 4 entradas existentes fallan; `GET /audit/verify` responde `409` en la entrada 1. | **Alto** |
-| 2 | **Bifurcación de la cadena** | `FindLast … FOR UPDATE` y `Save` corren en autocommit, sin `RunInTx`: el lock se libera antes del INSERT. Los consumers de `AUTH` y `LEDGER` son concurrentes, así que dos eventos simultáneos pueden leer el mismo último hash y crear dos entradas con el mismo `prev_hash`. No reproducido (la base de dev tiene 4 filas), pero no hay nada que lo impida. | **Alto** |
-| 3 | **Lectura cross-tenant** | `/audit/logs` y `/audit/verify` no tienen guard de rol: cualquier usuario autenticado lee la bitácora de cualquier comercio con `?tenant_id=`. | **Alto** |
-| 4 | Cobertura parcial | Solo `AUTH` y `LEDGER`. No se auditan Onboarding (decisiones KYC), Payment, Payout, Billing, Dispute, Webhook ni Compliance (holds, four-eyes, cambios de watchlist). `login`/`logout` definidos y sin uso. | Medio |
-| 5 | Actor genérico | Todo queda como `system` salvo `role.assigned`: no se sabe qué operador suspendió un tenant o revocó una key (los eventos no traen el actor). | Medio |
-| 6 | Campos fuera del hash | `metadata` y `correlation_id` no entran en el payload canónico: se pueden alterar sin que la verificación lo detecte. | Medio |
-| 7 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
-| 8 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
-| 9 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
-| 10 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
-| 11 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
+| 1 | Entradas previas al fix de precisión | Las entradas grabadas antes de truncar `created_at` a microsegundos tienen un hash calculado con nanosegundos que ya no existen en la base: no verifican y no se pueden recuperar. `/audit/verify` desde `from_id = 0` reporta la primera de ellas; verificar desde la primera entrada posterior al fix. | Operativo |
+| 2 | Cobertura parcial | Solo `AUTH` y `LEDGER`. No se auditan Onboarding (decisiones KYC), Payment, Payout, Billing, Dispute, Webhook ni Compliance (holds, four-eyes, cambios de watchlist). `login`/`logout` definidos y sin uso. | Medio |
+| 3 | Actor genérico | Todo queda como `system` salvo `role.assigned`: no se sabe qué operador suspendió un tenant o revocó una key (los eventos no traen el actor). | Medio |
+| 4 | Campos fuera del hash | `metadata` y `correlation_id` no entran en el payload canónico: se pueden alterar sin que la verificación lo detecte. | Medio |
+| 5 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
+| 6 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
+| 7 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
+| 8 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
+| 9 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
 
 ---
 
@@ -386,9 +405,15 @@ catálogo se reconstituye como vacío.
 go test ./context/audit/...
 ```
 
-Hueco que explica el bug #1: ningún test hace el viaje de ida y vuelta contra
-PostgreSQL real (guardar y verificar), que es donde se pierde la precisión. Los
-tests de dominio usan timestamps sin fracción de segundo.
+`TestNewAuditLogEntry_storagePrecision` cubre la regresión de precisión
+(timestamp con nanosegundos que vuelve de la base truncado a microsegundos).
+`TestRecordActionUseCase_Execute` verifica que `LockChain → FindLast → Save`
+ocurran en orden y dentro de la misma transacción. Los guards y el aislamiento
+por tenant están en `audit_handler_test.go`.
+
+Validado además contra PostgreSQL 16 (no automatizado): migración 000024 up →
+down → up, y estrés de 8 goroutines × 50 registros con el caso de uso real →
+`VerifyChain` válida sobre las 400 entradas, sin `prev_hash` repetidos.
 
 ---
 
@@ -401,20 +426,20 @@ context/audit/
 │   ├── vo.go             # Action (catálogo), ResourceType
 │   └── errors.go
 ├── application/
-│   ├── ports.go          # AuditLogRepository, HashComputer, Clock
+│   ├── ports.go          # TxManager, AuditLogRepository (LockChain), HashComputer, Clock
 │   ├── commands.go       # RecordActionCmd, VerifyChainQuery/Result, ListLogsQuery, LogEntryView
 │   ├── record_action.go
 │   ├── list_logs.go
 │   └── verify_chain.go
 └── infrastructure/adapters/
     ├── inbound/
-    │   ├── http/audit_handler.go     # AuditHandler + RegisterRoutes (2 rutas, sin guards)
+    │   ├── http/audit_handler.go     # AuditHandler + RouteGuards + RegisterRoutes (3 rutas)
     │   └── nats/event_consumer.go    # consumers AUTH + LEDGER, mapEvent
     └── outbound/
         ├── crypto/sha256_hasher.go
         └── postgres/audit_log_repo.go
 ```
 
-Cableado: [cmd/api/main.go](../../cmd/api/main.go) (`ListLogs`, `VerifyChain`)
-y [cmd/worker/main.go](../../cmd/worker/main.go) (`RecordAction` + los dos
-consumers).
+Cableado: [cmd/api/main.go](../../cmd/api/main.go) (`ListLogs`, `VerifyChain`,
+`RouteGuards`) y [cmd/worker/main.go](../../cmd/worker/main.go)
+(`RecordAction` con `TxManager` + los dos consumers).
