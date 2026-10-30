@@ -121,6 +121,11 @@ func TestConvention_DisputeWonAndPayoutFailedRestoreMerchantBalance(t *testing.T
 
 	f.handle(f.payment.handle, paymentMsg(tid, validUUID(), 5000, 0, 0))
 
+	// Un pago reembolsado no deja saldo: vuelve todo a cero.
+	refunded := validUUID()
+	f.handle(f.payment.handle, paymentMsg(tid, refunded, 3000, 0, 0))
+	f.handle(f.payment.handle, refundMsg(tid, refunded, 3000))
+
 	disputeID := validUUID()
 	f.handle(f.dispute.handle, disputeMsg("dispute.opened.v1", tid, disputeID, "", 2000))
 	f.handle(f.dispute.handle, disputeMsg("dispute.resolved.v1", tid, disputeID, "won", 2000))

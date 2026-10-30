@@ -100,8 +100,10 @@ func TestPayment_MissingAccounts(t *testing.T) {
 func TestPayment_MalformedPayload(t *testing.T) {
 	postEntry, _, _ := newPostEntry()
 	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, newFakeAccountRepo(), discardLogger())
-	if err := consumer.handle(context.Background(), &eventbus.Message{Payload: []byte(`{bad`)}); err == nil {
-		t.Fatal("expected unmarshal error")
+	for _, subject := range []string{"payment.captured.v1", "payment.refunded.v1"} {
+		if err := consumer.handle(context.Background(), &eventbus.Message{Subject: subject, Payload: []byte(`{bad`)}); err == nil {
+			t.Errorf("%s: expected unmarshal error", subject)
+		}
 	}
 }
 
@@ -112,7 +114,7 @@ func TestPayment_StartConfig(t *testing.T) {
 	if err := consumer.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	assertConfig(t, fc.gotCfg, "PAYMENT", "ledger-payment-consumer", "payment.captured.v1")
+	assertConfig(t, fc.gotCfg, "PAYMENT", "ledger-payment-consumer", "payment.>")
 }
 
 // Con comisión del PSP el asiento balancea sobre lo que el PSP liquida
@@ -160,5 +162,80 @@ func TestPayment_MissingPlatformFeesAccountFails(t *testing.T) {
 	}
 	if len(entryRepo.saved) != 0 {
 		t.Errorf("expected no entry posted, got %d", len(entryRepo.saved))
+	}
+}
+
+func refundMsg(tenantID, paymentID string, amount int64) *eventbus.Message {
+	return &eventbus.Message{
+		Subject: "payment.refunded.v1",
+		Payload: []byte(fmt.Sprintf(
+			`{"payment_id":"%s","tenant_id":"%s","refund_amount":%d,"currency":"ARS"}`,
+			paymentID, tenantID, amount)),
+	}
+}
+
+func TestPayment_RefundPostsEntry(t *testing.T) {
+	tenantID := testTenantID(t)
+	accountRepo := newFakeAccountRepo()
+	inTransit := accountRepo.seed(t, tenantID, domain.AccountTypeInTransit, "ARS")
+	merchant := accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
+
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
+	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
+
+	paymentID := validUUID()
+	if err := consumer.handle(context.Background(), refundMsg(tenantID.String(), paymentID, 4000)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entryRepo.saved) != 1 {
+		t.Fatalf("expected 1 entry posted, got %d", len(entryRepo.saved))
+	}
+	e := entryRepo.saved[0]
+	if e.IdempotencyKey() != "payment_refunded_"+paymentID {
+		t.Errorf("idempotency key = %q", e.IdempotencyKey())
+	}
+	for _, p := range e.Postings() {
+		switch p.AccountID() {
+		case merchant.ID():
+			if !p.IsDebit() || p.Money().Amount() != 4000 {
+				t.Errorf("merchant_balance posting = %s %d, want debit 4000", p.Direction(), p.Money().Amount())
+			}
+		case inTransit.ID():
+			if p.IsDebit() || p.Money().Amount() != 4000 {
+				t.Errorf("in_transit posting = %s %d, want credit 4000", p.Direction(), p.Money().Amount())
+			}
+		default:
+			t.Errorf("unexpected account %s", p.AccountID())
+		}
+	}
+}
+
+func TestPayment_RefundMissingAccountFails(t *testing.T) {
+	tenantID := testTenantID(t)
+	accountRepo := newFakeAccountRepo()
+	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
+
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
+	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
+
+	err := consumer.handle(context.Background(), refundMsg(tenantID.String(), validUUID(), 4000))
+	if !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("expected ErrAccountNotFound, got %v", err)
+	}
+	if len(entryRepo.saved) != 0 {
+		t.Errorf("expected no entry posted, got %d", len(entryRepo.saved))
+	}
+}
+
+// Los demás eventos de pago (failed, initiated...) no mueven dinero.
+func TestPayment_OtherSubjectsIgnored(t *testing.T) {
+	postEntry, entryRepo, _ := newPostEntry()
+	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, newFakeAccountRepo(), discardLogger())
+	msg := &eventbus.Message{Subject: "payment.failed.v1", Payload: []byte(`{bad`)}
+	if err := consumer.handle(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entryRepo.saved) != 0 {
+		t.Errorf("expected no entry, got %d", len(entryRepo.saved))
 	}
 }

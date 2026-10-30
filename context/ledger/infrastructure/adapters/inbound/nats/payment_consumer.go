@@ -21,9 +21,17 @@ type paymentCapturedPayload struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
-// PaymentConsumer crea asientos contables en el Ledger cuando se captura un pago.
+type paymentRefundedPayload struct {
+	PaymentID    string `json:"payment_id"`
+	TenantID     string `json:"tenant_id"`
+	RefundAmount int64  `json:"refund_amount"`
+	Currency     string `json:"currency"`
+}
+
+// PaymentConsumer crea asientos contables en el Ledger cuando se captura o se
+// reembolsa un pago.
 //
-// Asiento generado:
+// payment.captured.v1:
 //   in_transit       DEBIT   amount - pspFee (lo que el PSP liquida)
 //   merchant_balance CREDIT  net_amount      (dinero del comercio: amount - platformFee - pspFee)
 //   platform_fees    CREDIT  platform_fee    (comisión de la plataforma, si hay)
@@ -34,6 +42,12 @@ type paymentCapturedPayload struct {
 // Convención (Apply: crédito suma, débito resta): merchant_balance y
 // platform_fees crecen con el pago; in_transit queda negativo mientras el PSP
 // adeuda la liquidación.
+//
+// payment.refunded.v1 (total, uno por pago):
+//   merchant_balance DEBIT   refund_amount   (el comercio devuelve el cobro)
+//   in_transit       CREDIT  refund_amount   (el PSP lo descuenta de la liquidación)
+//
+// Las comisiones no se devuelven: el reembolso sale entero del saldo del comercio.
 type PaymentConsumer struct {
 	consumer    eventbus.Consumer
 	postEntry   *application.PostEntryUseCase
@@ -59,12 +73,23 @@ func (c *PaymentConsumer) Start(ctx context.Context) error {
 	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
 		Stream:        "PAYMENT",
 		Name:          "ledger-payment-consumer",
-		FilterSubject: "payment.captured.v1",
+		FilterSubject: "payment.>",
 		MaxDeliver:    5,
 	}, c.handle)
 }
 
 func (c *PaymentConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
+	switch msg.Subject {
+	case "payment.captured.v1":
+		return c.handleCaptured(ctx, msg)
+	case "payment.refunded.v1":
+		return c.handleRefunded(ctx, msg)
+	default:
+		return nil // otros eventos de pago no mueven dinero
+	}
+}
+
+func (c *PaymentConsumer) handleCaptured(ctx context.Context, msg *eventbus.Message) error {
 	var p paymentCapturedPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
 		return fmt.Errorf("ledger payment consumer: unmarshal: %w", err)
@@ -126,5 +151,45 @@ func (c *PaymentConsumer) handle(ctx context.Context, msg *eventbus.Message) err
 
 	c.logger.Info("ledger payment consumer: entry posted",
 		"paymentID", p.PaymentID, "amount", p.Amount, "currency", p.Currency)
+	return nil
+}
+
+func (c *PaymentConsumer) handleRefunded(ctx context.Context, msg *eventbus.Message) error {
+	var p paymentRefundedPayload
+	if err := json.Unmarshal(msg.Payload, &p); err != nil {
+		return fmt.Errorf("ledger payment consumer: unmarshal refund: %w", err)
+	}
+
+	tenantID := domain.TenantID(p.TenantID)
+
+	merchantBalance, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeMerchantBalance, p.Currency)
+	if err != nil {
+		return fmt.Errorf("find merchant_balance account: %w", err)
+	}
+	inTransit, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeInTransit, p.Currency)
+	if err != nil {
+		return fmt.Errorf("find in_transit account: %w", err)
+	}
+
+	if _, err := c.postEntry.Execute(ctx, application.PostEntryCmd{
+		TenantID:       p.TenantID,
+		IdempotencyKey: "payment_refunded_" + p.PaymentID,
+		Description:    fmt.Sprintf("Pago reembolsado: %s", p.PaymentID),
+		Metadata: map[string]string{
+			"payment_id":   p.PaymentID,
+			"event_source": "payment.refunded.v1",
+		},
+		Lines: []application.PostingLine{
+			{AccountID: merchantBalance.ID().String(), Direction: "debit", Amount: p.RefundAmount, Currency: p.Currency},
+			{AccountID: inTransit.ID().String(), Direction: "credit", Amount: p.RefundAmount, Currency: p.Currency},
+		},
+	}); err != nil {
+		c.logger.Error("ledger payment consumer: post refund entry failed",
+			"paymentID", p.PaymentID, "error", err)
+		return fmt.Errorf("post refund entry for payment %s: %w", p.PaymentID, err)
+	}
+
+	c.logger.Info("ledger payment consumer: refund entry posted",
+		"paymentID", p.PaymentID, "amount", p.RefundAmount, "currency", p.Currency)
 	return nil
 }
