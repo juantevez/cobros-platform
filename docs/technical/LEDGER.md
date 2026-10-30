@@ -44,8 +44,8 @@ Ledger es mayormente **reactivo**: la mayoría de los asientos los generan sus c
 | `dispute_hold` | Fondos congelados por disputas. | Consumer de Onboarding |
 | `payout_transit` | Fondos en camino al banco del comercio. | Consumer de Onboarding |
 | `payout_sent` | Fondos confirmados como enviados. | Consumer de Onboarding |
-| `in_transit` | Fondos cobrados que el PSP aún no liquidó. | ⚠️ **Nadie** (§10.1) |
-| `platform_fees` | Comisiones de la plataforma (y hoy, contrapartida de disputas perdidas). | ⚠️ **Nadie** (§10.1) |
+| `in_transit` | Fondos cobrados que el PSP aún no liquidó. | ⚠️ **Nadie** (§10 #1) |
+| `platform_fees` | Comisiones de la plataforma (y hoy, contrapartida de disputas perdidas). | ⚠️ **Nadie** (§10 #1) |
 
 ---
 
@@ -128,7 +128,7 @@ credit → balance += amount
 debit  → balance -= amount
 ```
 
-El comentario del repositorio declara que *"merchant_balance positivo = la plataforma le debe ese monto al comercio"*, y Payout se apoya en eso. Los consumers, en cambio, **debitan** `merchant_balance` para aumentarlo. Ver §10.3.
+El comentario del repositorio declara que *"merchant_balance positivo = la plataforma le debe ese monto al comercio"*, y Payout se apoya en eso. Los consumers, en cambio, **debitan** `merchant_balance` para aumentarlo. Ver §10 #2.
 
 ### 4.5 Errores
 
@@ -308,20 +308,20 @@ Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDI
 
 ## 10. Limitaciones conocidas y deuda técnica
 
-| # | Tema | Detalle | Impacto |
+| # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | **Los pagos capturados nunca llegan al Ledger** | (a) Ningún flujo crea las cuentas `in_transit` ni `platform_fees`: el consumer de Onboarding crea las otras 5. `FindByTenantAndType(in_transit)` falla y el mensaje se descarta tras 5 intentos. (b) Aunque existieran, el asiento acredita `amount` y debita `amount − platform_fee − psp_fee` + `platform_fee` = `amount − psp_fee`: **no balancea si `psp_fee > 0`**, y el PSP mock cobra siempre ≥ 1. El comentario *"el asiento balancea igual"* del consumer es incorrecto. Falta una línea para `psp_fee`. (c) Las disputas perdidas también fallan por falta de `platform_fees`. | **Crítico (funcional)** |
-| 2 | ~~Un comercio puede crear saldo~~ ✅ **Resuelto** | Las escrituras HTTP exigen `platform_support` (`writeGuard`). `PostEntry` valida que cada cuenta exista, sea del tenant y tenga la moneda del posting. `GetBalance` verifica el tenant. Pendiente: un endpoint de operador para ajustes manuales sobre otro tenant (§6). | — |
-| 3 | **Convención de signo inconsistente** | `Apply` suma créditos y resta débitos en todas las cuentas. Los consumers **debitan** `merchant_balance` cuando el comercio gana dinero (pago, disputa ganada) y lo **acreditan** cuando sale (payout, disputa abierta). Con #1 resuelto, cada pago dejaría `merchant_balance` **más negativo**, y Payout (que exige saldo > 0) rechazaría todos los payouts. Se puede arreglar con saldo por naturaleza de cuenta (deudora/acreedora) o invirtiendo las direcciones en los consumers. Hay que alinearlo con Reporting. | **Alto (funcional)** |
-| 4 | ~~Creación de cuentas no idempotente~~ ✅ **Resuelto** | `CreateAccount` devuelve la cuenta existente (chequeo previo + traducción de `23505` a `ErrAccountAlreadyExists` ante carreras). Los reintentos del consumer de Onboarding completan las cuentas faltantes. La moneda se normaliza a mayúsculas para que la búsqueda coincida. | — |
-| 5 | Idempotencia con carrera | Check-then-insert: un duplicado concurrente → 500 en lugar de `was_existing`. No se compara el contenido al reusar una clave. `ErrEntryAlreadyExists` nunca se emite. | Medio |
-| 6 | `account_balances` sin `tenant_id` ni RLS | Depende de que cada query haga join con `ledger_accounts` filtrando por tenant, o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). | Bajo |
-| 7 | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). | Bajo |
-| 8 | Sin control de sobregiro | Ninguna cuenta impide un saldo negativo, ni siquiera `merchant_balance` ante un payout concurrente que pase el chequeo de Payout dos veces. | Medio |
-| 9 | Cuentas de plataforma por tenant | `platform_fees` es por tenant, y se usa como contrapartida de disputas perdidas (marcado como provisorio: "Fase 4: chargebacks_paid"). No hay cuentas de la plataforma (revenue consolidado, banco del PSP). `reserve` no tiene movimientos. | Diseño |
-| 10 | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. | Bajo |
-| 11 | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). | Bajo |
-| 12 | Sin consultas | No hay listado de cuentas, de asientos ni extracto por cuenta. | Funcional |
+| 1 | Alta | Los pagos capturados nunca llegan al Ledger | (a) Onboarding crea 5 cuentas (§2.1) y ningún flujo crea `in_transit` ni `platform_fees`: `FindByTenantAndType(in_transit)` falla y el mensaje se descarta tras 5 intentos. (b) Aunque existieran, el asiento acredita `amount` y debita `amount − platform_fee − psp_fee` + `platform_fee`: **no balancea si `psp_fee > 0`**, y el PSP mock cobra siempre ≥ 1. (c) Si falta `platform_fees`, la línea de comisión se omite sin aviso y el asiento tampoco balancea. Las disputas perdidas también fallan por falta de `platform_fees`. |
+| 2 | Alta | Signo invertido en los consumers | `Apply` suma créditos y resta débitos en todas las cuentas (§4.4). Los consumers **debitan** `merchant_balance` cuando el comercio gana dinero (pago, disputa ganada) y lo **acreditan** cuando sale (payout, disputa abierta): cada pago dejaría `merchant_balance` más negativo y Payout, que exige saldo > 0, rechazaría todos los payouts. Reporting calcula su neto con la convención de los consumers ([REPORTING.md §10](REPORTING.md)). Además, una disputa perdida usa `platform_fees` como contrapartida: la plataforma pagaría los contracargos con sus comisiones. |
+| 3 | Alta | Los reembolsos no llegan al Ledger | Ningún consumer del Ledger escucha `payment.refunded.v1`. `merchant_balance` no baja con un reembolso, y el comercio puede retirar el dinero devuelto. |
+| 4 | Alta | Sobregiro por débito asíncrono | Payout serializa con un advisory lock la lectura del saldo y la creación del payout, pero el débito de `merchant_balance` llega después (outbox → consumer). Dos payouts seguidos antes de que corra el consumer leen el mismo saldo y ambos pasan. Hoy no ocurre porque #1 y #2 impiden todo payout. Se resuelve en Payout, descontando los payouts cuyo asiento aún no existe. |
+| 5 | Media | RLS sin tenant | Las políticas no usan `NULLIF` ni tienen política de operador, y ningún repo setea `app.current_tenant`. Hoy no filtra porque la app conecta como owner (ONBOARDING.MD §10.2); con un rol sin `BYPASSRLS`, toda query falla al castear `''` a `uuid`. |
+| 6 | Media | Idempotencia con carrera | Check-then-insert (§5.1): un duplicado concurrente → 500 en lugar de `was_existing`. Reusar una clave con otro contenido devuelve el asiento original sin avisar. `ErrEntryAlreadyExists` nunca se emite. |
+| 7 | Baja | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). |
+| 8 | Baja | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. |
+| 9 | Baja | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). |
+| 10 | Baja | `account_balances` sin `tenant_id` | Sin RLS propio: depende de que cada query haga join con `ledger_accounts` o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). |
+| 11 | Baja | Consumers poco estrictos | Una disputa con `outcome` desconocido se asienta como perdida. Un pago con neto ≤ 0 reintenta 5 veces un error permanente. Tras 5 fallos el mensaje se descarta sin registro. |
+| 12 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Sin control de sobregiro. Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
 
 ---
 

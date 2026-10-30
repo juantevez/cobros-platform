@@ -226,7 +226,7 @@ hecho y las consultas con el del token.
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Signo del neto | `net = debits - credits`; el saldo del Ledger es `credits - debits`, así que el mismo saldo sale con signo opuesto en `/ledger` y en `/reports/balances`. El neto de Reporting es coherente con cómo asientan los consumers del Ledger (sobre `merchant_balance`, un pago capturado es débito y un payout es crédito): el que está al revés es el saldo del Ledger, y por eso Payout rechazaría todo payout ([LEDGER.md §10.3](LEDGER.md)). Se resuelve en el Ledger; después Reporting expone el neto según la naturaleza de cada cuenta. |
+| 1 | Media | Signo del neto | `net = debits - credits`; el saldo del Ledger es `credits - debits`, así que el mismo saldo sale con signo opuesto en `/ledger` y en `/reports/balances`. El neto de Reporting es coherente con cómo asientan los consumers del Ledger (sobre `merchant_balance`, un pago capturado es débito y un payout es crédito): el que está al revés es el saldo del Ledger, y por eso Payout rechazaría todo payout ([LEDGER.md §10](LEDGER.md) #2). Se resuelve en el Ledger; después Reporting expone el neto según la naturaleza de cada cuenta. |
 | 2 | Baja | Zona horaria | Los buckets de `day`/`week`/`month` se cortan en UTC; para un comercio en Argentina el "día" empieza a las 21:00. No hay parámetro de zona. |
 | 3 | Baja | Descartes silenciosos | Un payload ilegible o sin tenant se descarta sin log. Una cuenta que no se encuentra se proyecta con `account_type` vacío sin aviso, y su saldo aparece bajo un tipo vacío. |
 | 4 | Baja | Consultas sin tope | Sin `from`/`to` se agrega todo el histórico; con `granularity=day` sobre años, la serie no tiene límite de puntos. |
