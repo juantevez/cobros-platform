@@ -64,7 +64,7 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 		return domain.ErrRunNotFound
 	}
 
-	if err := claim(ctx, uc.runRepo, run); err != nil {
+	if err := claim(ctx, uc.runRepo, run, domain.TypePayment); err != nil {
 		return err
 	}
 
@@ -188,10 +188,14 @@ func ownedBy(run *domain.ReconciliationRun, tenantID string) bool {
 	return run.TenantID().String() == tenantID
 }
 
-// claim pasa el run a running con un UPDATE condicionado al estado leído: de
-// dos procesos concurrentes sobre el mismo run, solo uno lo toma (el otro
-// recibe ErrRunAlreadyRunning).
-func claim(ctx context.Context, runs RunRepository, run *domain.ReconciliationRun) error {
+// claim verifica que la operación corresponda al tipo del run y lo pasa a
+// running con un UPDATE condicionado al estado leído: de dos procesos
+// concurrentes sobre el mismo run, solo uno lo toma (el otro recibe
+// ErrRunAlreadyRunning).
+func claim(ctx context.Context, runs RunRepository, run *domain.ReconciliationRun, want domain.ReconciliationType) error {
+	if run.Type() != want {
+		return fmt.Errorf("%w: run %s is %q, operation requires %q", domain.ErrRunTypeMismatch, run.ID(), run.Type(), want)
+	}
 	from := run.Status()
 	if err := run.Start(); err != nil {
 		return err
@@ -293,7 +297,7 @@ func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessIntern
 		return domain.ErrRunNotFound
 	}
 
-	if err := claim(ctx, uc.runRepo, run); err != nil {
+	if err := claim(ctx, uc.runRepo, run, domain.TypeInternal); err != nil {
 		return err
 	}
 

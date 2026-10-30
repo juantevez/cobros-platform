@@ -593,6 +593,7 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrInvalidPeriod, http.StatusBadRequest},
 		{domain.ErrEmptyReport, http.StatusBadRequest},
 		{domain.ErrInvalidReportFormat, http.StatusBadRequest},
+		{domain.ErrRunTypeMismatch, http.StatusUnprocessableEntity},
 		{fmt.Errorf("find run: %w", domain.ErrRunNotFound), http.StatusNotFound},
 		{domain.ErrRunNotCompleted, http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},

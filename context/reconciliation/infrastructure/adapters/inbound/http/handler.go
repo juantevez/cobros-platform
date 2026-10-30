@@ -226,6 +226,8 @@ func respondError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrRunAlreadyRunning),
 		errors.Is(err, domain.ErrDiscrepancyAlreadyResolved):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrRunTypeMismatch):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidPeriod),
 		errors.Is(err, domain.ErrEmptyReport),
 		errors.Is(err, domain.ErrInvalidReportFormat):

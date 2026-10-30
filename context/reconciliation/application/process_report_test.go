@@ -316,6 +316,20 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		})
 	}
 
+	t.Run("internal_ledger run is rejected without touching it", func(t *testing.T) {
+		d := newReportDeps()
+		d.run = pendingRun(tenantA, domain.TypeInternal)
+		d.runs = newRunRepo(d.run)
+
+		err := d.exec()
+		if !errors.Is(err, domain.ErrRunTypeMismatch) {
+			t.Fatalf("expected ErrRunTypeMismatch, got %v", err)
+		}
+		if d.run.Status() != domain.RunStatusPending || len(d.runs.updates) != 0 || d.reader.calls != 0 {
+			t.Error("run of another type must not be processed")
+		}
+	})
+
 	t.Run("failed run is reprocessed", func(t *testing.T) {
 		d := newReportDeps()
 		d.run = runWithStatus(domain.RunStatusFailed)
@@ -564,10 +578,24 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 
 	t.Run("run not pending is rejected", func(t *testing.T) {
 		d := newInternalDeps()
-		d.run = runWithStatus(domain.RunStatusCompleted)
+		d.run = domain.ReconstituteRun(domain.NewRunID(), domain.TenantID(tenantA), domain.TypeInternal, domain.RunStatusCompleted,
+			periodFrom, periodTo, 0, 0, 0, "", periodTo, nil)
 		d.runs = newRunRepo(d.run)
 		if err := d.exec(); !errors.Is(err, domain.ErrRunAlreadyRunning) {
 			t.Fatalf("expected ErrRunAlreadyRunning, got %v", err)
+		}
+	})
+
+	t.Run("payment run is rejected without touching it", func(t *testing.T) {
+		d := newInternalDeps()
+		d.run = pendingRun(tenantA, domain.TypePayment)
+		d.runs = newRunRepo(d.run)
+
+		if err := d.exec(); !errors.Is(err, domain.ErrRunTypeMismatch) {
+			t.Fatalf("expected ErrRunTypeMismatch, got %v", err)
+		}
+		if d.run.Status() != domain.RunStatusPending || len(d.runs.updates) != 0 {
+			t.Error("run of another type must not be processed")
 		}
 	})
 
