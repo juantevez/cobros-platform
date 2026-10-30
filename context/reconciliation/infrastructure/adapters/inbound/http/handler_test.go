@@ -48,7 +48,9 @@ func (r *fakeRunRepo) Save(ctx context.Context, run *domain.ReconciliationRun) e
 	r.byID[run.ID()] = run
 	return nil
 }
-func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun) error { return nil }
+func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun, from domain.RunStatus) error {
+	return nil
+}
 func (r *fakeRunRepo) FindByID(ctx context.Context, id domain.RunID) (*domain.ReconciliationRun, error) {
 	run, ok := r.byID[id]
 	if !ok {
@@ -120,8 +122,8 @@ func newEnv(payments []application.SystemPayment, imbalance int64) *env {
 	discs := &fakeDiscRepo{byID: map[domain.DiscrepancyID]*domain.Discrepancy{}}
 	h := NewReconciliationHandler(
 		application.NewStartReconciliationUseCase(runs),
-		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakePublisher{}),
-		application.NewProcessInternalUseCase(runs, discs, fakeLedger{imbalance}, fakePublisher{}),
+		application.NewProcessReportUseCase(runs, discs, fakePaymentReader{payments}, readers.NewCSVReportParser(), fakeTx{}, fakePublisher{}),
+		application.NewProcessInternalUseCase(runs, discs, fakeLedger{imbalance}, fakeTx{}, fakePublisher{}),
 		application.NewResolveDiscrepancyUseCase(discs, fakeTx{}, fakePublisher{}),
 		application.NewGetReportUseCase(runs, discs),
 		application.NewListRunsUseCase(runs),

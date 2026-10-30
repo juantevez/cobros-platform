@@ -320,8 +320,8 @@ func main() {
 	csvParser := reconciliationreaders.NewCSVReportParser()
 
 	startRun := reconciliationapp.NewStartReconciliationUseCase(runRepo)
-	processReport := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, reconcPub)
-	processInternal := reconciliationapp.NewProcessInternalUseCase(runRepo, discrepancyRepo, ledgerChecker, reconcPub)
+	processReport := reconciliationapp.NewProcessReportUseCase(runRepo, discrepancyRepo, paymentReader, csvParser, txManager, reconcPub)
+	processInternal := reconciliationapp.NewProcessInternalUseCase(runRepo, discrepancyRepo, ledgerChecker, txManager, reconcPub)
 	resolveDisc := reconciliationapp.NewResolveDiscrepancyUseCase(discrepancyRepo, txManager, reconcPub)
 	getReport := reconciliationapp.NewGetReportUseCase(runRepo, discrepancyRepo)
 	listRuns := reconciliationapp.NewListRunsUseCase(runRepo)

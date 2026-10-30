@@ -28,6 +28,7 @@ type fakeRunRepo struct {
 	byID        map[domain.RunID]*domain.ReconciliationRun
 	saved       []*domain.ReconciliationRun
 	updates     []domain.RunStatus
+	froms       []domain.RunStatus // estado esperado en cada Update
 	list        []*domain.ReconciliationRun
 	saveErr     error
 	updateErr   error
@@ -57,8 +58,9 @@ func (r *fakeRunRepo) Save(ctx context.Context, run *domain.ReconciliationRun) e
 	return nil
 }
 
-func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun) error {
+func (r *fakeRunRepo) Update(ctx context.Context, run *domain.ReconciliationRun, from domain.RunStatus) error {
 	r.updates = append(r.updates, run.Status())
+	r.froms = append(r.froms, from)
 	if r.updateErr != nil && (r.updateErrAt == 0 || r.updateErrAt == len(r.updates)) {
 		return r.updateErr
 	}

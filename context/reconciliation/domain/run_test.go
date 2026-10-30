@@ -96,7 +96,17 @@ func TestReconciliationRun_Start(t *testing.T) {
 		}
 	})
 
-	for _, st := range []RunStatus{RunStatusRunning, RunStatusCompleted, RunStatusFailed} {
+	t.Run("from failed clears the previous failure", func(t *testing.T) {
+		r := ReconstituteRun(NewRunID(), testTenant, TypePayment, RunStatusFailed, testFrom, testTo, 0, 0, 0, "boom", testFrom, &testTo)
+		if err := r.Start(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if r.Status() != RunStatusRunning || r.ErrorMsg() != "" || r.CompletedAt() != nil {
+			t.Errorf("status=%q errorMsg=%q completedAt=%v", r.Status(), r.ErrorMsg(), r.CompletedAt())
+		}
+	})
+
+	for _, st := range []RunStatus{RunStatusRunning, RunStatusCompleted} {
 		t.Run("rejected from "+st.String(), func(t *testing.T) {
 			r := runWithStatus(st)
 			if err := r.Start(); !errors.Is(err, ErrRunAlreadyRunning) {
@@ -176,8 +186,13 @@ func TestReconciliationRun_Complete(t *testing.T) {
 func TestReconciliationRun_Fail(t *testing.T) {
 	r := newTestRun(t)
 	_ = r.Start()
+	r.Complete(5, 4, 1) // completado en memoria, pero la tx no confirmó
 
 	r.Fail("parse error")
+
+	if r.TotalRecords() != 0 || r.MatchedCount() != 0 || r.DiscrepancyCount() != 0 {
+		t.Errorf("counters = %d/%d/%d, want zero", r.TotalRecords(), r.MatchedCount(), r.DiscrepancyCount())
+	}
 
 	if r.Status() != RunStatusFailed || r.ErrorMsg() != "parse error" {
 		t.Errorf("status=%q errorMsg=%q", r.Status(), r.ErrorMsg())

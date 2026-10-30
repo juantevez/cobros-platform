@@ -20,11 +20,12 @@ import (
 //     - En ambos, monto distinto → AmountMismatch
 //     - En ambos, estado inconsistente → StatusMismatch
 type ProcessReportUseCase struct {
-	runRepo          RunRepository
-	discrepancyRepo  DiscrepancyRepository
-	paymentReader    PaymentReader
-	reportParser     ReportParser
-	publisher        EventPublisher
+	runRepo         RunRepository
+	discrepancyRepo DiscrepancyRepository
+	paymentReader   PaymentReader
+	reportParser    ReportParser
+	txManager       TxManager
+	publisher       EventPublisher
 }
 
 func NewProcessReportUseCase(
@@ -32,6 +33,7 @@ func NewProcessReportUseCase(
 	discrepancyRepo DiscrepancyRepository,
 	paymentReader PaymentReader,
 	reportParser ReportParser,
+	txManager TxManager,
 	publisher EventPublisher,
 ) *ProcessReportUseCase {
 	return &ProcessReportUseCase{
@@ -39,6 +41,7 @@ func NewProcessReportUseCase(
 		discrepancyRepo: discrepancyRepo,
 		paymentReader:   paymentReader,
 		reportParser:    reportParser,
+		txManager:       txManager,
 		publisher:       publisher,
 	}
 }
@@ -61,37 +64,16 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 		return domain.ErrRunNotFound
 	}
 
-	if err := run.Start(); err != nil {
+	if err := claim(ctx, uc.runRepo, run); err != nil {
 		return err
 	}
-	if err := uc.runRepo.Update(ctx, run); err != nil {
-		return fmt.Errorf("update run to running: %w", err)
-	}
 
-	// Delegar el procesamiento. Si falla, marcar el run como failed.
 	discrepancies, total, matched, err := uc.compare(ctx, run, cmd.ReportData)
 	if err != nil {
-		run.Fail(err.Error())
-		_ = uc.runRepo.Update(ctx, run)
-		return fmt.Errorf("compare: %w", err)
+		return fail(ctx, uc.runRepo, run, fmt.Errorf("compare: %w", err))
 	}
 
-	// Guardar discrepancias y completar el run en una sola tx.
-	if len(discrepancies) > 0 {
-		if err := uc.discrepancyRepo.SaveAll(ctx, discrepancies); err != nil {
-			run.Fail(err.Error())
-			_ = uc.runRepo.Update(ctx, run)
-			return fmt.Errorf("save discrepancies: %w", err)
-		}
-	}
-
-	run.Complete(total, matched, len(discrepancies))
-	if err := uc.runRepo.Update(ctx, run); err != nil {
-		return fmt.Errorf("update run completed: %w", err)
-	}
-
-	_ = uc.publisher.Publish(ctx, run.PullEvents()...)
-	return nil
+	return complete(ctx, uc.txManager, uc.runRepo, uc.discrepancyRepo, uc.publisher, run, discrepancies, total, matched)
 }
 
 func (uc *ProcessReportUseCase) compare(
@@ -206,6 +188,60 @@ func ownedBy(run *domain.ReconciliationRun, tenantID string) bool {
 	return run.TenantID().String() == tenantID
 }
 
+// claim pasa el run a running con un UPDATE condicionado al estado leído: de
+// dos procesos concurrentes sobre el mismo run, solo uno lo toma (el otro
+// recibe ErrRunAlreadyRunning).
+func claim(ctx context.Context, runs RunRepository, run *domain.ReconciliationRun) error {
+	from := run.Status()
+	if err := run.Start(); err != nil {
+		return err
+	}
+	if err := runs.Update(ctx, run, from); err != nil {
+		return fmt.Errorf("claim run: %w", err)
+	}
+	return nil
+}
+
+// complete guarda las discrepancias, cierra el run y publica el evento en una
+// sola transacción. Si falla, no queda nada a medias y el run pasa a failed.
+func complete(
+	ctx context.Context,
+	tx TxManager,
+	runs RunRepository,
+	discs DiscrepancyRepository,
+	pub EventPublisher,
+	run *domain.ReconciliationRun,
+	discrepancies []*domain.Discrepancy,
+	total, matched int,
+) error {
+	err := tx.RunInTx(ctx, func(ctx context.Context) error {
+		if len(discrepancies) > 0 {
+			if err := discs.SaveAll(ctx, discrepancies); err != nil {
+				return fmt.Errorf("save discrepancies: %w", err)
+			}
+		}
+		run.Complete(total, matched, len(discrepancies))
+		if err := runs.Update(ctx, run, domain.RunStatusRunning); err != nil {
+			return fmt.Errorf("update run completed: %w", err)
+		}
+		return pub.Publish(ctx, run.PullEvents()...)
+	})
+	if err != nil {
+		return fail(ctx, runs, run, err)
+	}
+	return nil
+}
+
+// fail marca el run como fallido y devuelve la causa. Si tampoco se puede
+// guardar el fallo, el run queda running y el error lo informa.
+func fail(ctx context.Context, runs RunRepository, run *domain.ReconciliationRun, cause error) error {
+	run.Fail(cause.Error())
+	if err := runs.Update(ctx, run, domain.RunStatusRunning); err != nil {
+		return fmt.Errorf("%w (mark run failed: %v)", cause, err)
+	}
+	return cause
+}
+
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
@@ -226,6 +262,7 @@ type ProcessInternalUseCase struct {
 	runRepo         RunRepository
 	discrepancyRepo DiscrepancyRepository
 	ledgerChecker   LedgerChecker
+	txManager       TxManager
 	publisher       EventPublisher
 }
 
@@ -233,11 +270,12 @@ func NewProcessInternalUseCase(
 	runRepo RunRepository,
 	discrepancyRepo DiscrepancyRepository,
 	ledgerChecker LedgerChecker,
+	txManager TxManager,
 	publisher EventPublisher,
 ) *ProcessInternalUseCase {
 	return &ProcessInternalUseCase{
 		runRepo: runRepo, discrepancyRepo: discrepancyRepo,
-		ledgerChecker: ledgerChecker, publisher: publisher,
+		ledgerChecker: ledgerChecker, txManager: txManager, publisher: publisher,
 	}
 }
 
@@ -255,17 +293,14 @@ func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessIntern
 		return domain.ErrRunNotFound
 	}
 
-	if err := run.Start(); err != nil {
+	if err := claim(ctx, uc.runRepo, run); err != nil {
 		return err
 	}
-	_ = uc.runRepo.Update(ctx, run)
 
 	// Verificar balance del Ledger para el período.
 	imbalance, err := uc.ledgerChecker.CheckBalance(ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo())
 	if err != nil {
-		run.Fail(err.Error())
-		_ = uc.runRepo.Update(ctx, run)
-		return fmt.Errorf("check ledger balance: %w", err)
+		return fail(ctx, uc.runRepo, run, fmt.Errorf("check ledger balance: %w", err))
 	}
 
 	var discrepancies []*domain.Discrepancy
@@ -279,18 +314,7 @@ func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessIntern
 			"0",
 			fmt.Sprintf("%d (centavos fuera de balance)", imbalance),
 		))
-		if err := uc.discrepancyRepo.SaveAll(ctx, discrepancies); err != nil {
-			run.Fail(err.Error())
-			_ = uc.runRepo.Update(ctx, run)
-			return fmt.Errorf("save discrepancies: %w", err)
-		}
 	}
 
-	run.Complete(1, matched, len(discrepancies))
-	if err := uc.runRepo.Update(ctx, run); err != nil {
-		return fmt.Errorf("update run: %w", err)
-	}
-
-	_ = uc.publisher.Publish(ctx, run.PullEvents()...)
-	return nil
+	return complete(ctx, uc.txManager, uc.runRepo, uc.discrepancyRepo, uc.publisher, run, discrepancies, 1, matched)
 }

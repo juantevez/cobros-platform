@@ -8,7 +8,7 @@ import (
 // ReconciliationRun es el agregado raíz del contexto Reconciliation.
 //
 // Representa una ejecución del proceso de reconciliación para un período dado.
-// La FSM es: pending → running → completed / failed
+// La FSM es: pending → running → completed / failed (failed → running reprocesa)
 //
 // Al completarse, contiene el resumen de cuántos registros coincidieron y
 // cuántos generaron discrepancias. Las discrepancias se almacenan separadas.
@@ -69,12 +69,15 @@ func ReconstituteRun(
 	}
 }
 
-// Start marca el run como en ejecución.
+// Start marca el run como en ejecución. Un run fallido se puede reprocesar:
+// el fallo no deja discrepancias guardadas, así que arranca de cero.
 func (r *ReconciliationRun) Start() error {
-	if r.status != RunStatusPending {
+	if r.status != RunStatusPending && r.status != RunStatusFailed {
 		return fmt.Errorf("%w: current status is %q", ErrRunAlreadyRunning, r.status)
 	}
 	r.status = RunStatusRunning
+	r.errorMsg = ""
+	r.completedAt = nil
 	return nil
 }
 
@@ -99,11 +102,14 @@ func (r *ReconciliationRun) Complete(totalRecords, matchedCount, discrepancyCoun
 }
 
 // Fail marca el run como fallido con el motivo del error.
+// Los contadores vuelven a cero: un run fallido no tiene resultados.
 func (r *ReconciliationRun) Fail(reason string) {
 	now := time.Now().UTC()
 	r.status = RunStatusFailed
 	r.errorMsg = reason
 	r.completedAt = &now
+	r.totalRecords, r.matchedCount, r.discrepancyCount = 0, 0, 0
+	r.events = nil
 }
 
 // ── Getters ───────────────────────────────────────────────────────────────────

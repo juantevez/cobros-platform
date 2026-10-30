@@ -123,19 +123,19 @@ func TestRunRepository_Save(t *testing.T) {
 }
 
 func TestRunRepository_Update(t *testing.T) {
-	t.Run("updates results of failed run", func(t *testing.T) {
+	t.Run("updates results of failed run conditioned on previous status", func(t *testing.T) {
 		mock := newMock(t)
 		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
 		_ = run.Start()
 		run.Fail("parse error")
 
-		mock.ExpectExec("UPDATE reconciliation_runs SET").WithArgs(
+		mock.ExpectExec("UPDATE reconciliation_runs SET .* WHERE id=\\$1 AND status=\\$8").WithArgs(
 			run.ID().String(), "failed",
 			0, 0, 0,
-			strPtr("parse error"), run.CompletedAt(),
+			strPtr("parse error"), run.CompletedAt(), "running",
 		).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := NewRunRepository(mock).Update(context.Background(), run); err != nil {
+		if err := NewRunRepository(mock).Update(context.Background(), run, domain.RunStatusRunning); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -143,12 +143,24 @@ func TestRunRepository_Update(t *testing.T) {
 		}
 	})
 
+	t.Run("no rows affected means another process changed the run", func(t *testing.T) {
+		mock := newMock(t)
+		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
+		_ = run.Start()
+		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(8)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err := NewRunRepository(mock).Update(context.Background(), run, domain.RunStatusPending)
+		if !errors.Is(err, domain.ErrRunAlreadyRunning) || !strings.Contains(err.Error(), `no longer "pending"`) {
+			t.Fatalf("expected ErrRunAlreadyRunning, got %v", err)
+		}
+	})
+
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
 		run, _ := domain.NewReconciliationRun(domain.NewRunID(), "", domain.TypePayment, testFrom, testTo)
-		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(7)...).WillReturnError(errBoom)
+		mock.ExpectExec("UPDATE reconciliation_runs").WithArgs(anyArgs(8)...).WillReturnError(errBoom)
 
-		err := NewRunRepository(mock).Update(context.Background(), run)
+		err := NewRunRepository(mock).Update(context.Background(), run, domain.RunStatusPending)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "reconciliation update run") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}

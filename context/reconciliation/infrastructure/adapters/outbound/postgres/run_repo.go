@@ -35,18 +35,26 @@ func (r *pgRunRepository) Save(ctx context.Context, run *domain.ReconciliationRu
 	return wrapErr("save run", err)
 }
 
-func (r *pgRunRepository) Update(ctx context.Context, run *domain.ReconciliationRun) error {
+// Update guarda el run condicionado a que en la base siga en el estado from.
+// Cero filas afectadas = otro proceso lo cambió antes (o no existe).
+func (r *pgRunRepository) Update(ctx context.Context, run *domain.ReconciliationRun, from domain.RunStatus) error {
 	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	_, err := conn.Exec(ctx, `
+	tag, err := conn.Exec(ctx, `
 		UPDATE reconciliation_runs SET
 			status=$2, total_records=$3, matched_count=$4,
 			discrepancy_count=$5, error_msg=$6, completed_at=$7
-		WHERE id=$1`,
+		WHERE id=$1 AND status=$8`,
 		run.ID().String(), run.Status().String(),
 		run.TotalRecords(), run.MatchedCount(), run.DiscrepancyCount(),
-		nullStr(run.ErrorMsg()), run.CompletedAt(),
+		nullStr(run.ErrorMsg()), run.CompletedAt(), from.String(),
 	)
-	return wrapErr("update run", err)
+	if err != nil {
+		return wrapErr("update run", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: run %s is no longer %q", domain.ErrRunAlreadyRunning, run.ID(), from)
+	}
+	return nil
 }
 
 func (r *pgRunRepository) FindByID(ctx context.Context, id domain.RunID) (*domain.ReconciliationRun, error) {
