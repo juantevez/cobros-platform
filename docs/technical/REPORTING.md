@@ -1,8 +1,9 @@
 # Reporting — Documentación técnico-funcional
 
 > **Bounded Context:** `context/reporting`
-> **Migración:** [`000013_reporting_init`](../../migrations/000013_reporting_init.up.sql)
-> **Streams NATS consumidos:** `PAYMENT` (`payment.captured.>`), `LEDGER` (`ledger.entry.posted.>`) — no publica eventos
+> **Migraciones:** [`000013_reporting_init`](../../migrations/000013_reporting_init.up.sql),
+> [`000034_reporting_rls_nullif`](../../migrations/000034_reporting_rls_nullif.up.sql)
+> **Streams NATS consumidos:** `PAYMENT` (`payment.captured.>`), `LEDGER` (`ledger.entry.>`) — no publica eventos
 > **Lee tablas de otros BCs:** `ledger_accounts` (Ledger)
 
 ---
@@ -16,8 +17,8 @@ agrega al momento de consultar.
 Responsabilidades:
 
 1. Proyectar cada pago capturado como un hecho (`report_payment_fact`).
-2. Proyectar cada posting de un asiento del Ledger como un movimiento (`report_ledger_movement`),
-   con el tipo de cuenta denormalizado.
+2. Proyectar cada posting de un asiento del Ledger, incluidas las reversas, como un movimiento
+   (`report_ledger_movement`), con el tipo de cuenta denormalizado.
 3. Responder tres consultas del tenant autenticado: volumen transaccional por período, comisiones
    (revenue) y saldos por tipo de cuenta.
 
@@ -47,7 +48,7 @@ Responsabilidades:
 ```mermaid
 flowchart TD
     P[Payment: payment.captured.v1] --> C1[reporting-payment-consumer]
-    L[Ledger: ledger.entry.posted.v1] --> C2[reporting-ledger-consumer]
+    L[Ledger: ledger.entry.posted.v1 y entry.reversed.v1] --> C2[reporting-ledger-consumer]
     C1 --> UC[ProjectEventsUseCase]
     C2 --> UC
     UC -->|tipo de cuenta por posting| AR[(ledger_accounts)]
@@ -60,6 +61,9 @@ flowchart TD
 
 - **Escritura (worker):** dos consumers durables. Cada evento se traduce a hechos y se inserta
   de forma idempotente.
+- **Reversas:** el Ledger no emite `entry.posted` para una reversa sino `ledger.entry.reversed.v1`,
+  que trae los postings de la reversa (los del original con la dirección invertida). Se proyectan
+  como cualquier asiento, bajo el `reverse_entry_id`, y compensan al original en los saldos.
 - **Lectura (API):** las métricas se calculan en cada consulta; no hay contadores precalculados.
 
 ### Por qué hechos y no contadores
@@ -83,7 +87,7 @@ en el período correcto. Si el header falta o es inválido, se usa el reloj del 
 | Hecho | Origen | Clave natural | Campos |
 |---|---|---|---|
 | `PaymentFact` | `payment.captured.v1` | `payment_id` | `tenant_id`, `currency`, `amount` (bruto), `platform_fee`, `psp_fee`, `payment_method`, `captured_at` |
-| `LedgerMovement` | `ledger.entry.posted.v1`, un hecho por posting | `(entry_id, account_id, direction)` | `tenant_id`, `account_type`, `currency`, `amount` (siempre > 0), `posted_at` |
+| `LedgerMovement` | `ledger.entry.posted.v1` y `ledger.entry.reversed.v1`, un hecho por posting | `(entry_id, account_id, direction)` (en una reversa, `entry_id` = `reverse_entry_id`) | `tenant_id`, `account_type`, `currency`, `amount` (siempre > 0), `posted_at` |
 
 Montos en centavos.
 
@@ -111,7 +115,7 @@ Montos en centavos.
 | Caso de uso | Qué hace |
 |---|---|
 | `ProjectEventsUseCase.ProjectPaymentCaptured` | Valida `payment_id` y `tenant_id` y guarda el `PaymentFact`. |
-| `ProjectEventsUseCase.ProjectEntryPosted` | Valida `entry_id` y `tenant_id`; por cada posting con cuenta, busca el tipo de cuenta en `ledger_accounts` y guarda el `LedgerMovement`. Una cuenta inexistente se proyecta con tipo vacío. |
+| `ProjectEventsUseCase.ProjectEntryPosted` | Valida `entry_id` y `tenant_id`; por cada posting con cuenta, busca el tipo de cuenta en `ledger_accounts` (con el tenant del evento) y guarda el `LedgerMovement`. Una cuenta inexistente se proyecta con tipo vacío. Lo usan los asientos y las reversas. |
 | `GetReportsUseCase.GetVolume` | Valida el rango y delega la serie agregada. |
 | `GetReportsUseCase.GetRevenue` | Valida el rango y delega el resumen por moneda. |
 | `GetReportsUseCase.GetBalances` | Delega los saldos del tenant (sin rango). |
@@ -123,13 +127,15 @@ reintenta completo; los que ya estaban se ignoran por la clave natural.
 
 ## 6. API HTTP
 
-Grupo `protected` (JWT) → `/api/v1/reports`. El tenant sale del token. No hay guard de permiso.
+Grupo `protected` (JWT) → `/api/v1/reports`. El tenant sale del token. Todas las rutas exigen el
+permiso `reports:read` (`RouteGuards.Read`, inyectado desde `cmd/api`; `RegisterRoutes` entra en
+pánico sin él): sin permiso → 403.
 
 | Método | Ruta | Respuesta | Códigos |
 |---|---|---|---|
-| `GET` | `/volume?from=&to=&granularity=day` | `{granularity, points:[VolumePoint]}` | 200 · 400 · 500 |
-| `GET` | `/revenue?from=&to=` | `{revenue:[RevenueSummary]}` | 200 · 400 · 500 |
-| `GET` | `/balances` | `{balances:[TenantBalance]}` | 200 · 500 |
+| `GET` | `/volume?from=&to=&granularity=day` | `{granularity, points:[VolumePoint]}` | 200 · 400 · 401 · 403 · 500 |
+| `GET` | `/revenue?from=&to=` | `{revenue:[RevenueSummary]}` | 200 · 400 · 401 · 403 · 500 |
+| `GET` | `/balances` | `{balances:[TenantBalance]}` | 200 · 401 · 403 · 500 |
 
 - `from` y `to` en RFC3339, opcionales. Rango semiabierto `[from, to)`: períodos contiguos no
   cuentan dos veces un hecho del límite. Sin `from` o sin `to`, ese extremo queda abierto.
@@ -145,7 +151,7 @@ Grupo `protected` (JWT) → `/api/v1/reports`. El tenant sale del token. No hay 
 | Consumer | Stream | Filtro | Proyección |
 |---|---|---|---|
 | `reporting-payment-consumer` | `PAYMENT` | `payment.captured.>` | `payment.captured.v1` → `PaymentFact` |
-| `reporting-ledger-consumer` | `LEDGER` | `ledger.entry.posted.>` | `ledger.entry.posted.v1` → `LedgerMovement` por posting |
+| `reporting-ledger-consumer` | `LEDGER` | `ledger.entry.>` | `ledger.entry.posted.v1` y `ledger.entry.reversed.v1` → `LedgerMovement` por posting |
 
 `MaxDeliver: 5`. Semántica de ack:
 
@@ -154,6 +160,7 @@ Grupo `protected` (JWT) → `/api/v1/reports`. El tenant sale del token. No hay 
 | Proyección OK, o hecho ya existente | ack |
 | Payload ilegible o sin `tenant_id` | ack, sin log |
 | `ErrInvalidFact` (falta el ID) | ack + warn |
+| Reversa sin postings (publicada antes de que el evento los llevara) | ack + warn: no se proyecta |
 | Error de base u otro transitorio | nak → reintento |
 | Otro subject del filtro | ack silencioso |
 
@@ -172,22 +179,21 @@ Migración `000013_reporting_init`:
 | `report_payment_fact` | PK `payment_id` | `(tenant_id, captured_at)` |
 | `report_ledger_movement` | PK `(entry_id, account_id, direction)`; `CHECK direction IN ('debit','credit')` | `(tenant_id, account_type, currency)` |
 
-Ambas tienen RLS por `app.current_tenant` (sin `NULLIF`). Los repositorios y el `AccountReader`
-usan el pool directo, sin fijar la variable (ver §9).
+Ambas tienen RLS por `tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid`
+(`000034`). Cada método de los repositorios y del `AccountReader` corre en una sesión con
+`app.current_tenant` fijado (`withTenant` → `RunWithAppTenant`): las escrituras con el tenant del
+hecho y las consultas con el del token.
 
 ---
 
 ## 9. Seguridad y multi-tenancy
 
 - **Autenticación:** JWT (grupo `protected`). Las API keys no llegan a estas rutas.
-- **Autorización:** ninguna. Auth define el permiso `reports:read` (`ActionReadReports`, que
-  tienen `admin`, `accountant`, `read_only` y `platform_support`) y el scope `reports:read`, pero
-  Reporting no los exige: `operator` también lee.
-- **Aislamiento:** el `WHERE tenant_id = $1` explícito de cada consulta, con el tenant del token.
-  La RLS no participa: el rol de conexión (`cobros`) es superuser y dueño de las tablas.
-- **Con un rol sin `BYPASSRLS`** (verificado en Postgres): el INSERT de la proyección falla con
-  "new row violates row-level security policy", las consultas devuelven vacío y el tipo de cuenta
-  sale vacío porque `ledger_accounts` tampoco es visible.
+- **Autorización:** permiso `reports:read` (`admin`, `accountant`, `read_only`,
+  `platform_support`) o el scope `reports:read` de una API key. `operator` no accede.
+- **Aislamiento:** el `WHERE tenant_id = $1` explícito de cada consulta y la RLS de las tablas del
+  read-model y de `ledger_accounts`. Verificado con un rol sin `BYPASSRLS`: la proyección inserta,
+  el tipo de cuenta se resuelve y un tenant no ve los datos de otro.
 
 ---
 
@@ -195,17 +201,14 @@ usan el pool directo, sin fijar la variable (ver §9).
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Alta | Reversas ignoradas | Una reversa del Ledger publica solo `ledger.entry.reversed.v1` (sin postings, reemplaza al `entry.posted`), que Reporting no consume. Los saldos nunca reflejan las reversas: un asiento revertido sigue sumando. |
-| 2 | Alta | Sin guard de permiso | Las rutas no exigen `reports:read`. El rol `operator`, que no tiene ese permiso en Auth, ve volumen, comisiones y saldos. |
-| 3 | Alta | RLS | Proyecciones, consultas y `AccountReader` no fijan `app.current_tenant`, y las políticas no usan `NULLIF`. Con un rol sin `BYPASSRLS` la proyección falla en cada evento (reintentos hasta agotar `MaxDeliver`) y el dashboard queda vacío. |
-| 4 | Media | Signo del neto | `net = debits - credits`, al revés que el Ledger (`credits - debits`, donde `merchant_balance` positivo = lo que se le debe al comercio). El mismo saldo sale con signo opuesto en `/ledger` y en `/reports/balances`. |
-| 5 | Media | Reembolsos y disputas | `payment.refunded.v1` y `dispute.*` no se proyectan: volumen y revenue siguen contando el bruto y las comisiones de pagos reembolsados o contracargados. |
-| 6 | Media | Sin tenant → 500 | El handler ignora si hay tenant en el contexto; con tenant vacío la consulta falla por UUID inválido y responde 500 en lugar de 401/403. |
-| 7 | Baja | Zona horaria | Los buckets de `day`/`week`/`month` se cortan en UTC; para un comercio en Argentina el "día" empieza a las 21:00. No hay parámetro de zona. |
-| 8 | Baja | Descartes silenciosos | Un payload ilegible o sin tenant se descarta sin log. Una cuenta que no se encuentra se proyecta con `account_type` vacío sin aviso, y su saldo aparece bajo un tipo vacío. |
-| 9 | Baja | Consultas sin tope | Sin `from`/`to` se agrega todo el histórico; con `granularity=day` sobre años, la serie no tiene límite de puntos. |
-| 10 | Baja | Comentarios desactualizados | La migración describe `captured_at`/`posted_at` como "momento de proyección"; hoy son la hora del evento. |
-| 11 | Producto | Alcance | Saldos sin fecha de corte. Sin métricas de payouts, pagos fallidos ni tasa de aprobación. Sin reportes de plataforma ni exportación. |
+| 1 | Media | Signo del neto | `net = debits - credits`, al revés que el saldo del Ledger (`credits - debits`). El mismo saldo sale con signo opuesto en `/ledger` y en `/reports/balances`. No se puede alinear solo de este lado: la convención del propio Ledger es inconsistente (los consumers debitan `merchant_balance` cuando el comercio gana, ver [LEDGER.md §10.3](LEDGER.md)), y hoy el neto de Reporting es el que da positivo para el comercio. Se resuelve junto con ese punto. |
+| 2 | Media | Reembolsos y disputas | `payment.refunded.v1` y `dispute.*` no se proyectan: volumen y revenue siguen contando el bruto y las comisiones de pagos reembolsados o contracargados. |
+| 3 | Media | Sin tenant → 500 | El handler ignora si hay tenant en el contexto; con tenant vacío la consulta falla por UUID inválido y responde 500 en lugar de 401/403. |
+| 4 | Baja | Zona horaria | Los buckets de `day`/`week`/`month` se cortan en UTC; para un comercio en Argentina el "día" empieza a las 21:00. No hay parámetro de zona. |
+| 5 | Baja | Descartes silenciosos | Un payload ilegible o sin tenant se descarta sin log. Una cuenta que no se encuentra se proyecta con `account_type` vacío sin aviso, y su saldo aparece bajo un tipo vacío. |
+| 6 | Baja | Consultas sin tope | Sin `from`/`to` se agrega todo el histórico; con `granularity=day` sobre años, la serie no tiene límite de puntos. |
+| 7 | Baja | Comentarios desactualizados | La migración describe `captured_at`/`posted_at` como "momento de proyección"; hoy son la hora del evento. |
+| 8 | Producto | Alcance | Saldos sin fecha de corte. Sin métricas de payouts, pagos fallidos ni tasa de aprobación. Sin reportes de plataforma ni exportación. |
 
 ---
 
@@ -216,12 +219,14 @@ usan el pool directo, sin fijar la variable (ver §9).
 | Paquete | Enfoque |
 |---|---|
 | `domain` | `ParseGranularity` (vacío → `day`, valores inválidos), contrato JSON de las vistas, errores. |
-| `application` | Proyección con fakes: validación de IDs, fecha del hecho desde el evento o el reloj, tipo de cuenta por posting, postings sin cuenta, errores del writer y del lector; consultas con validación de rango. |
-| `http` | Parseo de `from`/`to` y `granularity`, 400 por formato o rango, 500 sin detalle interno. |
-| `nats` | Traducción de cada payload, header `occurred-at`, ack/nak según el error, subjects ajenos. |
-| `postgres` | pgxmock: SQL idempotente de cada inserción, armado del `WHERE` con rango semiabierto, agregaciones y cálculo del neto. |
+| `application` | Proyección con fakes: validación de IDs, fecha del hecho desde el evento o el reloj, tipo de cuenta por posting con el tenant del evento, postings sin cuenta, errores del writer y del lector; consultas con validación de rango. |
+| `http` | Parseo de `from`/`to` y `granularity`, 400 por formato o rango, 500 sin detalle interno, guard en cada ruta y pánico sin guard. |
+| `nats` | Traducción de cada payload (incluida la reversa bajo `reverse_entry_id`), header `occurred-at`, ack/nak según el error, reversa sin postings, subjects ajenos. |
+| `postgres` | pgxmock: SQL idempotente de cada inserción y cada consulta dentro de la sesión RLS, error al fijar la sesión, armado del `WHERE` con rango semiabierto, agregaciones y cálculo del neto. |
 
-No hay tests contra una base real.
+La RLS se verificó además contra Postgres con un rol sin `BYPASSRLS`: proyección de un pago (con
+re-entrega), un asiento y su reversa, tipo de cuenta resuelto, saldos compensados y aislamiento
+entre tenants. Esa prueba no está automatizada.
 
 ---
 
@@ -238,12 +243,14 @@ context/reporting/
 │   ├── project_events.go   # ProjectEventsUseCase (+ Clock)
 │   └── get_reports.go      # GetReportsUseCase
 └── infrastructure/adapters/
-    ├── inbound/http/handler.go          # 3 endpoints + RegisterRoutes
-    ├── inbound/nats/event_consumer.go   # 2 consumers, payloads, ack/nak
+    ├── inbound/http/handler.go          # 3 endpoints, RouteGuards, RegisterRoutes
+    ├── inbound/nats/event_consumer.go   # 2 consumers (pagos; asientos y reversas), payloads, ack/nak
     └── outbound/postgres/
         ├── projection_repo.go           # inserciones idempotentes
         ├── report_repo.go               # agregaciones (Volume, Revenue, Balances)
-        └── account_reader.go            # tipo de cuenta desde ledger_accounts
+        ├── account_reader.go            # tipo de cuenta desde ledger_accounts
+        └── rls.go                       # sesión RLS (withTenant)
 ```
 
-Wiring: `cmd/api/main.go` (consultas y rutas) y `cmd/worker/main.go` (proyección y consumers).
+Wiring: `cmd/api/main.go` (consultas, guard `reports:read` y rutas) y `cmd/worker/main.go`
+(proyección y consumers).
