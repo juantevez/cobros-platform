@@ -140,8 +140,8 @@ func TestPostEntry_ValidationErrors(t *testing.T) {
 
 	t.Run("missing idempotency key", func(t *testing.T) {
 		_, err := uc.Execute(context.Background(), PostEntryCmd{TenantID: tenant, Lines: f.balancedLines()})
-		if err == nil {
-			t.Fatal("expected error for missing idempotency key")
+		if !errors.Is(err, domain.ErrIdempotencyKeyRequired) {
+			t.Fatalf("expected ErrIdempotencyKeyRequired, got %v", err)
 		}
 	})
 	t.Run("fewer than 2 lines", func(t *testing.T) {

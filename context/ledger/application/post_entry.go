@@ -63,7 +63,7 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 	// ── 1. Validar inputs ────────────────────────────────────────────────────
 
 	if cmd.IdempotencyKey == "" {
-		return PostEntryResult{}, fmt.Errorf("idempotency key is required")
+		return PostEntryResult{}, domain.ErrIdempotencyKeyRequired
 	}
 	if len(cmd.Lines) < 2 {
 		return PostEntryResult{}, domain.ErrNotEnoughPostings

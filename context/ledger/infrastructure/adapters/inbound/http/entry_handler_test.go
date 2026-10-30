@@ -162,3 +162,27 @@ func TestPostEntry_CurrencyDifferentFromAccount422(t *testing.T) {
 		t.Fatalf("status = %d, want 422", rec.Code)
 	}
 }
+
+// Un ID que no es UUID es un error del cliente, no un 500.
+func TestInvalidIDs400(t *testing.T) {
+	env := newTestEnv(t)
+	lines := env.balancedLines()
+	lines[0]["account_id"] = "not-a-uuid"
+
+	cases := []struct {
+		name, method, path string
+		body               any
+	}{
+		{"post entry", http.MethodPost, "/api/v1/ledger/entries", map[string]any{"idempotency_key": "k", "lines": lines}},
+		{"reverse", http.MethodPost, "/api/v1/ledger/entries/not-a-uuid/reverse", nil},
+		{"balance", http.MethodGet, "/api/v1/ledger/accounts/not-a-uuid/balance", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := env.do(tc.method, tc.path, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}

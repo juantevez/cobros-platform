@@ -10,7 +10,7 @@ func TestParseIDs(t *testing.T) {
 	if _, err := ParseAccountID(acc); err != nil {
 		t.Errorf("valid account id rejected: %v", err)
 	}
-	if _, err := ParseAccountID("nope"); err == nil {
+	if _, err := ParseAccountID("nope"); !errors.Is(err, ErrInvalidID) {
 		t.Error("expected error for invalid account id")
 	}
 
@@ -18,14 +18,14 @@ func TestParseIDs(t *testing.T) {
 	if _, err := ParseEntryID(ent); err != nil {
 		t.Errorf("valid entry id rejected: %v", err)
 	}
-	if _, err := ParseEntryID("nope"); err == nil {
+	if _, err := ParseEntryID("nope"); !errors.Is(err, ErrInvalidID) {
 		t.Error("expected error for invalid entry id")
 	}
 
 	if _, err := ParseTenantID(NewAccountID().String()); err != nil {
 		t.Errorf("valid tenant id rejected: %v", err)
 	}
-	if _, err := ParseTenantID("nope"); err == nil {
+	if _, err := ParseTenantID("nope"); !errors.Is(err, ErrInvalidID) {
 		t.Error("expected error for invalid tenant id")
 	}
 }
