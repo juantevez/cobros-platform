@@ -31,6 +31,14 @@ func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error {
 }
 func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) { return nil, nil }
 func (r *fakeRepo) LockChain(ctx context.Context) error                         { return nil }
+func (r *fakeRepo) ExistsByEventID(ctx context.Context, id string) (bool, error) {
+	for _, e := range r.saved {
+		if e.EventID() == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (r *fakeRepo) ListRecent(ctx context.Context, limit int) ([]*domain.AuditLogEntry, error) {
 	return nil, nil
 }
@@ -286,15 +294,79 @@ func TestHandle(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown event is acked and skipped", func(t *testing.T) {
+	t.Run("unknown event is recorded as unmapped, never dropped", func(t *testing.T) {
 		repo := &fakeRepo{}
 		c, _ := newConsumer(repo)
-		msg := &eventbus.Message{Subject: "payment.captured.v1", Payload: []byte(`{}`)}
+		msg := &eventbus.Message{
+			ID: "ev-x", Subject: "payment.captured.v1",
+			Payload: []byte(`{"tenant_id":"ten-1","payment_id":"p-1"}`),
+		}
 		if err := c.handle(context.Background(), msg); err != nil {
 			t.Fatalf("unknown event should be acked (nil), got %v", err)
 		}
-		if len(repo.saved) != 0 {
-			t.Error("nothing should be recorded for unknown event")
+		if len(repo.saved) != 1 {
+			t.Fatalf("expected the event to be recorded, got %d entries", len(repo.saved))
+		}
+		e := repo.saved[0]
+		if e.Action() != domain.ActionUnmappedEvent || e.ResourceType() != domain.ResourceEvent ||
+			e.ResourceID() != "ev-x" || e.TenantID() != "ten-1" {
+			t.Errorf("unexpected entry: %v", e)
+		}
+		if e.Metadata()["event_subject"] != "payment.captured.v1" || e.Metadata()["reason"] == "" {
+			t.Errorf("metadata = %+v", e.Metadata())
+		}
+	})
+
+	t.Run("invalid payload is recorded as unmapped", func(t *testing.T) {
+		repo := &fakeRepo{}
+		c, _ := newConsumer(repo)
+		msg := &eventbus.Message{ID: "ev-y", Subject: "auth.tenant.created.v1", Payload: []byte(`{bad`)}
+		if err := c.handle(context.Background(), msg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(repo.saved) != 1 || repo.saved[0].Action() != domain.ActionUnmappedEvent {
+			t.Fatalf("expected an unmapped entry, got %+v", repo.saved)
+		}
+	})
+
+	t.Run("redelivery of the same event is recorded once", func(t *testing.T) {
+		repo := &fakeRepo{}
+		c, _ := newConsumer(repo)
+		msg := &eventbus.Message{ID: "ev-1", Subject: "auth.tenant.created.v1", Payload: []byte(`{"tenant_id":"ten-1"}`)}
+		for i := 0; i < 3; i++ {
+			if err := c.handle(context.Background(), msg); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+		if len(repo.saved) != 1 || repo.saved[0].EventID() != "ev-1" {
+			t.Fatalf("expected a single entry for ev-1, got %d", len(repo.saved))
+		}
+	})
+
+	t.Run("occurred-at header becomes the event time", func(t *testing.T) {
+		repo := &fakeRepo{}
+		c, _ := newConsumer(repo)
+		msg := &eventbus.Message{
+			ID: "ev-2", Subject: "auth.tenant.created.v1", Payload: []byte(`{"tenant_id":"ten-1"}`),
+			Headers: map[string]string{eventbus.HeaderOccurredAt: "2026-07-06T11:59:30.123456789Z"},
+		}
+		_ = c.handle(context.Background(), msg)
+		e := repo.saved[0]
+		want := time.Date(2026, 7, 6, 11, 59, 30, 123456000, time.UTC) // truncado a µs
+		if !e.OccurredAt().Equal(want) {
+			t.Errorf("occurredAt = %v, want %v", e.OccurredAt(), want)
+		}
+		if !e.CreatedAt().Equal(fixedClock{}.Now()) {
+			t.Errorf("createdAt = %v, want registration time", e.CreatedAt())
+		}
+	})
+
+	t.Run("without occurred-at header the event time is the registration time", func(t *testing.T) {
+		repo := &fakeRepo{}
+		c, _ := newConsumer(repo)
+		_ = c.handle(context.Background(), &eventbus.Message{ID: "ev-3", Subject: "auth.tenant.created.v1", Payload: []byte(`{}`)})
+		if !repo.saved[0].OccurredAt().Equal(repo.saved[0].CreatedAt()) {
+			t.Errorf("occurredAt = %v, createdAt = %v", repo.saved[0].OccurredAt(), repo.saved[0].CreatedAt())
 		}
 	})
 

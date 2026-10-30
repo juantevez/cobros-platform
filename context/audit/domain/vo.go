@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
 
 // Action es la operación que se audita, con convención <contexto>.<hecho>.
 // Coincide con el EventType de los eventos de dominio cuando se origina en uno.
@@ -29,9 +32,19 @@ const (
 
 func (a Action) String() string { return string(a) }
 
+// ActionUnmappedEvent registra un evento que el catálogo de Audit no conoce
+// (o cuyo payload no se pudo leer): se audita igual, nunca se descarta.
+const ActionUnmappedEvent Action = "audit.unmapped_event"
+
+// actionFormat: dos o más segmentos en minúscula separados por punto
+// (auth.tenant.created, compliance.alert.review_proposed).
+var actionFormat = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
+
+// ParseAction valida el formato <contexto>.<hecho>. No exige que la acción
+// esté en un catálogo cerrado: el catálogo vive en el mapeo de eventos.
 func ParseAction(s string) (Action, error) {
-	if s == "" {
-		return "", ErrInvalidAction
+	if !actionFormat.MatchString(s) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidAction, s)
 	}
 	return Action(s), nil
 }
@@ -54,6 +67,7 @@ const (
 	ResourceWebhookEndpoint   ResourceType = "webhook_endpoint"
 	ResourceAMLAlert          ResourceType = "aml_alert"
 	ResourceReconciliationRun ResourceType = "reconciliation_run"
+	ResourceEvent             ResourceType = "event" // evento sin mapeo (resource_id = event_id)
 )
 
 func ParseResourceType(s string) (ResourceType, error) {
@@ -62,7 +76,7 @@ func ParseResourceType(s string) (ResourceType, error) {
 	case ResourceTenant, ResourceUser, ResourceApiKey, ResourceEntry, ResourceAccount,
 		ResourceApplication, ResourcePayment, ResourcePayout, ResourceBillingPlan,
 		ResourceTenantPlan, ResourceDispute, ResourceWebhookEndpoint, ResourceAMLAlert,
-		ResourceReconciliationRun:
+		ResourceReconciliationRun, ResourceEvent:
 		return rt, nil
 	}
 	return "", fmt.Errorf("%w: %q", ErrInvalidResourceType, s)

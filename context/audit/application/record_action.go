@@ -51,6 +51,19 @@ func (uc *RecordActionUseCase) Execute(ctx context.Context, cmd RecordActionCmd)
 			return fmt.Errorf("record action: lock chain: %w", err)
 		}
 
+		// Idempotencia: una re-entrega del mismo evento (ack perdido después
+		// del INSERT) no crea una segunda entrada. Con el lock tomado, el
+		// chequeo y el INSERT no compiten con otro registro.
+		if cmd.EventID != "" {
+			exists, err := uc.repo.ExistsByEventID(ctx, cmd.EventID)
+			if err != nil {
+				return fmt.Errorf("record action: check event: %w", err)
+			}
+			if exists {
+				return nil
+			}
+		}
+
 		// Último hash de la cadena (con el lock tomado). Tabla vacía → prevHash = nil.
 		last, err := uc.repo.FindLast(ctx)
 		if err != nil {
@@ -61,18 +74,17 @@ func (uc *RecordActionUseCase) Execute(ctx context.Context, cmd RecordActionCmd)
 			prevHash = last.Hash()
 		}
 
-		entry, err := domain.NewAuditLogEntry(
-			cmd.TenantID,
-			cmd.Actor,
-			action,
-			resourceType,
-			cmd.ResourceID,
-			cmd.Metadata,
-			cmd.CorrelationID,
-			prevHash,
-			uc.clock.Now(),
-			uc.hasher.Compute,
-		)
+		entry, err := domain.NewAuditLogEntry(domain.EntryInput{
+			TenantID:      cmd.TenantID,
+			Actor:         cmd.Actor,
+			Action:        action,
+			ResourceType:  resourceType,
+			ResourceID:    cmd.ResourceID,
+			Metadata:      cmd.Metadata,
+			CorrelationID: cmd.CorrelationID,
+			EventID:       cmd.EventID,
+			OccurredAt:    cmd.OccurredAt,
+		}, prevHash, uc.clock.Now(), uc.hasher.Compute)
 		if err != nil {
 			return fmt.Errorf("record action: build entry: %w", err)
 		}

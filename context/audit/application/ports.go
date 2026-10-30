@@ -24,6 +24,10 @@ type AuditLogRepository interface {
 	// Save persiste una nueva entrada. Asigna el ID secuencial (BIGSERIAL).
 	Save(ctx context.Context, entry *domain.AuditLogEntry) error
 
+	// ExistsByEventID indica si ya se registró una entrada para ese evento
+	// (re-entregas de JetStream). Debe llamarse con LockChain tomado.
+	ExistsByEventID(ctx context.Context, eventID string) (bool, error)
+
 	// FindLast retorna el último registro insertado (para obtener su hash).
 	// Retorna nil, nil si la tabla está vacía.
 	FindLast(ctx context.Context) (*domain.AuditLogEntry, error)

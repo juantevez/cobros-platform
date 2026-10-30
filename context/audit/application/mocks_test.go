@@ -27,6 +27,7 @@ type fakeRepo struct {
 	tenantErr   error
 	fromIDErr   error
 	lockErr     error
+	existsErr   error
 
 	// capturados para aserciones
 	calls        []string // orden de LockChain / FindLast / Save
@@ -38,6 +39,19 @@ type fakeRepo struct {
 func (r *fakeRepo) LockChain(ctx context.Context) error {
 	r.calls = append(r.calls, "lock:"+txState(ctx))
 	return r.lockErr
+}
+
+func (r *fakeRepo) ExistsByEventID(ctx context.Context, eventID string) (bool, error) {
+	r.calls = append(r.calls, "exists:"+txState(ctx))
+	if r.existsErr != nil {
+		return false, r.existsErr
+	}
+	for _, e := range r.saved {
+		if e.EventID() == eventID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *fakeRepo) Save(ctx context.Context, entry *domain.AuditLogEntry) error {
@@ -125,9 +139,6 @@ func newClock() fixedClock    { return fixedClock{t: testNow} }
 
 // buildEntry construye una entrada real encadenada al prevHash dado.
 func buildEntry(tenantID string, action domain.Action, rt domain.ResourceType, resourceID string, prevHash []byte) *domain.AuditLogEntry {
-	e, _ := domain.NewAuditLogEntry(
-		tenantID, "actor", action, rt, resourceID,
-		nil, "", prevHash, testNow, newHasher().Compute,
-	)
+	e, _ := domain.NewAuditLogEntry(domain.EntryInput{TenantID: tenantID, Actor: "actor", Action: action, ResourceType: rt, ResourceID: resourceID}, prevHash, testNow, newHasher().Compute)
 	return e
 }

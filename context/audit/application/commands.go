@@ -1,5 +1,7 @@
 package application
 
+import "time"
+
 // RecordActionCmd es el comando para registrar una acción en el log.
 type RecordActionCmd struct {
 	TenantID      string            // vacío para acciones de plataforma
@@ -9,6 +11,8 @@ type RecordActionCmd struct {
 	ResourceID    string            // UUID del recurso afectado
 	Metadata      map[string]string // contexto adicional
 	CorrelationID string            // para trazar con los logs de la app
+	EventID       string            // ID del evento de dominio (idempotencia); vacío si no viene de un evento
+	OccurredAt    time.Time         // cuándo ocurrió el hecho; cero = momento del registro
 }
 
 // VerifyChainQuery solicita verificación de integridad del hash chain.
@@ -42,6 +46,8 @@ type LogEntryView struct {
 	ResourceID    string            `json:"resource_id,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	CorrelationID string            `json:"correlation_id,omitempty"`
+	EventID       string            `json:"event_id,omitempty"`
+	OccurredAt    string            `json:"occurred_at"`
 	PrevHash      string            `json:"prev_hash,omitempty"`
 	Hash          string            `json:"hash"`
 	CreatedAt     string            `json:"created_at"`

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/audit/domain"
 )
@@ -162,6 +163,53 @@ func TestRecordActionUseCase_Execute(t *testing.T) {
 		if err := uc.Execute(context.Background(), RecordActionCmd{
 			Action: "auth.tenant.created", ResourceType: "tenant", ResourceID: "t1",
 		}); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("already recorded event is a no-op (checked under the lock)", func(t *testing.T) {
+		repo := &fakeRepo{}
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
+		cmd := RecordActionCmd{Action: "auth.tenant.created", ResourceType: "tenant", ResourceID: "t1", EventID: "ev-1"}
+		for i := 0; i < 2; i++ {
+			if err := uc.Execute(context.Background(), cmd); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+		if len(repo.saved) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(repo.saved))
+		}
+		want := "lock:tx,exists:tx,find:tx,save:tx,lock:tx,exists:tx"
+		if got := strings.Join(repo.calls, ","); got != want {
+			t.Errorf("calls = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("actions without event id skip the idempotency check", func(t *testing.T) {
+		repo := &fakeRepo{}
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
+		_ = uc.Execute(context.Background(), RecordActionCmd{Action: "auth.tenant.created", ResourceType: "tenant"})
+		if strings.Contains(strings.Join(repo.calls, ","), "exists") {
+			t.Errorf("calls = %v", repo.calls)
+		}
+	})
+
+	t.Run("event time is kept apart from the registration time", func(t *testing.T) {
+		repo := &fakeRepo{}
+		uc := NewRecordActionUseCase(repo, newHasher(), newClock(), fakeTx{})
+		occurred := testNow.Add(-2 * time.Hour)
+		_ = uc.Execute(context.Background(), RecordActionCmd{
+			Action: "auth.tenant.created", ResourceType: "tenant", EventID: "ev-9", OccurredAt: occurred,
+		})
+		e := repo.saved[0]
+		if !e.OccurredAt().Equal(occurred) || !e.CreatedAt().Equal(testNow) || e.EventID() != "ev-9" {
+			t.Errorf("occurred=%v created=%v event=%q", e.OccurredAt(), e.CreatedAt(), e.EventID())
+		}
+	})
+
+	t.Run("malformed action rejected", func(t *testing.T) {
+		uc := NewRecordActionUseCase(&fakeRepo{}, newHasher(), newClock(), fakeTx{})
+		if err := uc.Execute(context.Background(), RecordActionCmd{Action: "Not Valid", ResourceType: "tenant"}); err == nil {
 			t.Fatal("expected error")
 		}
 	})

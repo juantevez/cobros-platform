@@ -18,7 +18,7 @@ import (
 
 var repoCols = []string{
 	"id", "tenant_id", "actor", "action", "resource_type", "resource_id",
-	"metadata", "correlation_id", "prev_hash", "hash", "created_at",
+	"metadata", "correlation_id", "event_id", "occurred_at", "prev_hash", "hash", "created_at",
 }
 
 func sha(p string) []byte { s := sha256.Sum256([]byte(p)); return s[:] }
@@ -38,14 +38,13 @@ func addRow(rows *pgxmock.Rows, id int64, tenantID *string, resourceID, correlat
 	createdAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	return rows.AddRow(
 		id, tenantID, "actor-1", "auth.user.login", "user", resourceID,
-		[]byte(`{"ip":"10.0.0.1"}`), correlationID, prevHash, []byte{0xCC, 0xDD}, createdAt,
+		[]byte(`{"ip":"10.0.0.1"}`), correlationID, strp("ev-1"), createdAt, prevHash, []byte{0xCC, 0xDD}, createdAt,
 	)
 }
 
 func TestRepo_Save(t *testing.T) {
 	createdAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
-	entry, _ := domain.NewAuditLogEntry("tenant-1", "actor-1", domain.ActionLogin,
-		domain.ResourceUser, "user-1", map[string]string{"ip": "10.0.0.1"}, "corr-1", nil, createdAt, sha)
+	entry, _ := domain.NewAuditLogEntry(domain.EntryInput{TenantID: "tenant-1", Actor: "actor-1", Action: domain.ActionLogin, ResourceType: domain.ResourceUser, ResourceID: "user-1", Metadata: map[string]string{"ip": "10.0.0.1"}, CorrelationID: "corr-1", EventID: "ev-1", OccurredAt: createdAt.Add(-time.Minute)}, nil, createdAt, sha)
 
 	t.Run("inserts with mapped args", func(t *testing.T) {
 		mock := newMock(t)
@@ -58,12 +57,14 @@ func TestRepo_Save(t *testing.T) {
 				"actor-1", // actor
 				"auth.user.login",
 				"user",
-				pgxmock.AnyArg(), // resource_id (*string)
-				pgxmock.AnyArg(), // metadata json
-				pgxmock.AnyArg(), // correlation_id (*string)
-				pgxmock.AnyArg(), // prev_hash
-				pgxmock.AnyArg(), // hash
-				pgxmock.AnyArg(), // created_at
+				pgxmock.AnyArg(),            // resource_id (*string)
+				pgxmock.AnyArg(),            // metadata json
+				pgxmock.AnyArg(),            // correlation_id (*string)
+				strp("ev-1"),                // event_id
+				createdAt.Add(-time.Minute), // occurred_at
+				pgxmock.AnyArg(),            // prev_hash
+				pgxmock.AnyArg(),            // hash
+				pgxmock.AnyArg(),            // created_at
 			).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
@@ -78,8 +79,7 @@ func TestRepo_Save(t *testing.T) {
 	t.Run("empty tenant maps to nil arg", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewAuditLogRepository(mock)
-		e, _ := domain.NewAuditLogEntry("", "system", domain.ActionTenantCreated,
-			domain.ResourceTenant, "", nil, "", nil, createdAt, sha)
+		e, _ := domain.NewAuditLogEntry(domain.EntryInput{Actor: "system", Action: domain.ActionTenantCreated, ResourceType: domain.ResourceTenant}, nil, createdAt, sha)
 
 		mock.ExpectExec("INSERT INTO audit_log").
 			WithArgs(
@@ -90,6 +90,8 @@ func TestRepo_Save(t *testing.T) {
 				(*string)(nil),   // resource_id nil (vacío)
 				pgxmock.AnyArg(), // metadata
 				(*string)(nil),   // correlation_id nil
+				(*string)(nil),   // event_id nil (acción sin evento)
+				createdAt,        // occurred_at = created_at por defecto
 				[]byte(nil),      // prev_hash nil (genesis)
 				pgxmock.AnyArg(), // hash
 				pgxmock.AnyArg(), // created_at
@@ -135,6 +137,23 @@ func TestRepo_LockChain(t *testing.T) {
 			t.Fatal("expected error")
 		}
 	})
+}
+
+func TestRepo_ExistsByEventID(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		mock := newMock(t)
+		mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM audit_log WHERE event_id = \$1\)`).
+			WithArgs("ev-1").WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(want))
+		got, err := NewAuditLogRepository(mock).ExistsByEventID(context.Background(), "ev-1")
+		if err != nil || got != want {
+			t.Errorf("got %v, %v; want %v", got, err, want)
+		}
+	}
+	mock := newMock(t)
+	mock.ExpectQuery("SELECT EXISTS").WillReturnError(errors.New("boom"))
+	if _, err := NewAuditLogRepository(mock).ExistsByEventID(context.Background(), "ev-1"); err == nil {
+		t.Error("expected error")
+	}
 }
 
 func TestRepo_FindLast(t *testing.T) {
@@ -218,7 +237,7 @@ func TestRepo_ListRecent(t *testing.T) {
 		// Fila con metadata JSON inválido: scanEntry falla dentro de scanEntries.
 		rows := pgxmock.NewRows(repoCols).AddRow(
 			int64(1), (*string)(nil), "actor", "auth.user.login", "user", (*string)(nil),
-			[]byte(`{bad`), (*string)(nil), []byte(nil), []byte{0x01}, time.Now(),
+			[]byte(`{bad`), (*string)(nil), (*string)(nil), time.Now(), []byte(nil), []byte{0x01}, time.Now(),
 		)
 		mock.ExpectQuery("ORDER BY id DESC").WithArgs(50).WillReturnRows(rows)
 

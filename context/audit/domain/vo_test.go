@@ -16,20 +16,19 @@ func TestParseAction(t *testing.T) {
 		}
 	})
 
-	t.Run("accepts arbitrary non-empty string", func(t *testing.T) {
-		a, err := ParseAction("something.custom")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if a.String() != "something.custom" {
-			t.Errorf("got %q", a.String())
+	t.Run("accepts any well-formed context.fact", func(t *testing.T) {
+		for _, ok := range []string{"something.custom", "compliance.alert.review_proposed", "audit.unmapped_event", "a1.b2"} {
+			if _, err := ParseAction(ok); err != nil {
+				t.Errorf("%q rejected: %v", ok, err)
+			}
 		}
 	})
 
-	t.Run("empty rejected", func(t *testing.T) {
-		_, err := ParseAction("")
-		if !errors.Is(err, ErrInvalidAction) {
-			t.Fatalf("expected ErrInvalidAction, got %v", err)
+	t.Run("malformed rejected", func(t *testing.T) {
+		for _, bad := range []string{"", "single", "Auth.Tenant", "auth..created", ".auth", "auth.", "auth.tenant created", "auth.tenant.created.v1 "} {
+			if _, err := ParseAction(bad); !errors.Is(err, ErrInvalidAction) {
+				t.Errorf("%q: expected ErrInvalidAction, got %v", bad, err)
+			}
 		}
 	})
 }

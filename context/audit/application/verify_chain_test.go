@@ -75,10 +75,7 @@ func TestVerifyChainUseCase_Execute(t *testing.T) {
 		chain := validChain(3)
 		// Reconstituir la entrada del medio con un resourceID distinto al que
 		// generó su hash: VerifyHash debe fallar.
-		bad := domain.ReconstituteAuditLogEntry(
-			2, "t", "actor", domain.ActionLogin, domain.ResourceUser, "TAMPERED",
-			nil, "", chain[1].PrevHash(), chain[1].Hash(), testNow,
-		)
+		bad := domain.ReconstituteAuditLogEntry(domain.EntrySnapshot{ID: 2, TenantID: "t", Actor: "actor", Action: domain.ActionLogin, ResourceType: domain.ResourceUser, ResourceID: "TAMPERED", PrevHash: chain[1].PrevHash(), Hash: chain[1].Hash(), CreatedAt: testNow})
 		chain[1] = bad
 		repo := &fakeRepo{fromID: chain}
 		uc := NewVerifyChainUseCase(repo, newHasher())

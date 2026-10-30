@@ -57,8 +57,8 @@ func (r *pgAuditLogRepository) Save(ctx context.Context, entry *domain.AuditLogE
 	_, err = pkgpostgres.ConnFromContext(ctx, r.pool).Exec(ctx, `
 		INSERT INTO audit_log
 			(tenant_id, actor, action, resource_type, resource_id,
-			 metadata, correlation_id, prev_hash, hash, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+			 metadata, correlation_id, event_id, occurred_at, prev_hash, hash, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		tenantID,
 		entry.Actor(),
 		entry.Action().String(),
@@ -66,6 +66,8 @@ func (r *pgAuditLogRepository) Save(ctx context.Context, entry *domain.AuditLogE
 		nullableStr(entry.ResourceID()),
 		metadata,
 		nullableStr(entry.CorrelationID()),
+		nullableStr(entry.EventID()),
+		entry.OccurredAt(),
 		nullableBytes(entry.PrevHash()),
 		entry.Hash(),
 		entry.CreatedAt(),
@@ -90,12 +92,24 @@ func (r *pgAuditLogRepository) LockChain(ctx context.Context) error {
 	return nil
 }
 
+// ExistsByEventID indica si el evento ya tiene entrada (idempotencia ante
+// re-entregas). Corre en la tx del contexto, después de LockChain.
+func (r *pgAuditLogRepository) ExistsByEventID(ctx context.Context, eventID string) (bool, error) {
+	var exists bool
+	if err := pkgpostgres.ConnFromContext(ctx, r.pool).QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM audit_log WHERE event_id = $1)`, eventID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("audit repo: exists by event id: %w", err)
+	}
+	return exists, nil
+}
+
 // FindLast retorna el último registro insertado para encadenar el hash.
 // La serialización la da LockChain (tomado antes, en la misma tx).
 func (r *pgAuditLogRepository) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) {
 	row := pkgpostgres.ConnFromContext(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, tenant_id, actor, action, resource_type, resource_id,
-		       metadata, correlation_id, prev_hash, hash, created_at
+		       metadata, correlation_id, event_id, occurred_at, prev_hash, hash, created_at
 		FROM audit_log
 		ORDER BY id DESC
 		LIMIT 1`)
@@ -113,7 +127,7 @@ func (r *pgAuditLogRepository) FindLast(ctx context.Context) (*domain.AuditLogEn
 func (r *pgAuditLogRepository) ListRecent(ctx context.Context, limit int) ([]*domain.AuditLogEntry, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, tenant_id, actor, action, resource_type, resource_id,
-		       metadata, correlation_id, prev_hash, hash, created_at
+		       metadata, correlation_id, event_id, occurred_at, prev_hash, hash, created_at
 		FROM audit_log
 		ORDER BY id DESC
 		LIMIT $1`, limit)
@@ -127,7 +141,7 @@ func (r *pgAuditLogRepository) ListRecent(ctx context.Context, limit int) ([]*do
 func (r *pgAuditLogRepository) ListByTenant(ctx context.Context, tenantID string, limit int) ([]*domain.AuditLogEntry, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, tenant_id, actor, action, resource_type, resource_id,
-		       metadata, correlation_id, prev_hash, hash, created_at
+		       metadata, correlation_id, event_id, occurred_at, prev_hash, hash, created_at
 		FROM audit_log
 		WHERE tenant_id = $1
 		ORDER BY id DESC
@@ -142,7 +156,7 @@ func (r *pgAuditLogRepository) ListByTenant(ctx context.Context, tenantID string
 func (r *pgAuditLogRepository) ListFromID(ctx context.Context, fromID int64, limit int) ([]*domain.AuditLogEntry, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, tenant_id, actor, action, resource_type, resource_id,
-		       metadata, correlation_id, prev_hash, hash, created_at
+		       metadata, correlation_id, event_id, occurred_at, prev_hash, hash, created_at
 		FROM audit_log
 		WHERE id >= $1
 		ORDER BY id ASC
@@ -158,17 +172,17 @@ func (r *pgAuditLogRepository) ListFromID(ctx context.Context, fromID int64, lim
 
 func scanEntry(row pgx.Row) (*domain.AuditLogEntry, error) {
 	var (
-		id                                  int64
-		tenantID, resourceID, correlationID *string
-		actor, action, resourceType         string
-		metadataJSON                        []byte
-		prevHash, hash                      []byte
-		createdAt                           time.Time
+		id                                           int64
+		tenantID, resourceID, correlationID, eventID *string
+		actor, action, resourceType                  string
+		metadataJSON                                 []byte
+		prevHash, hash                               []byte
+		occurredAt, createdAt                        time.Time
 	)
 
 	if err := row.Scan(
 		&id, &tenantID, &actor, &action, &resourceType, &resourceID,
-		&metadataJSON, &correlationID, &prevHash, &hash, &createdAt,
+		&metadataJSON, &correlationID, &eventID, &occurredAt, &prevHash, &hash, &createdAt,
 	); err != nil {
 		return nil, err
 	}
@@ -180,22 +194,23 @@ func scanEntry(row pgx.Row) (*domain.AuditLogEntry, error) {
 		}
 	}
 
-	act, _ := domain.ParseAction(action)
-	rt, _ := domain.ParseResourceType(resourceType)
-
-	return domain.ReconstituteAuditLogEntry(
-		id,
-		deref(tenantID),
-		actor,
-		act,
-		rt,
-		deref(resourceID),
-		metadata,
-		deref(correlationID),
-		prevHash,
-		hash,
-		createdAt.UTC(),
-	), nil
+	// Se reconstituye el valor tal cual está guardado (sin validar contra el
+	// catálogo): si una fila fue alterada, VerifyHash debe verla como está.
+	return domain.ReconstituteAuditLogEntry(domain.EntrySnapshot{
+		ID:            id,
+		TenantID:      deref(tenantID),
+		Actor:         actor,
+		Action:        domain.Action(action),
+		ResourceType:  domain.ResourceType(resourceType),
+		ResourceID:    deref(resourceID),
+		Metadata:      metadata,
+		CorrelationID: deref(correlationID),
+		EventID:       deref(eventID),
+		OccurredAt:    occurredAt.UTC(),
+		PrevHash:      prevHash,
+		Hash:          hash,
+		CreatedAt:     createdAt.UTC(),
+	}), nil
 }
 
 func scanEntries(rows pgx.Rows) ([]*domain.AuditLogEntry, error) {

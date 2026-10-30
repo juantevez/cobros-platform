@@ -33,9 +33,10 @@ type fakeRepo struct {
 	gotTenantID string
 }
 
-func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error     { return nil }
-func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) { return nil, nil }
-func (r *fakeRepo) LockChain(ctx context.Context) error                         { return nil }
+func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error      { return nil }
+func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error)  { return nil, nil }
+func (r *fakeRepo) LockChain(ctx context.Context) error                          { return nil }
+func (r *fakeRepo) ExistsByEventID(ctx context.Context, id string) (bool, error) { return false, nil }
 func (r *fakeRepo) ListRecent(ctx context.Context, limit int) ([]*domain.AuditLogEntry, error) {
 	return r.recent, r.recentErr
 }
@@ -50,8 +51,7 @@ func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*
 func sha(p string) []byte { s := sha256.Sum256([]byte(p)); return s[:] }
 
 func entry(tenantID string, prevHash []byte) *domain.AuditLogEntry {
-	e, _ := domain.NewAuditLogEntry(tenantID, "actor", domain.ActionLogin, domain.ResourceUser, "u1",
-		nil, "", prevHash, time.Now(), sha)
+	e, _ := domain.NewAuditLogEntry(domain.EntryInput{TenantID: tenantID, Actor: "actor", Action: domain.ActionLogin, ResourceType: domain.ResourceUser, ResourceID: "u1"}, prevHash, time.Now(), sha)
 	return e
 }
 

@@ -3,7 +3,8 @@
 > **Bounded Context:** `context/audit`
 > **Migraciones:** [`000004_audit_init`](../../migrations/000004_audit_init.up.sql),
 > [`000024_audit_chain_integrity`](../../migrations/000024_audit_chain_integrity.up.sql),
-> [`000025_audit_hash_payload`](../../migrations/000025_audit_hash_payload.up.sql)
+> [`000025_audit_hash_payload`](../../migrations/000025_audit_hash_payload.up.sql),
+> [`000026_audit_event_source`](../../migrations/000026_audit_event_source.up.sql)
 > **Streams NATS consumidos:** `AUTH`, `LEDGER`, `ONBOARDING`, `PAYMENT`, `PAYOUT`, `BILLING`, `DISPUTE`, `WEBHOOK`, `COMPLIANCE`, `RECONCILIATION` (§7.1) — no publica eventos
 
 ---
@@ -68,16 +69,16 @@ sequenceDiagram
     SRC->>W: evento del catálogo (JetStream)
     W->>W: mapEvent(subject) → RecordActionCmd
     alt subject sin mapeo o payload inválido
-        W-->>SRC: ack (se descarta, con warning)
-    else mapeado
-        W->>UC: Execute(cmd)
-        UC->>DB: BEGIN · pg_advisory_xact_lock(cadena)
-        UC->>DB: FindLast (SELECT … ORDER BY id DESC LIMIT 1)
-        UC->>UC: NewAuditLogEntry(prev_hash = last.hash) → hash
-        UC->>DB: INSERT audit_log · COMMIT
-        alt error
-            W-->>SRC: nak → reintento (MaxDeliver 5)
-        end
+        W->>W: entrada genérica audit.unmapped_event + log de error
+    end
+    W->>UC: Execute(cmd + event_id + occurred_at)
+    UC->>DB: BEGIN · pg_advisory_xact_lock(cadena)
+    UC->>DB: ¿existe event_id? → sí: no-op (re-entrega)
+    UC->>DB: FindLast (SELECT … ORDER BY id DESC LIMIT 1)
+    UC->>UC: NewAuditLogEntry(prev_hash = last.hash) → hash
+    UC->>DB: INSERT audit_log · COMMIT
+    alt error al escribir
+        W-->>SRC: nak → reintento (MaxDeliver 5)
     end
 
     U->>API: GET /audit/logs (tenant del JWT) · GET /audit/platform/logs?tenant_id=
@@ -104,16 +105,19 @@ Archivo: [domain/log_entry.go](../../context/audit/domain/log_entry.go)
 | `resourceType` / `resourceID` | `ResourceType` / `string` | Recurso afectado. |
 | `metadata` | `map[string]string` | Contexto libre; hoy `{event_subject}`. Entra en el hash. |
 | `correlationID` | `string` | Header `correlation-id` del mensaje. Entra en el hash. |
+| `eventID` | `string` | ID del evento de dominio (`Nats-Msg-Id`). Clave de idempotencia: una entrada por evento. Vacío si la acción no viene de un evento. Entra en el hash. |
+| `occurredAt` | `time.Time` | **Cuándo ocurrió el hecho**: header `occurred-at` del evento (si falta, = `createdAt`). Truncado a µs. Entra en el hash. |
 | `prevHash` | `[]byte` | Hash de la entrada anterior; `nil` en la primera del sistema. |
 | `hash` | `[]byte` | SHA-256 del payload canónico (32 bytes). |
-| `createdAt` | `time.Time` | Reloj del worker al registrar, en UTC y **truncado a microsegundos** (`TruncateToStorage`), la precisión de `TIMESTAMPTZ`. No es la hora del evento. |
+| `createdAt` | `time.Time` | **Cuándo se registró** en la bitácora: reloj del worker, en UTC y truncado a microsegundos (`TruncateToStorage`), la precisión de `TIMESTAMPTZ`. `createdAt − occurredAt` = demora del pipeline. |
 
 API de la entidad:
 
-- `NewAuditLogEntry(..., prevHash, createdAt, computeHash)` → construye la
-  entrada y calcula su hash. La función de hash se inyecta (el dominio no
+- `NewAuditLogEntry(EntryInput, prevHash, createdAt, computeHash)` → construye
+  la entrada y calcula su hash. La función de hash se inyecta (el dominio no
   depende de `crypto`).
-- `ReconstituteAuditLogEntry(...)` → reconstrucción desde DB sin recalcular.
+- `ReconstituteAuditLogEntry(EntrySnapshot)` → reconstrucción desde DB sin
+  recalcular ni validar (los valores tal como están guardados).
 - `VerifyHash(computeHash)` → recalcula y compara con el hash guardado.
 - `ChainLinksTo(prev)` → `prevHash == prev.hash` (con `prev == nil`, exige
   `prevHash` vacío).
@@ -135,7 +139,8 @@ No hay mutaciones: una entrada no cambia después de creada.
 
 ```
 hash_n = SHA-256( JSON[ hex(prev_hash), tenant_id, actor, action, resource_type,
-                        resource_id, created_at, correlation_id, metadata ] )
+                        resource_id, created_at, correlation_id, metadata,
+                        event_id, occurred_at ] )
 ```
 
 El payload canónico es un **array JSON** con todos los campos de la entrada,
@@ -145,7 +150,7 @@ caracteres especiales no puede hacer colisionar dos entradas distintas (con un
 separador de texto plano, `("x|y","z")` y `("x","y|z")` darían el mismo
 payload).
 
-- `created_at`: RFC3339Nano UTC, truncado a microsegundos **antes** de hashear
+- `created_at` y `occurred_at`: RFC3339Nano UTC, truncados a microsegundos **antes** de hashear
   (`TruncateToStorage`). `TIMESTAMPTZ` guarda microsegundos: con los
   nanosegundos de `time.Now()` el payload cambiaría al releer la fila.
 - `metadata`: objeto JSON con las claves ordenadas (`encoding/json` ordena los
@@ -162,11 +167,10 @@ Archivos: [domain/vo.go](../../context/audit/domain/vo.go),
 
 | Elemento | Regla |
 |---|---|
-| `Action` | String no vacío (`ParseAction` solo rechaza vacío: **no** valida contra el catálogo). Se deriva del subject sin el sufijo de versión. |
-| `ResourceType` | `tenant`, `user`, `api_key`, `journal_entry`, `ledger_account`, `application`, `payment`, `payout`, `billing_plan`, `tenant_plan`, `dispute`, `webhook_endpoint`, `aml_alert`, `reconciliation_run` (`ParseResourceType` valida). |
-| `ErrInvalidAction` | Acción vacía. |
+| `Action` | Formato `<contexto>.<hecho>`: dos o más segmentos en minúscula separados por punto (`ParseAction`). El catálogo cerrado vive en el mapeo de eventos; la acción se deriva del subject sin el sufijo de versión. `audit.unmapped_event` = evento sin mapeo. |
+| `ResourceType` | `tenant`, `user`, `api_key`, `journal_entry`, `ledger_account`, `application`, `payment`, `payout`, `billing_plan`, `tenant_plan`, `dispute`, `webhook_endpoint`, `aml_alert`, `reconciliation_run`, `event` (evento sin mapeo) (`ParseResourceType` valida). |
+| `ErrInvalidAction` | Acción con formato inválido. |
 | `ErrInvalidResourceType` | Recurso fuera del catálogo. |
-| `ErrLogEntryNotFound`, `ErrChainBroken` | Definidos, **sin uso**. |
 
 ---
 
@@ -189,9 +193,10 @@ Puertos ([application/ports.go](../../context/audit/application/ports.go)):
 1. ParseAction / ParseResourceType               → error si inválidos (nak)
 2. txManager.RunInTx {
 3.   repo.LockChain()                             → pg_advisory_xact_lock (global)
-4.   last := repo.FindLast()                      → nil si la tabla está vacía
-5.   entry := NewAuditLogEntry(..., last.hash, clock.Now(), hasher.Compute)
-6.   repo.Save(entry)
+4.   event_id ≠ "" y repo.ExistsByEventID()       → no-op (re-entrega)
+5.   last := repo.FindLast()                      → nil si la tabla está vacía
+6.   entry := NewAuditLogEntry(..., last.hash, clock.Now(), hasher.Compute)
+7.   repo.Save(entry)
    }
 ```
 
@@ -202,6 +207,11 @@ se encadenan al mismo eslabón. Un `SELECT … FOR UPDATE` de la última fila **
 alcanza**, ni siquiera dentro de la transacción: en READ COMMITTED el segundo
 lector, al obtener el lock, revalida la misma fila vieja en lugar de ver la
 recién insertada.
+
+**Idempotencia**: JetStream re-entrega un evento si el ack se pierde después
+del INSERT. Con el lock tomado, `ExistsByEventID` descarta la re-entrega antes
+de leer el último hash; el índice único `uq_audit_log_event_id` es el respaldo
+en la base.
 
 Catálogo evento → entrada ([inbound/nats/event_consumer.go](../../context/audit/infrastructure/adapters/inbound/nats/event_consumer.go),
 mapa `mappings`). `action` = subject sin el sufijo de versión
@@ -248,9 +258,16 @@ logout, asignación de rol), ese tiene prioridad: es el sujeto del hecho (en un
 login todavía no hay JWT). Los webhooks reenvían solo el payload: los
 headers no le llegan al comercio.
 
-Manejo de errores del consumer: subject sin mapeo o payload que no es JSON →
-**ack con warning** (se pierde la entrada, "el audit no debe ser un punto de
-falla"); error del caso de uso → **nak** (reintento hasta `MaxDeliver: 5`).
+**Origen**: `event_id` = ID del mensaje (`Nats-Msg-Id`, el UUID del evento) y
+`occurred_at` = header `occurred-at`.
+
+Manejo de errores del consumer: un evento **nunca se descarta**. Si el subject
+no está en el catálogo o el payload no es JSON, se registra igual como
+`audit.unmapped_event` (`resource_type = event`, `resource_id = event_id`,
+`metadata = {event_subject, reason}`, tenant del payload si se puede leer) y
+se loguea como **error**: señal de que el catálogo quedó atrás de los eventos
+publicados. Solo un fallo al escribir hace **nak** (reintento hasta
+`MaxDeliver: 5`).
 
 ### 5.2 Consulta (`ListLogs`)
 
@@ -315,6 +332,8 @@ Ejemplo de `LogEntryView`:
   "resource_id": "9f8e…",
   "metadata": {"event_subject": "auth.user.registered.v1"},
   "correlation_id": "c0ff…",
+  "event_id": "7d3e…",
+  "occurred_at": "2026-10-27T02:04:42Z",
   "prev_hash": "5e1a…",
   "hash": "b7c2…",
   "created_at": "2026-10-27T02:04:43Z"
@@ -369,9 +388,11 @@ erDiagram
         text resource_id "nullable"
         jsonb metadata "default '{}'"
         text correlation_id "nullable"
+        text event_id "UK parcial, nullable"
+        timestamptz occurred_at "hora del hecho"
         bytea prev_hash "NULL en la primera"
         bytea hash
-        timestamptz created_at "precisión: microsegundos"
+        timestamptz created_at "hora de registro (µs)"
     }
 ```
 
@@ -380,7 +401,8 @@ tenant_id IS NOT NULL`, `idx_audit_log_id_asc (id)` (redundante con la PK),
 `uq_audit_log_prev_hash (prev_hash) WHERE prev_hash IS NOT NULL` y
 `uq_audit_log_genesis ((prev_hash IS NULL)) WHERE prev_hash IS NULL` (000024):
 una bifurcación de la cadena falla con violación de unicidad en vez de
-persistirse.
+persistirse; `uq_audit_log_event_id (event_id) WHERE event_id IS NOT NULL`
+(000026): una entrada por evento.
 
 Sin RLS: es un log global; el aislamiento por tenant depende del `WHERE` de
 cada consulta. La migración deja como comentario que en producción habría que
@@ -423,9 +445,6 @@ catálogo se reconstituye como vacío.
 |---|---|---|---|
 | 1 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
 | 2 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
-| 3 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
-| 4 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
-| 5 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
 
 ---
 
@@ -434,9 +453,9 @@ catálogo se reconstituye como vacío.
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/log_entry_test.go`, `vo_test.go` | Unitarios: hash determinista, todos los campos cubiertos (incl. `metadata`/`correlation_id`), orden de claves y `nil` vs `{}`, sin colisiones por separador, `VerifyHash` con manipulación, `ChainLinksTo`, parseo de VOs. |
-| Aplicación | `application/record_action_test.go`, `verify_chain_test.go`, `list_logs_test.go` (+ `mocks_test.go`) | Unitarios con repo en memoria: encadenamiento, cadena rota, límites. |
+| Aplicación | `application/record_action_test.go`, `verify_chain_test.go`, `list_logs_test.go` (+ `mocks_test.go`) | Unitarios con repo en memoria: encadenamiento, orden lock → existe → último → insert en una tx, idempotencia por `event_id`, hora del evento vs. de registro, cadena rota, límites. |
 | HTTP | `inbound/http/audit_handler_test.go` | Handlers Gin con `httptest`: tenant por defecto del JWT, 200/409/500, rutas. |
-| NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject del catálogo, actor (header vs payload) y correlation ID, ack de desconocidos, nak ante error, consistencia catálogo ↔ suscripciones ↔ dominio, nombres de durables. |
+| NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject del catálogo, actor (header vs payload) y correlation ID, eventos sin mapeo o inválidos registrados (no descartados), re-entregas registradas una vez, `occurred-at`, nak ante error, consistencia catálogo ↔ suscripciones ↔ dominio, nombres de durables. |
 | Outbox | `pkg/outbox/publisher_test.go` | Headers `actor` y `correlation-id` desde el contexto (request y worker). |
 | Crypto | `outbound/crypto/sha256_hasher_test.go` | SHA-256 real. |
 | Postgres | `outbound/postgres/audit_log_repo_test.go`, `audit_log_repo_pgxmock_test.go` | `scanEntry` con filas falsas y SQL esperado con pgxmock. |

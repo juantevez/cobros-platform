@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/audit/application"
+	"github.com/juantevez/cobros-platform/context/audit/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
 )
 
@@ -70,15 +72,17 @@ func (c *EventConsumer) Start(ctx context.Context, sub Subscription) error {
 	}, c.handle)
 }
 
-// handle procesa un mensaje y lo registra en el audit log.
+// handle procesa un mensaje y lo registra en el audit log. Nunca descarta un
+// evento: si no está en el catálogo o su payload no se puede leer, lo registra
+// como audit.unmapped_event y lo loguea como error (el catálogo quedó atrás de
+// los eventos que se publican). El audit no bloquea la cola: solo un fallo al
+// escribir hace nak.
 func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
 	mapped, err := mapEvent(msg)
 	if err != nil {
-		// Si no sabemos qué hacer con el evento, lo logueamos y lo descartamos
-		// (ack) para no bloquear la cola. El audit no debe ser un punto de falla.
-		c.logger.Warn("audit consumer: unknown event, skipping",
-			"subject", msg.Subject, "error", err)
-		return nil
+		c.logger.Error("audit consumer: event not in catalog, recording as unmapped",
+			"subject", msg.Subject, "event_id", msg.ID, "error", err)
+		mapped = unmappedEvent(msg, err)
 	}
 
 	// Quién originó el hecho y el correlation ID de la request: los propaga
@@ -89,6 +93,9 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 		mapped.Actor = actor
 	}
 	mapped.CorrelationID = msg.Headers[eventbus.HeaderCorrelationID]
+	// Origen: ID del evento (idempotencia ante re-entregas) y hora del hecho.
+	mapped.EventID = msg.ID
+	mapped.OccurredAt = occurredAt(msg)
 
 	if err := c.recordAction.Execute(ctx, mapped.RecordActionCmd); err != nil {
 		c.logger.Error("audit consumer: record action failed",
@@ -97,6 +104,37 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 	}
 
 	return nil
+}
+
+// occurredAt es la hora real del evento (header occurred-at del relay del
+// outbox). Cero si falta o es inválido: se usa la hora de registro.
+func occurredAt(msg *eventbus.Message) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, msg.Headers[eventbus.HeaderOccurredAt])
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+// unmappedEvent arma la entrada genérica de un evento sin mapeo: queda
+// registrado con su subject y la causa, atribuido al tenant si el payload lo
+// trae.
+func unmappedEvent(msg *eventbus.Message, cause error) *mappedEvent {
+	var payload struct {
+		TenantID string `json:"tenant_id"`
+	}
+	_ = json.Unmarshal(msg.Payload, &payload)
+	return &mappedEvent{RecordActionCmd: application.RecordActionCmd{
+		TenantID:     payload.TenantID,
+		Actor:        "system",
+		Action:       domain.ActionUnmappedEvent.String(),
+		ResourceType: domain.ResourceEvent.String(),
+		ResourceID:   msg.ID,
+		Metadata: map[string]string{
+			"event_subject": msg.Subject,
+			"reason":        cause.Error(),
+		},
+	}}
 }
 
 // ── Mapeo de eventos a acciones de auditoría ──────────────────────────────────
