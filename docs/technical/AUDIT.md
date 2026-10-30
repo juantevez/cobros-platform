@@ -44,7 +44,7 @@ El contexto es **escritura reactiva + consulta**:
 | **Entrada** (`AuditLogEntry`) | Registro inmutable de una acción: quién (`actor`), qué (`action`), sobre qué (`resource_type`/`resource_id`), de qué comercio (`tenant_id`) y cuándo (`created_at`). |
 | **Acción** (`Action`) | Hecho auditado con convención `<contexto>.<hecho>`, p. ej. `auth.tenant.suspended`. Coincide con el subject del evento sin el sufijo de versión. |
 | **Recurso** (`ResourceType`) | Tipo de objeto afectado: `tenant`, `user`, `api_key`, `journal_entry`, `ledger_account`. |
-| **Actor** | Quién ejecutó la acción. Hoy casi siempre `system` (§5.1). |
+| **Actor** | Quién ejecutó la acción: userID del JWT, `apikey:<id>` o `system` (procesos del worker). Viaja en el header `actor` de cada evento (§5.1). |
 | **Hash chain** | Cada entrada guarda el hash de la anterior (`prev_hash`) y el propio (`hash`). Romper un eslabón rompe la verificación. |
 | **Payload canónico** | String determinista sobre el que se calcula el hash (§4.3). |
 | **Verificación de cadena** | Recorrido que recalcula cada hash y comprueba cada enlace (`VerifyChain`). |
@@ -98,7 +98,7 @@ Archivo: [domain/log_entry.go](../../context/audit/domain/log_entry.go)
 |---|---|---|
 | `id` | `int64` | `BIGSERIAL` asignado por Postgres; define el orden de la cadena (no el timestamp). `0` hasta persistir. |
 | `tenantID` | `string` | Vacío para acciones de plataforma (en DB, `NULL`). |
-| `actor` | `string` | userID, `system`. Vacío → `system`. |
+| `actor` | `string` | userID, `apikey:<id>` o `system`. Vacío → `system`. |
 | `action` | `Action` | Ver §4.4. |
 | `resourceType` / `resourceID` | `ResourceType` / `string` | Recurso afectado. |
 | `metadata` | `map[string]string` | Contexto libre; hoy `{event_subject}`. Entra en el hash. |
@@ -204,22 +204,31 @@ recién insertada.
 
 Mapeo evento → entrada ([inbound/nats/event_consumer.go](../../context/audit/infrastructure/adapters/inbound/nats/event_consumer.go)):
 
-| Subject | `action` | `resource_type` | `resource_id` | `actor` |
-|---|---|---|---|---|
-| `auth.tenant.created.v1` | `auth.tenant.created` | `tenant` | `tenant_id` | `system` |
-| `auth.tenant.activated.v1` | `auth.tenant.activated` | `tenant` | `tenant_id` | `system` |
-| `auth.tenant.suspended.v1` | `auth.tenant.suspended` | `tenant` | `tenant_id` | `system` |
-| `auth.user.registered.v1` | `auth.user.registered` | `user` | `user_id` | `system` |
-| `auth.user.suspended.v1` | `auth.user.suspended` | `user` | `user_id` | `system` |
-| `auth.apikey.issued.v1` | `auth.apikey.issued` | `api_key` | `api_key_id` | `system` |
-| `auth.apikey.revoked.v1` | `auth.apikey.revoked` | `api_key` | `api_key_id` | `system` |
-| `auth.role.assigned.v1` | `auth.role.assigned` | `user` | `user_id` | `assigned_by` del payload |
-| `ledger.account.created.v1` | `ledger.account.created` | `ledger_account` | `account_id` | `system` |
-| `ledger.entry.posted.v1` | `ledger.entry.posted` | `journal_entry` | `entry_id` | `system` |
-| `ledger.entry.reversed.v1` | `ledger.entry.reversed` | `journal_entry` | `entry_id` | `system` |
+| Subject | `action` | `resource_type` | `resource_id` |
+|---|---|---|---|
+| `auth.tenant.created.v1` | `auth.tenant.created` | `tenant` | `tenant_id` |
+| `auth.tenant.activated.v1` | `auth.tenant.activated` | `tenant` | `tenant_id` |
+| `auth.tenant.suspended.v1` | `auth.tenant.suspended` | `tenant` | `tenant_id` |
+| `auth.user.registered.v1` | `auth.user.registered` | `user` | `user_id` |
+| `auth.user.suspended.v1` | `auth.user.suspended` | `user` | `user_id` |
+| `auth.apikey.issued.v1` | `auth.apikey.issued` | `api_key` | `api_key_id` |
+| `auth.apikey.revoked.v1` | `auth.apikey.revoked` | `api_key` | `api_key_id` |
+| `auth.role.assigned.v1` | `auth.role.assigned` | `user` | `user_id` |
+| `ledger.account.created.v1` | `ledger.account.created` | `ledger_account` | `account_id` |
+| `ledger.entry.posted.v1` | `ledger.entry.posted` | `journal_entry` | `entry_id` |
+| `ledger.entry.reversed.v1` | `ledger.entry.reversed` | `journal_entry` | `entry_id` |
 
-`tenant_id` sale del payload del evento; `metadata = {event_subject}`;
-`correlation_id` del header `correlation-id`.
+`tenant_id` sale del payload del evento; `metadata = {event_subject}`.
+
+**Actor y correlation ID**: el `EventPublisher` del outbox
+([pkg/outbox/outbox.go](../../pkg/outbox/outbox.go)) agrega a **todo** evento
+los headers `actor` (`postgres.ActorFromContext`: userID del JWT,
+`apikey:<id>`, o `system` si el evento nace en el worker) y `correlation-id`
+(el de `CorrelationIDMiddleware`, si lo hay). El relay los conserva y Audit
+los usa como `actor` y `correlation_id` de la entrada. Sin header `actor`
+(mensajes anteriores al cambio) queda `system`, salvo `auth.role.assigned`,
+que usa `assigned_by` del payload. Los webhooks reenvían solo el payload: los
+headers no le llegan al comercio.
 
 Manejo de errores del consumer: subject sin mapeo o payload que no es JSON →
 **ack con warning** (se pierde la entrada, "el audit no debe ser un punto de
@@ -387,12 +396,11 @@ catálogo se reconstituye como vacío.
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
 | 1 | Cobertura parcial | Solo `AUTH` y `LEDGER`. No se auditan Onboarding (decisiones KYC), Payment, Payout, Billing, Dispute, Webhook ni Compliance (holds, four-eyes, cambios de watchlist). `login`/`logout` definidos y sin uso. | Medio |
-| 2 | Actor genérico | Todo queda como `system` salvo `role.assigned`: no se sabe qué operador suspendió un tenant o revocó una key (los eventos no traen el actor). | Medio |
-| 3 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
-| 4 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
-| 5 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
-| 6 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
-| 7 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
+| 2 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
+| 3 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
+| 4 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
+| 5 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
+| 6 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
 
 ---
 
@@ -403,7 +411,8 @@ catálogo se reconstituye como vacío.
 | Dominio | `domain/log_entry_test.go`, `vo_test.go` | Unitarios: hash determinista, todos los campos cubiertos (incl. `metadata`/`correlation_id`), orden de claves y `nil` vs `{}`, sin colisiones por separador, `VerifyHash` con manipulación, `ChainLinksTo`, parseo de VOs. |
 | Aplicación | `application/record_action_test.go`, `verify_chain_test.go`, `list_logs_test.go` (+ `mocks_test.go`) | Unitarios con repo en memoria: encadenamiento, cadena rota, límites. |
 | HTTP | `inbound/http/audit_handler_test.go` | Handlers Gin con `httptest`: tenant por defecto del JWT, 200/409/500, rutas. |
-| NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject, ack de desconocidos, nak ante error, configs de consumers. |
+| NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject, actor y correlation ID desde headers, ack de desconocidos, nak ante error, configs de consumers. |
+| Outbox | `pkg/outbox/publisher_test.go` | Headers `actor` y `correlation-id` desde el contexto (request y worker). |
 | Crypto | `outbound/crypto/sha256_hasher_test.go` | SHA-256 real. |
 | Postgres | `outbound/postgres/audit_log_repo_test.go`, `audit_log_repo_pgxmock_test.go` | `scanEntry` con filas falsas y SQL esperado con pgxmock. |
 

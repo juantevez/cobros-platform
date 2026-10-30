@@ -163,6 +163,35 @@ func TestHandle(t *testing.T) {
 		}
 	})
 
+	t.Run("actor comes from the actor header", func(t *testing.T) {
+		repo := &fakeRepo{}
+		c, _ := newConsumer(repo)
+		msg := &eventbus.Message{
+			Subject: "auth.tenant.suspended.v1",
+			Payload: []byte(`{"tenant_id":"ten-1"}`),
+			Headers: map[string]string{eventbus.HeaderActor: "user-ops-7"},
+		}
+		if err := c.handle(context.Background(), msg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := repo.saved[0].Actor(); got != "user-ops-7" {
+			t.Errorf("actor = %q, want user-ops-7", got)
+		}
+	})
+
+	t.Run("without actor header keeps the mapped actor", func(t *testing.T) {
+		repo := &fakeRepo{}
+		c, _ := newConsumer(repo)
+		msg := &eventbus.Message{
+			Subject: "auth.role.assigned.v1",
+			Payload: []byte(`{"tenant_id":"ten-1","user_id":"u-1","assigned_by":"admin-1"}`),
+		}
+		_ = c.handle(context.Background(), msg)
+		if got := repo.saved[0].Actor(); got != "admin-1" {
+			t.Errorf("actor = %q, want admin-1 (assigned_by)", got)
+		}
+	})
+
 	t.Run("unknown event is acked and skipped", func(t *testing.T) {
 		repo := &fakeRepo{}
 		c, _ := newConsumer(repo)

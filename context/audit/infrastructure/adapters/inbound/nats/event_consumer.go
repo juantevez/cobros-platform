@@ -67,12 +67,13 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 		return nil
 	}
 
-	// Propagar el correlation ID si viene en los headers del mensaje.
-	correlationID := ""
-	if msg.Headers != nil {
-		correlationID = msg.Headers["correlation-id"]
+	// Quién originó el hecho y el correlation ID de la request: los propaga
+	// el outbox en los headers. Sin header (mensajes viejos), queda el actor
+	// que haya resuelto mapEvent.
+	if actor := msg.Headers[eventbus.HeaderActor]; actor != "" {
+		mapped.Actor = actor
 	}
-	mapped.CorrelationID = correlationID
+	mapped.CorrelationID = msg.Headers[eventbus.HeaderCorrelationID]
 
 	// El TenantID del contexto puede no estar (el evento viene de JetStream,
 	// no de un request HTTP). Lo tomamos del payload del evento.
