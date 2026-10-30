@@ -56,17 +56,17 @@ func TestDispute_ResolvedLost(t *testing.T) {
 	tenantID := testTenantID(t)
 	accountRepo := newFakeAccountRepo()
 	accountRepo.seed(t, tenantID, domain.AccountTypeDisputeHold, "ARS")
-	accountRepo.seed(t, tenantID, domain.AccountTypePlatformFees, "ARS")
+	accountRepo.seed(t, tenantID, domain.AccountTypeInTransit, "ARS")
 
 	postEntry, entryRepo, _ := newPostEntry(accountRepo)
 	consumer := NewDisputeConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
 
-	// outcome lost → contrapartida en platform_fees.
+	// outcome lost → contrapartida en in_transit.
 	if err := consumer.handle(context.Background(), disputeMsg("dispute.resolved.v1", tenantID.String(), validUUID(), "lost", 5000)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(entryRepo.saved) != 1 {
-		t.Fatalf("expected 1 entry (lost → platform_fees), got %d", len(entryRepo.saved))
+		t.Fatalf("expected 1 entry (lost → in_transit), got %d", len(entryRepo.saved))
 	}
 }
 

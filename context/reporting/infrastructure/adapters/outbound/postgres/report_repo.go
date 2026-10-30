@@ -145,7 +145,7 @@ func (r *ReportRepository) Balances(ctx context.Context, tenantID string) ([]dom
 			if err := rows.Scan(&b.AccountType, &b.Currency, &b.Debits, &b.Credits); err != nil {
 				return fmt.Errorf("reporting repo: balances scan: %w", err)
 			}
-			b.Net = b.Debits - b.Credits
+			b.Net = b.Credits - b.Debits
 			out = append(out, b)
 		}
 		return rows.Err()

@@ -26,9 +26,10 @@ func NewBalanceRepository(pool *pgxpool.Pool) *pgBalanceRepository {
 //   - Crédito: suma al saldo (+amount)
 //   - Débito:  resta del saldo (-amount)
 //
-// El significado del signo depende del tipo de cuenta:
+// Los consumers asientan con esta convención, así que:
 //   - merchant_balance positivo = la plataforma le debe ese monto al comercio.
 //   - platform_fees positivo    = la plataforma ganó ese monto en comisiones.
+//   - in_transit negativo       = el PSP adeuda ese monto (cuenta de activo).
 func (r *pgBalanceRepository) Apply(ctx context.Context, postings []domain.Posting) error {
 	conn := postgres.ConnFromContext(ctx, r.pool)
 

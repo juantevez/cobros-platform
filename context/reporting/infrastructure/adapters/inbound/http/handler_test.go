@@ -224,7 +224,7 @@ func TestGetRevenue(t *testing.T) {
 
 func TestGetBalances(t *testing.T) {
 	t.Run("returns balances of authenticated tenant", func(t *testing.T) {
-		r := &fakeReader{balances: []domain.TenantBalance{{AccountType: "merchant_balance", Currency: "ARS", Net: -300}}}
+		r := &fakeReader{balances: []domain.TenantBalance{{AccountType: "merchant_balance", Currency: "ARS", Credits: 300, Net: 300}}}
 
 		rec := doRequest(newHandler(r).GetBalances, "/reports/balances", tenantA)
 		if rec.Code != http.StatusOK {
@@ -233,7 +233,7 @@ func TestGetBalances(t *testing.T) {
 		if r.lastTenant != tenantA {
 			t.Errorf("tenant = %q", r.lastTenant)
 		}
-		if !strings.Contains(rec.Body.String(), `"net":-300`) {
+		if !strings.Contains(rec.Body.String(), `"net":300`) {
 			t.Errorf("body = %s", rec.Body)
 		}
 	})

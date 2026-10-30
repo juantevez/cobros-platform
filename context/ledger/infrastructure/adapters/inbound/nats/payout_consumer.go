@@ -16,16 +16,16 @@ import (
 // Asientos generados:
 //
 //	payout.initiated.v1:
-//	  merchant_balance   CREDIT  amount   (sale del saldo del comercio)
-//	  payout_transit     DEBIT   amount   (fondos en camino al banco)
+//	  merchant_balance   DEBIT   amount   (sale del saldo del comercio)
+//	  payout_transit     CREDIT  amount   (fondos en camino al banco)
 //
 //	payout.confirmed.v1:
-//	  payout_transit     CREDIT  amount   (salen del tránsito)
-//	  payout_sent        DEBIT   amount   (fondos efectivamente enviados)
+//	  payout_transit     DEBIT   amount   (salen del tránsito)
+//	  payout_sent        CREDIT  amount   (fondos efectivamente enviados)
 //
 //	payout.failed.v1 → reversa del asiento de initiated:
-//	  payout_transit     CREDIT  amount   (revierten del tránsito)
-//	  merchant_balance   DEBIT   amount   (vuelven al saldo del comercio)
+//	  payout_transit     DEBIT   amount   (revierten del tránsito)
+//	  merchant_balance   CREDIT  amount   (vuelven al saldo del comercio)
 type PayoutConsumer struct {
 	consumer    eventbus.Consumer
 	postEntry   *application.PostEntryUseCase
@@ -102,8 +102,8 @@ func (c *PayoutConsumer) postInitiated(ctx context.Context, tenantID domain.Tena
 		Description:    fmt.Sprintf("Desembolso iniciado: %s", p.PayoutID),
 		Metadata:       map[string]string{"payout_id": p.PayoutID, "event": "payout.initiated.v1"},
 		Lines: []application.PostingLine{
-			{AccountID: merchantBalance.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
-			{AccountID: payoutTransit.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: merchantBalance.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: payoutTransit.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
 		},
 	})
 	return err
@@ -125,8 +125,8 @@ func (c *PayoutConsumer) postConfirmed(ctx context.Context, tenantID domain.Tena
 		Description:    fmt.Sprintf("Desembolso confirmado: %s", p.PayoutID),
 		Metadata:       map[string]string{"payout_id": p.PayoutID, "bank_reference": p.BankReference},
 		Lines: []application.PostingLine{
-			{AccountID: payoutTransit.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
-			{AccountID: payoutSent.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: payoutTransit.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: payoutSent.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
 		},
 	})
 	return err
@@ -149,8 +149,8 @@ func (c *PayoutConsumer) postFailed(ctx context.Context, tenantID domain.TenantI
 		Description:    fmt.Sprintf("Reversa desembolso fallido: %s", p.PayoutID),
 		Metadata:       map[string]string{"payout_id": p.PayoutID, "failure_reason": p.FailureReason},
 		Lines: []application.PostingLine{
-			{AccountID: payoutTransit.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
-			{AccountID: merchantBalance.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: payoutTransit.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: merchantBalance.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
 		},
 	})
 	return err

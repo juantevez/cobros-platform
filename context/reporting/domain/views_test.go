@@ -74,8 +74,8 @@ func TestViews_JSONContract(t *testing.T) {
 		},
 		{
 			"TenantBalance",
-			TenantBalance{AccountType: "merchant_balance", Currency: "ARS", Debits: 100, Credits: 400, Net: -300},
-			`{"account_type":"merchant_balance","currency":"ARS","debits":100,"credits":400,"net":-300}`,
+			TenantBalance{AccountType: "merchant_balance", Currency: "ARS", Debits: 100, Credits: 400, Net: 300},
+			`{"account_type":"merchant_balance","currency":"ARS","debits":100,"credits":400,"net":300}`,
 		},
 	}
 	for _, tc := range cases {

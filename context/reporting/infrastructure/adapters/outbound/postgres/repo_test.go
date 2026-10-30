@@ -372,7 +372,7 @@ func TestReportRepository_Revenue(t *testing.T) {
 var balanceCols = []string{"account_type", "currency", "debits", "credits"}
 
 func TestReportRepository_Balances(t *testing.T) {
-	t.Run("computes net as debits minus credits", func(t *testing.T) {
+	t.Run("computes net as credits minus debits", func(t *testing.T) {
 		mock := newMock(t)
 		expectSession(mock, tenantA)
 		mock.ExpectQuery("FROM report_ledger_movement\\s+WHERE tenant_id = \\$1").WithArgs(tenantA).
@@ -386,8 +386,8 @@ func TestReportRepository_Balances(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := []domain.TenantBalance{
-			{AccountType: "in_transit", Currency: "ARS", Debits: 1000, Credits: 0, Net: 1000},
-			{AccountType: "merchant_balance", Currency: "ARS", Debits: 100, Credits: 700, Net: -600},
+			{AccountType: "in_transit", Currency: "ARS", Debits: 1000, Credits: 0, Net: -1000},
+			{AccountType: "merchant_balance", Currency: "ARS", Debits: 100, Credits: 700, Net: 600},
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %+v\nwant %+v", got, want)

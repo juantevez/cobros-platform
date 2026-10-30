@@ -24,12 +24,16 @@ type paymentCapturedPayload struct {
 // PaymentConsumer crea asientos contables en el Ledger cuando se captura un pago.
 //
 // Asiento generado:
-//   in_transit       CREDIT  amount - pspFee (lo que el PSP liquida)
-//   merchant_balance DEBIT   net_amount      (dinero del comercio: amount - platformFee - pspFee)
-//   platform_fees    DEBIT   platform_fee    (comisión de la plataforma, si hay)
+//   in_transit       DEBIT   amount - pspFee (lo que el PSP liquida)
+//   merchant_balance CREDIT  net_amount      (dinero del comercio: amount - platformFee - pspFee)
+//   platform_fees    CREDIT  platform_fee    (comisión de la plataforma, si hay)
 //
 // Doble partida: sum(debits) = sum(credits) = amount - pspFee. La comisión del
 // PSP nunca entra al sistema: el PSP la retiene de la liquidación.
+//
+// Convención (Apply: crédito suma, débito resta): merchant_balance y
+// platform_fees crecen con el pago; in_transit queda negativo mientras el PSP
+// adeuda la liquidación.
 type PaymentConsumer struct {
 	consumer    eventbus.Consumer
 	postEntry   *application.PostEntryUseCase
@@ -84,8 +88,8 @@ func (c *PaymentConsumer) handle(ctx context.Context, msg *eventbus.Message) err
 	}
 
 	lines := []application.PostingLine{
-		{AccountID: inTransit.ID().String(), Direction: "credit", Amount: p.Amount - p.PSPFee, Currency: p.Currency},
-		{AccountID: merchantBalance.ID().String(), Direction: "debit", Amount: netAmount, Currency: p.Currency},
+		{AccountID: inTransit.ID().String(), Direction: "debit", Amount: p.Amount - p.PSPFee, Currency: p.Currency},
+		{AccountID: merchantBalance.ID().String(), Direction: "credit", Amount: netAmount, Currency: p.Currency},
 	}
 
 	// Si hay comisión de plataforma, agregar la línea de fees. Sin la cuenta
@@ -97,7 +101,7 @@ func (c *PaymentConsumer) handle(ctx context.Context, msg *eventbus.Message) err
 		}
 		lines = append(lines, application.PostingLine{
 			AccountID: platformFees.ID().String(),
-			Direction: "debit",
+			Direction: "credit",
 			Amount:    p.PlatformFee,
 			Currency:  p.Currency,
 		})
