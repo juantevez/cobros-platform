@@ -62,8 +62,19 @@ func newHandler(repo *fakeRepo) *AuditHandler {
 	hasher := hasherFunc(sha)
 	return NewAuditHandler(
 		application.NewListLogsUseCase(repo),
-		application.NewVerifyChainUseCase(repo, hasher),
+		application.NewVerifyChainUseCase(repo, noCheckpoints{}, hasher),
 	)
+}
+
+// noCheckpoints: sin checkpoints registrados (todos respetados).
+type noCheckpoints struct{}
+
+func (noCheckpoints) Save(context.Context, domain.ChainCheckpoint) error { return nil }
+func (noCheckpoints) Latest(context.Context) (*domain.ChainCheckpoint, error) {
+	return nil, nil
+}
+func (noCheckpoints) FirstMismatch(context.Context) (*domain.CheckpointMismatch, error) {
+	return nil, nil
 }
 
 type hasherFunc func(string) []byte

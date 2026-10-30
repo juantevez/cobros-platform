@@ -47,6 +47,16 @@ type AuditLogRepository interface {
 	ListFromID(ctx context.Context, fromID int64, limit int) ([]*domain.AuditLogEntry, error)
 }
 
+// CheckpointRepository persiste los checkpoints de la cadena (append-only).
+type CheckpointRepository interface {
+	Save(ctx context.Context, cp domain.ChainCheckpoint) error
+	// Latest retorna el último checkpoint, o nil, nil si no hay ninguno.
+	Latest(ctx context.Context) (*domain.ChainCheckpoint, error)
+	// FirstMismatch retorna el primer checkpoint cuya entrada falta en
+	// audit_log o tiene otro hash, o nil, nil si todos se respetan.
+	FirstMismatch(ctx context.Context) (*domain.CheckpointMismatch, error)
+}
+
 // HashComputer calcula el hash de un payload string.
 // La implementación concreta usa SHA-256.
 type HashComputer interface {

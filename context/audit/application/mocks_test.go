@@ -106,6 +106,35 @@ func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*
 }
 
 // sha256Hasher es la implementación real de HashComputer para los tests.
+// fakeCheckpoints implementa CheckpointRepository en memoria.
+type fakeCheckpoints struct {
+	saved       []domain.ChainCheckpoint
+	mismatch    *domain.CheckpointMismatch
+	latestErr   error
+	saveErr     error
+	mismatchErr error
+}
+
+func (f *fakeCheckpoints) Save(ctx context.Context, cp domain.ChainCheckpoint) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	f.saved = append(f.saved, cp)
+	return nil
+}
+
+func (f *fakeCheckpoints) Latest(ctx context.Context) (*domain.ChainCheckpoint, error) {
+	if f.latestErr != nil || len(f.saved) == 0 {
+		return nil, f.latestErr
+	}
+	cp := f.saved[len(f.saved)-1]
+	return &cp, nil
+}
+
+func (f *fakeCheckpoints) FirstMismatch(ctx context.Context) (*domain.CheckpointMismatch, error) {
+	return f.mismatch, f.mismatchErr
+}
+
 // fakeTx marca el contexto para que el repo fake registre si cada llamada
 // ocurrió dentro de la transacción.
 type fakeTx struct{ err error }

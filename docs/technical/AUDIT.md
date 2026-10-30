@@ -4,7 +4,8 @@
 > **Migraciones:** [`000004_audit_init`](../../migrations/000004_audit_init.up.sql),
 > [`000024_audit_chain_integrity`](../../migrations/000024_audit_chain_integrity.up.sql),
 > [`000025_audit_hash_payload`](../../migrations/000025_audit_hash_payload.up.sql),
-> [`000026_audit_event_source`](../../migrations/000026_audit_event_source.up.sql)
+> [`000026_audit_event_source`](../../migrations/000026_audit_event_source.up.sql),
+> [`000027_audit_append_only`](../../migrations/000027_audit_append_only.up.sql)
 > **Streams NATS consumidos:** `AUTH`, `LEDGER`, `ONBOARDING`, `PAYMENT`, `PAYOUT`, `BILLING`, `DISPUTE`, `WEBHOOK`, `COMPLIANCE`, `RECONCILIATION` (§7.1) — no publica eventos
 
 ---
@@ -33,9 +34,9 @@ El contexto es **escritura reactiva + consulta**:
   `payment.failed` (el movimiento de dinero ya queda auditado por
   `ledger.entry.posted`) y `webhook.delivery.*` (operación interna).
 - Intentos de login fallidos: solo se audita el login exitoso.
-- Anclaje externo de la cadena (publicar periódicamente el último hash fuera
-  de la base): sin él, quien controla la base puede reescribir la cadena
-  completa de forma consistente.
+- Anclaje en un almacenamiento inmutable externo (p. ej. objetos con
+  retención WORM): el ancla externa de la cadena hoy es el sistema de logs
+  (§9).
 
 ---
 
@@ -127,8 +128,9 @@ No hay mutaciones: una entrada no cambia después de creada.
 
 ### 4.2 Invariantes
 
-1. **Append-only**: no hay UPDATE ni DELETE en el código. En la base **no**
-   está reforzado (sin trigger ni permisos revocados, §10).
+1. **Append-only**: el código solo inserta, y la base lo refuerza: triggers
+   rechazan `UPDATE`, `DELETE` y `TRUNCATE` sobre `audit_log` y
+   `audit_chain_checkpoints` (migración 000027).
 2. **Encadenamiento**: `prev_hash(n) = hash(n−1)` según el orden de `id`.
    Ningún eslabón tiene dos sucesores: `UNIQUE (prev_hash)` (migración 000024).
 3. **Primera entrada**: `prev_hash` vacío, y es única (índice único parcial
@@ -180,12 +182,14 @@ Paquete: [application/](../../context/audit/application/)
 
 | Caso de uso | Archivo | Actor/trigger | Resultado |
 |---|---|---|---|
-| `RecordActionUseCase` | `record_action.go` | JetStream (`auth.>`, `ledger.>`) vía `EventConsumer` | Nueva entrada encadenada |
+| `RecordActionUseCase` | `record_action.go` | JetStream (§7.1) vía `EventConsumer` | Nueva entrada encadenada |
 | `ListLogsUseCase` | `list_logs.go` | HTTP | `[]LogEntryView` (limit default 50, máx 200) |
-| `VerifyChainUseCase` | `verify_chain.go` | HTTP | `VerifyChainResult` |
+| `VerifyChainUseCase` | `verify_chain.go` | HTTP | `VerifyChainResult` (checkpoints + lote) |
+| `ChainCheckpointer` | `checkpoint_chain.go` | `cmd/worker`, cada 15 min y al arrancar | Checkpoint de la cabeza de la cadena + línea de log |
 
 Puertos ([application/ports.go](../../context/audit/application/ports.go)):
-`AuditLogRepository`, `HashComputer`, `Clock`.
+`TxManager`, `AuditLogRepository`, `CheckpointRepository`, `HashComputer`,
+`Clock`.
 
 ### 5.1 Registro (`RecordAction`)
 
@@ -280,6 +284,8 @@ publicados. Solo un fallo al escribir hace **nak** (reintento hasta
 ### 5.3 Verificación (`VerifyChain`)
 
 ```
+checkpoints.FirstMismatch()                      → checkpoint cuya entrada falta / cambió de hash
+                                                   → Valid=false ("tail truncated" / "chain rewritten")
 entries := repo.ListFromID(from_id, limit)       (limit ≤ 0 → 500; máximo 5000)
 prev    := repo.FindBefore(entries[0].id)        (predecesora del lote; nil = génesis)
 para cada entrada:
@@ -298,6 +304,25 @@ para cada entrada:
   (`prev_hash` vacío): borrar las primeras filas se detecta.
 - Borrar filas intermedias rompe el enlace de la siguiente. Los huecos de `id`
   sin borrado (secuencia consumida por una tx revertida) no afectan.
+- **Checkpoints**: el enlace por `prev_hash` no detecta que se borren las
+  **últimas** filas ni que se reescriba la cadena entera de forma consistente.
+  Cada checkpoint prueba que su entrada existió con ese hash; si falta o
+  cambió, la verificación falla en cualquier lote.
+
+### 5.4 Checkpoints (`ChainCheckpointer`)
+
+```
+head   := repo.FindLast()
+latest := checkpoints.Latest()
+head ≠ nil y head.id ≠ latest.entry_id → checkpoints.Save(head.id, head.hash)
+                                          log INFO "audit chain checkpoint" entry_id=… entry_hash=…
+```
+
+La línea de log es el **ancla externa**: aunque alguien con control de la
+base reescriba la cadena y los checkpoints, los `(entry_id, entry_hash)` ya
+emitidos al sistema de logs lo contradicen. El mensaje y sus campos son un
+contrato con las búsquedas/alertas del sistema de logs: no cambiarlos sin
+actualizarlas.
 
 ## 6. API HTTP
 
@@ -379,7 +404,8 @@ Los filtros de `PAYMENT` y `WEBHOOK` dejan afuera los eventos de alto volumen
 
 ## 8. Persistencia
 
-Archivo: [000004_audit_init.up.sql](../../migrations/000004_audit_init.up.sql)
+Archivos: [000004_audit_init.up.sql](../../migrations/000004_audit_init.up.sql)
+y siguientes (encabezado).
 
 ```mermaid
 erDiagram
@@ -398,6 +424,12 @@ erDiagram
         bytea hash
         timestamptz created_at "hora de registro (µs)"
     }
+    audit_chain_checkpoints {
+        bigserial id PK
+        bigint entry_id "audit_log.id de la cabeza"
+        bytea entry_hash "audit_log.hash de esa entrada"
+        timestamptz created_at
+    }
 ```
 
 Índices: `idx_audit_log_tenant_created (tenant_id, created_at DESC) WHERE
@@ -408,10 +440,14 @@ una bifurcación de la cadena falla con violación de unicidad en vez de
 persistirse; `uq_audit_log_event_id (event_id) WHERE event_id IS NOT NULL`
 (000026): una entrada por evento.
 
+Append-only en la base (000027): la función `audit_reject_mutation()` corre en
+triggers `BEFORE UPDATE OR DELETE` (por fila) y `BEFORE TRUNCATE` (por
+sentencia) de `audit_log` y `audit_chain_checkpoints`, y responde
+`insufficient_privilege`. En desarrollo, vaciar la bitácora requiere
+deshabilitarlos a mano (`ALTER TABLE … DISABLE TRIGGER USER`).
+
 Sin RLS: es un log global; el aislamiento por tenant depende del `WHERE` de
-cada consulta. La migración deja como comentario que en producción habría que
-revocar UPDATE/DELETE al rol de la aplicación; no hay trigger ni permisos que
-lo impidan.
+cada consulta.
 
 Queries ([outbound/postgres/audit_log_repo.go](../../context/audit/infrastructure/adapters/outbound/postgres/audit_log_repo.go)):
 
@@ -424,6 +460,8 @@ Queries ([outbound/postgres/audit_log_repo.go](../../context/audit/infrastructur
 | `ListByTenant` | `SELECT … WHERE tenant_id=$1 ORDER BY id DESC LIMIT $2` | |
 | `ListFromID` | `SELECT … WHERE id >= $1 ORDER BY id ASC LIMIT $2` | Lote de `VerifyChain`. |
 | `FindBefore` | `SELECT … WHERE id < $1 ORDER BY id DESC LIMIT 1` | Predecesora del lote (enlace del borde). |
+| `CheckpointRepository.Save` / `Latest` | `INSERT INTO audit_chain_checkpoints …` / `… ORDER BY id DESC LIMIT 1` | [checkpoint_repo.go](../../context/audit/infrastructure/adapters/outbound/postgres/checkpoint_repo.go) |
+| `CheckpointRepository.FirstMismatch` | `… FROM audit_chain_checkpoints c LEFT JOIN audit_log a ON a.id = c.entry_id WHERE a.id IS NULL OR a.hash <> c.entry_hash ORDER BY c.id LIMIT 1` | Entrada faltante (cola truncada) o con otro hash (reescritura). |
 
 Al leer, `ParseAction`/`ParseResourceType` ignoran errores: un valor fuera del
 catálogo se reconstituye como vacío.
@@ -432,10 +470,18 @@ catálogo se reconstituye como vacío.
 
 ## 9. Seguridad y multi-tenancy
 
-- **Integridad**: tamper-evident, no tamper-proof. Detecta cambios en
-  cualquier campo de filas intermedias; no detecta el borrado de la cola ni la
-  reescritura completa de la cadena (no hay anclaje externo).
-- **Inmutabilidad**: solo por convención del código (§4.2).
+- **Integridad**: tamper-evident. Detecta cambios en cualquier campo, borrado
+  de filas intermedias o iniciales, y —con los checkpoints— el truncamiento de
+  la cola y la reescritura de la cadena hasta el último checkpoint.
+- **Inmutabilidad**: triggers append-only en la base (§8).
+- **Supuestos de seguridad**: los triggers no frenan a un superusuario o al
+  dueño de la tabla (`DISABLE TRIGGER`, `session_replication_role`): en
+  producción el rol de la aplicación no debe ser dueño de las tablas. Quien
+  controle la base podría reescribir también los checkpoints; por eso el ancla
+  que vale es la línea de log de cada checkpoint, y su retención depende del
+  sistema de logs. Entre un checkpoint y el siguiente (hasta 15 min), un
+  truncamiento de las entradas más nuevas solo lo revela el log de los
+  eventos procesados.
 - **Aislamiento**: por `WHERE tenant_id` en la consulta, con el tenant tomado
   del JWT en `/audit/logs`. La lectura de otros comercios y la verificación
   global requieren `platform_support` (§6).
@@ -446,9 +492,8 @@ catálogo se reconstituye como vacío.
 
 ## 10. Limitaciones conocidas y deuda técnica
 
-| # | Tema | Detalle | Impacto |
-|---|---|---|---|
-| 1 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
+Sin deuda técnica abierta. Los supuestos de seguridad del diseño (superusuario,
+retención de logs, ventana entre checkpoints) están en §9.
 
 ---
 
@@ -457,12 +502,12 @@ catálogo se reconstituye como vacío.
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/log_entry_test.go`, `vo_test.go` | Unitarios: hash determinista, todos los campos cubiertos (incl. `metadata`/`correlation_id`), orden de claves y `nil` vs `{}`, sin colisiones por separador, `VerifyHash` con manipulación, `ChainLinksTo`, parseo de VOs. |
-| Aplicación | `application/record_action_test.go`, `verify_chain_test.go`, `list_logs_test.go` (+ `mocks_test.go`) | Unitarios con repo en memoria: encadenamiento, orden lock → existe → último → insert en una tx, idempotencia por `event_id`, hora del evento vs. de registro, cadena rota, límites. |
+| Aplicación | `application/record_action_test.go`, `verify_chain_test.go`, `checkpoint_chain_test.go`, `list_logs_test.go` (+ `mocks_test.go`) | Unitarios con repo en memoria: encadenamiento, orden lock → existe → último → insert en una tx, idempotencia por `event_id`, hora del evento vs. de registro, cadena rota, borde de lote, paginación, checkpoints (cola truncada / reescritura), checkpointer. |
 | HTTP | `inbound/http/audit_handler_test.go` | Handlers Gin con `httptest`: tenant por defecto del JWT, 200/409/500, rutas. |
 | NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject del catálogo, actor (header vs payload) y correlation ID, eventos sin mapeo o inválidos registrados (no descartados), re-entregas registradas una vez, `occurred-at`, nak ante error, consistencia catálogo ↔ suscripciones ↔ dominio, nombres de durables. |
 | Outbox | `pkg/outbox/publisher_test.go` | Headers `actor` y `correlation-id` desde el contexto (request y worker). |
 | Crypto | `outbound/crypto/sha256_hasher_test.go` | SHA-256 real. |
-| Postgres | `outbound/postgres/audit_log_repo_test.go`, `audit_log_repo_pgxmock_test.go` | `scanEntry` con filas falsas y SQL esperado con pgxmock. |
+| Postgres | `outbound/postgres/audit_log_repo_test.go`, `audit_log_repo_pgxmock_test.go`, `checkpoint_repo_test.go` | `scanEntry` con filas falsas y SQL esperado con pgxmock (incl. `FindBefore`, `ExistsByEventID`, checkpoints). |
 
 ```bash
 go test ./context/audit/...
@@ -481,24 +526,29 @@ por tenant están en `audit_handler_test.go`.
 ```
 context/audit/
 ├── domain/
-│   ├── log_entry.go      # AuditLogEntry, payload canónico, VerifyHash, ChainLinksTo
+│   ├── log_entry.go      # AuditLogEntry (EntryInput/EntrySnapshot), payload canónico, VerifyHash, ChainLinksTo
+│   ├── checkpoint.go     # ChainCheckpoint, CheckpointMismatch
 │   ├── vo.go             # Action (catálogo), ResourceType
 │   └── errors.go
 ├── application/
-│   ├── ports.go          # TxManager, AuditLogRepository (LockChain), HashComputer, Clock
+│   ├── ports.go          # TxManager, AuditLogRepository, CheckpointRepository, HashComputer, Clock
 │   ├── commands.go       # RecordActionCmd, VerifyChainQuery/Result, ListLogsQuery, LogEntryView
 │   ├── record_action.go
 │   ├── list_logs.go
-│   └── verify_chain.go
+│   ├── verify_chain.go
+│   └── checkpoint_chain.go   # ChainCheckpointer (job del worker)
 └── infrastructure/adapters/
     ├── inbound/
     │   ├── http/audit_handler.go     # AuditHandler + RouteGuards + RegisterRoutes (3 rutas)
     │   └── nats/event_consumer.go    # Subscriptions (10 streams), catálogo mappings, mapEvent
     └── outbound/
         ├── crypto/sha256_hasher.go
-        └── postgres/audit_log_repo.go
+        └── postgres/
+            ├── audit_log_repo.go
+            └── checkpoint_repo.go
 ```
 
 Cableado: [cmd/api/main.go](../../cmd/api/main.go) (`ListLogs`, `VerifyChain`,
 `RouteGuards`) y [cmd/worker/main.go](../../cmd/worker/main.go)
-(`RecordAction` con `TxManager` + un consumer por suscripción).
+(`RecordAction` con `TxManager`, un consumer por suscripción y el
+`ChainCheckpointer`).

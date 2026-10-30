@@ -193,7 +193,7 @@ func main() {
 	auditRepo := auditpg.NewAuditLogRepository(pool)
 	auditHasher := auditcrypto.NewSHA256Hasher()
 	listLogs := auditapp.NewListLogsUseCase(auditRepo)
-	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
+	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditpg.NewCheckpointRepository(pool), auditHasher)
 	audithttp.RegisterRoutes(protected, audithttp.NewAuditHandler(listLogs, verifyChain), audithttp.RouteGuards{
 		ReadTenantLogs: authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
 		PlatformAudit:  authttp.RequireRole(authdomain.RolePlatformSupport),

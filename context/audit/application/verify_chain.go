@@ -11,13 +11,18 @@ import (
 // Verifica de a lotes (from_id, limit). Cada lote se enlaza con la entrada
 // anterior a su primera fila, así que paginar con next_from_id hasta
 // complete=true verifica la cadena completa sin dejar bordes sin chequear.
+//
+// Además exige que todos los checkpoints sigan respetados (la entrada existe y
+// conserva su hash): detecta el truncamiento de la cola y la reescritura de
+// la cadena, que el encadenamiento solo no ve.
 type VerifyChainUseCase struct {
-	repo   AuditLogRepository
-	hasher HashComputer
+	repo        AuditLogRepository
+	checkpoints CheckpointRepository
+	hasher      HashComputer
 }
 
-func NewVerifyChainUseCase(repo AuditLogRepository, hasher HashComputer) *VerifyChainUseCase {
-	return &VerifyChainUseCase{repo: repo, hasher: hasher}
+func NewVerifyChainUseCase(repo AuditLogRepository, checkpoints CheckpointRepository, hasher HashComputer) *VerifyChainUseCase {
+	return &VerifyChainUseCase{repo: repo, checkpoints: checkpoints, hasher: hasher}
 }
 
 const (
@@ -32,6 +37,18 @@ func (uc *VerifyChainUseCase) Execute(ctx context.Context, q VerifyChainQuery) (
 	}
 	if limit > maxVerifyBatchSize {
 		limit = maxVerifyBatchSize
+	}
+
+	mismatch, err := uc.checkpoints.FirstMismatch(ctx)
+	if err != nil {
+		return VerifyChainResult{}, fmt.Errorf("verify chain: checkpoints: %w", err)
+	}
+	if mismatch != nil {
+		msg := fmt.Sprintf("checkpoint id=%d: entry id=%d hash changed (chain rewritten)", mismatch.CheckpointID, mismatch.EntryID)
+		if mismatch.EntryMissing {
+			msg = fmt.Sprintf("checkpoint id=%d: entry id=%d missing (chain tail truncated)", mismatch.CheckpointID, mismatch.EntryID)
+		}
+		return invalid(0, mismatch.EntryID, msg), nil
 	}
 
 	entries, err := uc.repo.ListFromID(ctx, q.FromID, limit)
