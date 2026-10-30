@@ -113,7 +113,7 @@ Invariantes de `NewJournalEntry`:
 
 Al crearse emite `ledger.entry.posted.v1` con todos sus postings.
 
-`BuildReverse(reverseID, key)` genera un asiento con cada posting invertido, descripción `"Reversa de: …"` y metadata `original_entry_id`. **Reemplaza** el evento `entry.posted` por `ledger.entry.reversed.v1` (ver §10.6).
+`BuildReverse(reverseID, key)` genera un asiento con cada posting invertido, descripción `"Reversa de: …"` y metadata `original_entry_id`. **Reemplaza** el evento `entry.posted` por `ledger.entry.reversed.v1`, que lleva los postings de la reversa para quien proyecta movimientos (Reporting).
 
 El agregado no conoce las cuentas. Que existan, pertenezcan al tenant y tengan la moneda del posting lo valida `PostEntry` antes de construirlo (§5.1).
 
@@ -231,7 +231,7 @@ Binding HTTP: `idempotency_key` requerido, `lines` mínimo 2, y cada línea con 
 |---|---|---|
 | `ledger.account.created.v1` | `account_id`, `tenant_id`, `account_type`, `currency` | Audit |
 | `ledger.entry.posted.v1` | `entry_id`, `tenant_id`, `idempotency_key`, `description`, `postings[]{account_id, direction, amount, currency}` | Audit, **Reporting** (proyección de saldos por comercio) |
-| `ledger.entry.reversed.v1` | `reverse_entry_id`, `original_entry_id`, `tenant_id` | Audit |
+| `ledger.entry.reversed.v1` | `reverse_entry_id`, `original_entry_id`, `tenant_id`, `postings[]` (los de la reversa) | Audit, Reporting |
 
 Los headers son los estándar del Outbox (ver ONBOARDING.MD §7).
 
@@ -315,14 +315,13 @@ Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDI
 | 3 | **Convención de signo inconsistente** | `Apply` suma créditos y resta débitos en todas las cuentas. Los consumers **debitan** `merchant_balance` cuando el comercio gana dinero (pago, disputa ganada) y lo **acreditan** cuando sale (payout, disputa abierta). Con #1 resuelto, cada pago dejaría `merchant_balance` **más negativo**, y Payout (que exige saldo > 0) rechazaría todos los payouts. Se puede arreglar con saldo por naturaleza de cuenta (deudora/acreedora) o invirtiendo las direcciones en los consumers. Hay que alinearlo con Reporting. | **Alto (funcional)** |
 | 4 | ~~Creación de cuentas no idempotente~~ ✅ **Resuelto** | `CreateAccount` devuelve la cuenta existente (chequeo previo + traducción de `23505` a `ErrAccountAlreadyExists` ante carreras). Los reintentos del consumer de Onboarding completan las cuentas faltantes. La moneda se normaliza a mayúsculas para que la búsqueda coincida. | — |
 | 5 | Idempotencia con carrera | Check-then-insert: un duplicado concurrente → 500 en lugar de `was_existing`. No se compara el contenido al reusar una clave. `ErrEntryAlreadyExists` nunca se emite. | Medio |
-| 6 | La reversa no llega a Reporting | `BuildReverse` reemplaza `entry.posted` por `entry.reversed`, que no trae postings, y Reporting solo escucha `entry.posted`: sus saldos no reflejan las reversas. Además, Audit lee `p.EntryID` en `entry.reversed`, pero ese evento no tiene `entry_id`, así que el `ResourceID` queda vacío. | Medio |
-| 7 | `account_balances` sin `tenant_id` ni RLS | Depende de que cada query haga join con `ledger_accounts` filtrando por tenant, o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). | Bajo |
-| 8 | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). | Bajo |
-| 9 | Sin control de sobregiro | Ninguna cuenta impide un saldo negativo, ni siquiera `merchant_balance` ante un payout concurrente que pase el chequeo de Payout dos veces. | Medio |
-| 10 | Cuentas de plataforma por tenant | `platform_fees` es por tenant, y se usa como contrapartida de disputas perdidas (marcado como provisorio: "Fase 4: chargebacks_paid"). No hay cuentas de la plataforma (revenue consolidado, banco del PSP). `reserve` no tiene movimientos. | Diseño |
-| 11 | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. | Bajo |
-| 12 | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). | Bajo |
-| 13 | Sin consultas | No hay listado de cuentas, de asientos ni extracto por cuenta. | Funcional |
+| 6 | `account_balances` sin `tenant_id` ni RLS | Depende de que cada query haga join con `ledger_accounts` filtrando por tenant, o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). | Bajo |
+| 7 | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). | Bajo |
+| 8 | Sin control de sobregiro | Ninguna cuenta impide un saldo negativo, ni siquiera `merchant_balance` ante un payout concurrente que pase el chequeo de Payout dos veces. | Medio |
+| 9 | Cuentas de plataforma por tenant | `platform_fees` es por tenant, y se usa como contrapartida de disputas perdidas (marcado como provisorio: "Fase 4: chargebacks_paid"). No hay cuentas de la plataforma (revenue consolidado, banco del PSP). `reserve` no tiene movimientos. | Diseño |
+| 10 | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. | Bajo |
+| 11 | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). | Bajo |
+| 12 | Sin consultas | No hay listado de cuentas, de asientos ni extracto por cuenta. | Funcional |
 
 ---
 

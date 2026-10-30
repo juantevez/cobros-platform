@@ -147,7 +147,7 @@ La documentación técnico-funcional de cada contexto (modelo, casos de uso, API
 | Webhooks | Entrega de eventos a endpoints del comercio con reintentos | *(pendiente)* |
 | Notifications | Emails transaccionales con preferencias por tenant | [NOTIFICATION.md](docs/technical/NOTIFICATION.md) |
 | Disputes | Disputas y contracargos con impacto en Ledger | [DISPUTE.md](docs/technical/DISPUTE.md) |
-| Dashboard & Reporting | Read-model CQRS de volumen, comisiones y saldos | *(pendiente)* |
+| Dashboard & Reporting | Read-model CQRS de volumen, comisiones y saldos | [REPORTING.md](docs/technical/REPORTING.md) |
 | Compliance & AML | Screening contra watchlist y monitoreo transaccional | [COMPLIANCE.md](docs/technical/COMPLIANCE.md) |
 
 ### ✅ Auth & Multi-Tenant

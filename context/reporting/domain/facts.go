@@ -33,3 +33,29 @@ type LedgerMovement struct {
 	Amount      int64 // centavos, siempre > 0
 	PostedAt    time.Time
 }
+
+// AdjustmentKind es el tipo de ajuste que se resta del bruto capturado.
+type AdjustmentKind string
+
+const (
+	// AdjustmentRefund: reembolso (payment.refunded.v1). Total y único por pago.
+	AdjustmentRefund AdjustmentKind = "refund"
+	// AdjustmentChargeback: contracargo (dispute.resolved.v1 perdida,
+	// aceptada o vencida).
+	AdjustmentChargeback AdjustmentKind = "chargeback"
+)
+
+func (k AdjustmentKind) String() string { return string(k) }
+
+// PaymentAdjustment es un hecho inmutable que descuenta dinero de un pago
+// capturado. La clave natural es (Kind, SourceID): el payment_id para un
+// reembolso, el dispute_id para un contracargo.
+type PaymentAdjustment struct {
+	Kind       AdjustmentKind
+	SourceID   string
+	PaymentID  string
+	TenantID   string
+	Currency   string
+	Amount     int64 // centavos, siempre > 0
+	OccurredAt time.Time
+}

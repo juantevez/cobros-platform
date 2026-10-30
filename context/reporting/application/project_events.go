@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/reporting/domain"
@@ -89,7 +90,7 @@ func (uc *ProjectEventsUseCase) ProjectEntryPosted(ctx context.Context, cmd Entr
 		// Denormalizamos el tipo de cuenta para agregar balances sin JOINs.
 		// Si la cuenta no se encuentra, proyectamos con tipo vacío (mejor
 		// que perder el movimiento).
-		accountType, err := uc.accounts.AccountType(ctx, p.AccountID)
+		accountType, err := uc.accounts.AccountType(ctx, cmd.TenantID, p.AccountID)
 		if err != nil {
 			return err
 		}
@@ -107,6 +108,70 @@ func (uc *ProjectEventsUseCase) ProjectEntryPosted(ctx context.Context, cmd Entr
 		}
 	}
 	return nil
+}
+
+// PaymentRefundedCmd son los campos de payment.refunded.v1 relevantes al reporting.
+type PaymentRefundedCmd struct {
+	PaymentID  string
+	TenantID   string
+	Currency   string
+	Amount     int64
+	OccurredAt time.Time // ver PaymentCapturedCmd.OccurredAt
+}
+
+// ProjectPaymentRefunded proyecta un reembolso como ajuste. El reembolso es
+// total y único por pago, así que su clave es el payment_id.
+func (uc *ProjectEventsUseCase) ProjectPaymentRefunded(ctx context.Context, cmd PaymentRefundedCmd) error {
+	if cmd.PaymentID == "" || cmd.TenantID == "" {
+		return domain.ErrInvalidFact
+	}
+	return uc.writer.SavePaymentAdjustment(ctx, domain.PaymentAdjustment{
+		Kind:       domain.AdjustmentRefund,
+		SourceID:   cmd.PaymentID,
+		PaymentID:  cmd.PaymentID,
+		TenantID:   cmd.TenantID,
+		Currency:   cmd.Currency,
+		Amount:     cmd.Amount,
+		OccurredAt: uc.factTime(cmd.OccurredAt),
+	})
+}
+
+// DisputeResolvedCmd son los campos de dispute.resolved.v1 relevantes al reporting.
+type DisputeResolvedCmd struct {
+	DisputeID  string
+	PaymentID  string
+	TenantID   string
+	Currency   string
+	Amount     int64
+	Outcome    string // "won" | "lost" | "accepted" | "expired"
+	OccurredAt time.Time
+}
+
+// chargebackOutcomes son los resultados de disputa en que el comercio pierde
+// el monto disputado.
+var chargebackOutcomes = map[string]bool{"lost": true, "accepted": true, "expired": true}
+
+// ProjectDisputeResolved proyecta un contracargo cuando la disputa se perdió,
+// se aceptó o venció. Una disputa ganada no mueve dinero: no hay hecho.
+func (uc *ProjectEventsUseCase) ProjectDisputeResolved(ctx context.Context, cmd DisputeResolvedCmd) error {
+	if cmd.DisputeID == "" || cmd.PaymentID == "" || cmd.TenantID == "" {
+		return domain.ErrInvalidFact
+	}
+	if cmd.Outcome == "won" {
+		return nil
+	}
+	if !chargebackOutcomes[cmd.Outcome] {
+		return fmt.Errorf("%w: unknown dispute outcome %q", domain.ErrInvalidFact, cmd.Outcome)
+	}
+	return uc.writer.SavePaymentAdjustment(ctx, domain.PaymentAdjustment{
+		Kind:       domain.AdjustmentChargeback,
+		SourceID:   cmd.DisputeID,
+		PaymentID:  cmd.PaymentID,
+		TenantID:   cmd.TenantID,
+		Currency:   cmd.Currency,
+		Amount:     cmd.Amount,
+		OccurredAt: uc.factTime(cmd.OccurredAt),
+	})
 }
 
 // factTime fecha un hecho con el instante del evento de origen, para que las

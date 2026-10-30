@@ -271,9 +271,28 @@ func TestRespondReportError(t *testing.T) {
 	}
 }
 
+func TestMissingTenantReturns403(t *testing.T) {
+	r := &fakeReader{}
+	h := newHandler(r)
+	for name, handler := range map[string]gin.HandlerFunc{
+		"volume": h.GetVolume, "revenue": h.GetRevenue, "balances": h.GetBalances,
+	} {
+		rec := doRequest(handler, "/reports/x", "")
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "tenant required") {
+			t.Errorf("%s: status = %d body = %s, want 403", name, rec.Code, rec.Body)
+		}
+	}
+	if r.calls != 0 {
+		t.Errorf("reader called %d times without tenant", r.calls)
+	}
+}
+
 func TestRegisterRoutes(t *testing.T) {
+	denied := 0
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(&fakeReader{}))
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(&fakeReader{}), RouteGuards{
+		Read: func(c *gin.Context) { denied++; c.AbortWithStatus(http.StatusForbidden) },
+	})
 
 	var got []string
 	for _, r := range engine.Routes() {
@@ -289,4 +308,25 @@ func TestRegisterRoutes(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("routes = %v, want %v", got, want)
 	}
+
+	// Cada ruta pasa por el guard antes del handler.
+	for _, route := range want {
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, strings.TrimPrefix(route, "GET "), nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403 from the guard", route, rec.Code)
+		}
+	}
+	if denied != len(want) {
+		t.Errorf("guard ran %d times, want %d", denied, len(want))
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuard(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic")
+		}
+	}()
+	RegisterRoutes(gin.New().Group("/"), newHandler(&fakeReader{}), RouteGuards{})
 }

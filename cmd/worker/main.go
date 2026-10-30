@@ -363,6 +363,11 @@ func main() {
 			logger.Error("reporting ledger consumer stopped", "error", err)
 		}
 	}()
+	go func() {
+		if err := reportingConsumer.StartDisputeConsumer(ctx); err != nil {
+			logger.Error("reporting dispute consumer stopped", "error", err)
+		}
+	}()
 
 	// ── Compliance & AML: screening + monitoreo transaccional ─────────────────
 

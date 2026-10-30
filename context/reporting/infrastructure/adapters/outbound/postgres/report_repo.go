@@ -12,9 +12,8 @@ import (
 
 // ReportRepository ejecuta las consultas agregadas del dashboard.
 //
-// El aislamiento por comercio se garantiza con el filtro explícito
-// WHERE tenant_id=$1 (el rol de la app es owner y no está sujeto a RLS;
-// RLS actúa como defensa en profundidad para las escrituras transaccionales).
+// Cada consulta filtra por tenant_id y corre en una sesión con
+// app.current_tenant fijado: el WHERE explícito y la RLS aíslan por comercio.
 type ReportRepository struct{ pool pkgpostgres.Conn }
 
 func NewReportRepository(pool pkgpostgres.Conn) *ReportRepository {
@@ -36,84 +35,125 @@ func (r *ReportRepository) Volume(ctx context.Context, q application.VolumeQuery
 		GROUP BY bucket, currency
 		ORDER BY bucket, currency`, where)
 
-	rows, err := r.pool.Query(ctx, sql, args...)
-	if err != nil {
-		return nil, fmt.Errorf("reporting repo: volume: %w", err)
-	}
-	defer rows.Close()
-
 	var out []domain.VolumePoint
-	for rows.Next() {
-		var p domain.VolumePoint
-		if err := rows.Scan(&p.Bucket, &p.Currency, &p.PaymentCount, &p.GrossAmount); err != nil {
-			return nil, fmt.Errorf("reporting repo: volume scan: %w", err)
+	err := withTenant(ctx, r.pool, q.TenantID, func(ctx context.Context, conn pkgpostgres.Conn) error {
+		rows, err := conn.Query(ctx, sql, args...)
+		if err != nil {
+			return fmt.Errorf("reporting repo: volume: %w", err)
 		}
-		out = append(out, p)
+		defer rows.Close()
+
+		for rows.Next() {
+			var p domain.VolumePoint
+			if err := rows.Scan(&p.Bucket, &p.Currency, &p.PaymentCount, &p.GrossAmount); err != nil {
+				return fmt.Errorf("reporting repo: volume scan: %w", err)
+			}
+			out = append(out, p)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-// Revenue agrega las comisiones cobradas por período, por moneda.
+// Revenue agrega por moneda lo capturado en el período (bruto y comisiones)
+// y los reembolsos y contracargos que ocurrieron en el período. Una moneda
+// que solo tiene ajustes aparece igual, con bruto cero.
 func (r *ReportRepository) Revenue(ctx context.Context, q application.RevenueQuery) ([]domain.RevenueSummary, error) {
 	args := []any{q.TenantID}
-	where := "tenant_id = $1"
-	where = appendTimeBounds(where, &args, q.From, q.To, "captured_at")
+	paymentsWhere := appendTimeBounds("tenant_id = $1", &args, q.From, q.To, "captured_at")
+	adjustmentsWhere := appendTimeBounds("tenant_id = $1", &args, q.From, q.To, "occurred_at")
 
 	sql := fmt.Sprintf(`
+		WITH p AS (
+			SELECT currency,
+			       COUNT(*)          AS payment_count,
+			       SUM(amount)       AS gross_amount,
+			       SUM(platform_fee) AS platform_fees,
+			       SUM(psp_fee)      AS psp_fees
+			FROM report_payment_fact
+			WHERE %s
+			GROUP BY currency
+		), a AS (
+			SELECT currency,
+			       COUNT(*) FILTER (WHERE kind = 'refund')                  AS refund_count,
+			       COALESCE(SUM(amount) FILTER (WHERE kind = 'refund'), 0)     AS refunded_amount,
+			       COUNT(*) FILTER (WHERE kind = 'chargeback')              AS chargeback_count,
+			       COALESCE(SUM(amount) FILTER (WHERE kind = 'chargeback'), 0) AS chargeback_amount
+			FROM report_payment_adjustment
+			WHERE %s
+			GROUP BY currency
+		)
 		SELECT currency,
-		       COUNT(*)                       AS payment_count,
-		       COALESCE(SUM(amount), 0)       AS gross_amount,
-		       COALESCE(SUM(platform_fee), 0) AS platform_fees,
-		       COALESCE(SUM(psp_fee), 0)      AS psp_fees
-		FROM report_payment_fact
-		WHERE %s
-		GROUP BY currency
-		ORDER BY currency`, where)
-
-	rows, err := r.pool.Query(ctx, sql, args...)
-	if err != nil {
-		return nil, fmt.Errorf("reporting repo: revenue: %w", err)
-	}
-	defer rows.Close()
+		       COALESCE(p.payment_count, 0), COALESCE(p.gross_amount, 0),
+		       COALESCE(p.platform_fees, 0), COALESCE(p.psp_fees, 0),
+		       COALESCE(a.refund_count, 0), COALESCE(a.refunded_amount, 0),
+		       COALESCE(a.chargeback_count, 0), COALESCE(a.chargeback_amount, 0)
+		FROM p FULL OUTER JOIN a USING (currency)
+		ORDER BY currency`, paymentsWhere, adjustmentsWhere)
 
 	var out []domain.RevenueSummary
-	for rows.Next() {
-		var s domain.RevenueSummary
-		if err := rows.Scan(&s.Currency, &s.PaymentCount, &s.GrossAmount, &s.PlatformFees, &s.PSPFees); err != nil {
-			return nil, fmt.Errorf("reporting repo: revenue scan: %w", err)
+	err := withTenant(ctx, r.pool, q.TenantID, func(ctx context.Context, conn pkgpostgres.Conn) error {
+		rows, err := conn.Query(ctx, sql, args...)
+		if err != nil {
+			return fmt.Errorf("reporting repo: revenue: %w", err)
 		}
-		out = append(out, s)
+		defer rows.Close()
+
+		for rows.Next() {
+			var s domain.RevenueSummary
+			if err := rows.Scan(
+				&s.Currency, &s.PaymentCount, &s.GrossAmount, &s.PlatformFees, &s.PSPFees,
+				&s.RefundCount, &s.RefundedAmount, &s.ChargebackCount, &s.ChargebackAmount,
+			); err != nil {
+				return fmt.Errorf("reporting repo: revenue scan: %w", err)
+			}
+			s.NetAmount = s.GrossAmount - s.RefundedAmount - s.ChargebackAmount
+			out = append(out, s)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // Balances calcula el saldo neto por tipo de cuenta y moneda del comercio.
 func (r *ReportRepository) Balances(ctx context.Context, tenantID string) ([]domain.TenantBalance, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT account_type, currency,
-		       COALESCE(SUM(amount) FILTER (WHERE direction = 'debit'),  0) AS debits,
-		       COALESCE(SUM(amount) FILTER (WHERE direction = 'credit'), 0) AS credits
-		FROM report_ledger_movement
-		WHERE tenant_id = $1
-		GROUP BY account_type, currency
-		ORDER BY account_type, currency`,
-		tenantID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("reporting repo: balances: %w", err)
-	}
-	defer rows.Close()
-
 	var out []domain.TenantBalance
-	for rows.Next() {
-		var b domain.TenantBalance
-		if err := rows.Scan(&b.AccountType, &b.Currency, &b.Debits, &b.Credits); err != nil {
-			return nil, fmt.Errorf("reporting repo: balances scan: %w", err)
+	err := withTenant(ctx, r.pool, tenantID, func(ctx context.Context, conn pkgpostgres.Conn) error {
+		rows, err := conn.Query(ctx, `
+			SELECT account_type, currency,
+			       COALESCE(SUM(amount) FILTER (WHERE direction = 'debit'),  0) AS debits,
+			       COALESCE(SUM(amount) FILTER (WHERE direction = 'credit'), 0) AS credits
+			FROM report_ledger_movement
+			WHERE tenant_id = $1
+			GROUP BY account_type, currency
+			ORDER BY account_type, currency`,
+			tenantID,
+		)
+		if err != nil {
+			return fmt.Errorf("reporting repo: balances: %w", err)
 		}
-		b.Net = b.Debits - b.Credits
-		out = append(out, b)
+		defer rows.Close()
+
+		for rows.Next() {
+			var b domain.TenantBalance
+			if err := rows.Scan(&b.AccountType, &b.Currency, &b.Debits, &b.Credits); err != nil {
+				return fmt.Errorf("reporting repo: balances scan: %w", err)
+			}
+			b.Net = b.Debits - b.Credits
+			out = append(out, b)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // appendTimeBounds agrega condiciones de rango temporal a la cláusula WHERE

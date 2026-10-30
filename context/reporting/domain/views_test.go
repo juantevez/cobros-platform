@@ -67,8 +67,10 @@ func TestViews_JSONContract(t *testing.T) {
 		},
 		{
 			"RevenueSummary",
-			RevenueSummary{Currency: "ARS", PaymentCount: 2, GrossAmount: 1000, PlatformFees: 30, PSPFees: 15},
-			`{"currency":"ARS","payment_count":2,"gross_amount":1000,"platform_fees":30,"psp_fees":15}`,
+			RevenueSummary{Currency: "ARS", PaymentCount: 2, GrossAmount: 1000, PlatformFees: 30, PSPFees: 15,
+				RefundCount: 1, RefundedAmount: 400, ChargebackCount: 1, ChargebackAmount: 100, NetAmount: 500},
+			`{"currency":"ARS","payment_count":2,"gross_amount":1000,"platform_fees":30,"psp_fees":15,` +
+				`"refund_count":1,"refunded_amount":400,"chargeback_count":1,"chargeback_amount":100,"net_amount":500}`,
 		},
 		{
 			"TenantBalance",
@@ -97,5 +99,11 @@ func TestErrors(t *testing.T) {
 		if !strings.HasPrefix(err.Error(), "reporting: ") {
 			t.Errorf("error %q should be prefixed with the context name", err)
 		}
+	}
+}
+
+func TestAdjustmentKind_String(t *testing.T) {
+	if AdjustmentRefund.String() != "refund" || AdjustmentChargeback.String() != "chargeback" {
+		t.Errorf("kinds = %q, %q", AdjustmentRefund, AdjustmentChargeback)
 	}
 }

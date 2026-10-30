@@ -37,13 +37,21 @@ type VolumePoint struct {
 	GrossAmount  int64     `json:"gross_amount"` // centavos
 }
 
-// RevenueSummary agrega las comisiones cobradas por la plataforma en un período.
+// RevenueSummary agrega lo cobrado en un período: bruto capturado, comisiones,
+// y lo que se devolvió (reembolsos) o se perdió (contracargos). Cada hecho
+// cuenta en el período en que ocurrió: un reembolso de octubre de un pago de
+// septiembre resta en octubre.
 type RevenueSummary struct {
-	Currency     string `json:"currency"`
-	PaymentCount int64  `json:"payment_count"`
-	GrossAmount  int64  `json:"gross_amount"`  // centavos
-	PlatformFees int64  `json:"platform_fees"` // revenue de la plataforma, centavos
-	PSPFees      int64  `json:"psp_fees"`      // costo del PSP, centavos
+	Currency         string `json:"currency"`
+	PaymentCount     int64  `json:"payment_count"`
+	GrossAmount      int64  `json:"gross_amount"`  // centavos
+	PlatformFees     int64  `json:"platform_fees"` // revenue de la plataforma, centavos
+	PSPFees          int64  `json:"psp_fees"`      // costo del PSP, centavos
+	RefundCount      int64  `json:"refund_count"`
+	RefundedAmount   int64  `json:"refunded_amount"` // centavos
+	ChargebackCount  int64  `json:"chargeback_count"`
+	ChargebackAmount int64  `json:"chargeback_amount"` // centavos
+	NetAmount        int64  `json:"net_amount"`        // bruto - reembolsos - contracargos, centavos
 }
 
 // TenantBalance es el saldo neto de un tipo de cuenta del comercio, derivado

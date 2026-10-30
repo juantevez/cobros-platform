@@ -25,6 +25,16 @@ type fakeWriter struct {
 	movementErr   error
 	errOnMovement int
 	movementCalls int
+	adjustments   []domain.PaymentAdjustment
+	adjustmentErr error
+}
+
+func (w *fakeWriter) SavePaymentAdjustment(ctx context.Context, a domain.PaymentAdjustment) error {
+	if w.adjustmentErr != nil {
+		return w.adjustmentErr
+	}
+	w.adjustments = append(w.adjustments, a)
+	return nil
 }
 
 func (w *fakeWriter) SavePaymentFact(ctx context.Context, f domain.PaymentFact) error {
@@ -49,11 +59,11 @@ func (w *fakeWriter) SaveLedgerMovement(ctx context.Context, m domain.LedgerMove
 type fakeAccounts struct {
 	types   map[string]string
 	err     error
-	lookups []string
+	lookups []string // "tenant/cuenta" de cada consulta
 }
 
-func (a *fakeAccounts) AccountType(ctx context.Context, accountID string) (string, error) {
-	a.lookups = append(a.lookups, accountID)
+func (a *fakeAccounts) AccountType(ctx context.Context, tenantID, accountID string) (string, error) {
+	a.lookups = append(a.lookups, tenantID+"/"+accountID)
 	if a.err != nil {
 		return "", a.err
 	}
