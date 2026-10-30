@@ -9,6 +9,7 @@ import (
 
 	"github.com/juantevez/cobros-platform/context/ledger/application"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type onboardingApprovedPayload struct {
@@ -51,6 +52,7 @@ func (c *OnboardingConsumer) handle(ctx context.Context, msg *eventbus.Message) 
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		return fmt.Errorf("ledger onboarding consumer: unmarshal: %w", err)
 	}
+	ctx = pkgpostgres.WithTenantID(ctx, payload.TenantID) // RLS de las escrituras
 
 	currency := payload.Currency
 	if currency == "" {

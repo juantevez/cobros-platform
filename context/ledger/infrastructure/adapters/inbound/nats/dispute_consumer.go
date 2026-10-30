@@ -9,6 +9,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/ledger/application"
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type disputeEventPayload struct {
@@ -64,6 +65,7 @@ func (c *DisputeConsumer) handle(ctx context.Context, msg *eventbus.Message) err
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
 		return fmt.Errorf("dispute consumer: unmarshal: %w", err)
 	}
+	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
 	tenantID := domain.TenantID(p.TenantID)
 

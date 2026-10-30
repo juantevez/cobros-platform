@@ -9,6 +9,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/ledger/application"
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type paymentCapturedPayload struct {
@@ -94,6 +95,7 @@ func (c *PaymentConsumer) handleCaptured(ctx context.Context, msg *eventbus.Mess
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
 		return fmt.Errorf("ledger payment consumer: unmarshal: %w", err)
 	}
+	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
 	tenantID := domain.TenantID(p.TenantID)
 
@@ -159,6 +161,7 @@ func (c *PaymentConsumer) handleRefunded(ctx context.Context, msg *eventbus.Mess
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
 		return fmt.Errorf("ledger payment consumer: unmarshal refund: %w", err)
 	}
+	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
 	tenantID := domain.TenantID(p.TenantID)
 

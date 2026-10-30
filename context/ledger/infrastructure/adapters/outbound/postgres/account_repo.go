@@ -25,7 +25,12 @@ func NewAccountRepository(pool *pgxpool.Pool) *pgAccountRepository {
 }
 
 func (r *pgAccountRepository) Save(ctx context.Context, a *domain.Account) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, a.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return r.save(ctx, conn, a)
+	})
+}
+
+func (r *pgAccountRepository) save(ctx context.Context, conn postgres.Conn, a *domain.Account) error {
 	_, err := conn.Exec(ctx, `
 		INSERT INTO ledger_accounts (id, tenant_id, type, currency, description, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -61,13 +66,17 @@ func (r *pgAccountRepository) Save(ctx context.Context, a *domain.Account) error
 }
 
 func (r *pgAccountRepository) FindByID(ctx context.Context, id domain.AccountID) (*domain.Account, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, type, currency, description, created_at
-		FROM ledger_accounts WHERE id = $1`,
-		id.String(),
-	)
-	return scanAccount(row)
+	var account *domain.Account
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		account, err = scanAccount(conn.QueryRow(ctx, `
+			SELECT id, tenant_id, type, currency, description, created_at
+			FROM ledger_accounts WHERE id = $1`,
+			id.String(),
+		))
+		return err
+	})
+	return account, err
 }
 
 func (r *pgAccountRepository) FindByTenantAndType(
@@ -76,15 +85,19 @@ func (r *pgAccountRepository) FindByTenantAndType(
 	accountType domain.AccountType,
 	currency string,
 ) (*domain.Account, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, type, currency, description, created_at
-		FROM ledger_accounts
-		WHERE tenant_id = $1 AND type = $2 AND currency = $3
-		LIMIT 1`,
-		tenantID.String(), accountType.String(), currency,
-	)
-	return scanAccount(row)
+	var account *domain.Account
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		account, err = scanAccount(conn.QueryRow(ctx, `
+			SELECT id, tenant_id, type, currency, description, created_at
+			FROM ledger_accounts
+			WHERE tenant_id = $1 AND type = $2 AND currency = $3
+			LIMIT 1`,
+			tenantID.String(), accountType.String(), currency,
+		))
+		return err
+	})
+	return account, err
 }
 
 func scanAccount(row pgx.Row) (*domain.Account, error) {

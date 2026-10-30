@@ -139,3 +139,52 @@ func TestConvention_DisputeWonAndPayoutFailedRestoreMerchantBalance(t *testing.T
 		domain.AccountTypeInTransit:       -5000,
 	})
 }
+
+// Los consumers no reciben tenant en el contexto: lo toman del payload para
+// que el TxManager fije app.current_tenant y las escrituras pasen el RLS.
+func TestConsumers_SetTenantInContext(t *testing.T) {
+	tenantID := testTenantID(t)
+	tid := tenantID.String()
+	accountRepo := newFakeAccountRepo()
+	for _, at := range []domain.AccountType{
+		domain.AccountTypeMerchantBalance, domain.AccountTypePlatformFees, domain.AccountTypeInTransit,
+		domain.AccountTypeDisputeHold, domain.AccountTypePayoutTransit, domain.AccountTypePayoutSent,
+	} {
+		accountRepo.seed(t, tenantID, at, "ARS")
+	}
+	postEntry, _, _ := newPostEntry(accountRepo)
+	createAccount, _ := newCreateAccount(accountRepo)
+
+	cases := []struct {
+		name string
+		h    func(context.Context, *eventbus.Message) error
+		msg  *eventbus.Message
+	}{
+		{"onboarding", NewOnboardingConsumer(&fakeConsumer{}, createAccount, discardLogger()).handle,
+			&eventbus.Message{Payload: []byte(`{"tenant_id":"` + tid + `","currency":"ARS"}`)}},
+		{"payment captured", NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger()).handle,
+			paymentMsg(tid, validUUID(), 1000, 10, 0)},
+		{"payment refunded", NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger()).handle,
+			refundMsg(tid, validUUID(), 1000)},
+		{"payout", NewPayoutConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger()).handle,
+			payoutMsg("payout.initiated.v1", tid, validUUID(), 100)},
+		{"dispute", NewDisputeConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger()).handle,
+			disputeMsg("dispute.opened.v1", tid, validUUID(), "", 100)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			accountRepo.ctxTenants = nil
+			if err := tc.h(context.Background(), tc.msg); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(accountRepo.ctxTenants) == 0 {
+				t.Fatal("repo not called")
+			}
+			for _, got := range accountRepo.ctxTenants {
+				if got != tid {
+					t.Errorf("tenant in context = %q, want %q", got, tid)
+				}
+			}
+		})
+	}
+}

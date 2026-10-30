@@ -9,6 +9,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/ledger/application"
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // PayoutConsumer registra los asientos contables para cada evento del ciclo de payout.
@@ -66,6 +67,7 @@ func (c *PayoutConsumer) handle(ctx context.Context, msg *eventbus.Message) erro
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
 		return fmt.Errorf("payout consumer: unmarshal: %w", err)
 	}
+	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
 	tenantID := domain.TenantID(p.TenantID)
 

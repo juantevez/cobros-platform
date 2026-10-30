@@ -40,8 +40,10 @@ func (b *BalanceChecker) GetAvailableBalance(
 	tenantID domain.TenantID,
 	currency string,
 ) (int64, error) {
+	// La conexión de la tx del caller: ahí están fijados el tenant (RLS) y el
+	// advisory lock. Directo contra el pool, un rol sin BYPASSRLS no ve filas.
 	var balance int64
-	err := b.pool.QueryRow(ctx, `
+	err := pkgpostgres.ConnFromContext(ctx, b.pool).QueryRow(ctx, `
 		SELECT ab.balance - COALESCE((
 			SELECT SUM(p.amount)
 			FROM payouts p

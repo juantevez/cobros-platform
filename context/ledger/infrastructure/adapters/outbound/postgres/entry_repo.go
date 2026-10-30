@@ -24,8 +24,12 @@ func NewEntryRepository(pool *pgxpool.Pool) *pgEntryRepository {
 
 // Save persiste el JournalEntry y todos sus Postings en la misma transacción.
 func (r *pgEntryRepository) Save(ctx context.Context, e *domain.JournalEntry) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, e.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return r.save(ctx, conn, e)
+	})
+}
 
+func (r *pgEntryRepository) save(ctx context.Context, conn postgres.Conn, e *domain.JournalEntry) error {
 	metadata, err := json.Marshal(e.Metadata())
 	if err != nil {
 		return fmt.Errorf("entry repo: marshal metadata: %w", err)
@@ -68,13 +72,17 @@ func (r *pgEntryRepository) Save(ctx context.Context, e *domain.JournalEntry) er
 }
 
 func (r *pgEntryRepository) FindByID(ctx context.Context, id domain.EntryID) (*domain.JournalEntry, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
-		FROM journal_entries WHERE id = $1`,
-		id.String(),
-	)
-	return r.scanEntryWithPostings(ctx, conn, row)
+	var entry *domain.JournalEntry
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		entry, err = r.scanEntryWithPostings(ctx, conn, conn.QueryRow(ctx, `
+			SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
+			FROM journal_entries WHERE id = $1`,
+			id.String(),
+		))
+		return err
+	})
+	return entry, err
 }
 
 func (r *pgEntryRepository) FindByIdempotencyKey(
@@ -82,14 +90,18 @@ func (r *pgEntryRepository) FindByIdempotencyKey(
 	tenantID domain.TenantID,
 	key string,
 ) (*domain.JournalEntry, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
-		FROM journal_entries
-		WHERE tenant_id = $1 AND idempotency_key = $2`,
-		tenantID.String(), key,
-	)
-	return r.scanEntryWithPostings(ctx, conn, row)
+	var entry *domain.JournalEntry
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		entry, err = r.scanEntryWithPostings(ctx, conn, conn.QueryRow(ctx, `
+			SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
+			FROM journal_entries
+			WHERE tenant_id = $1 AND idempotency_key = $2`,
+			tenantID.String(), key,
+		))
+		return err
+	})
+	return entry, err
 }
 
 // scanEntryWithPostings carga el entry y luego sus postings.
