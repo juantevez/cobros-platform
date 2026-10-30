@@ -68,30 +68,39 @@ sequenceDiagram
     participant T as Templates (dominio)
     participant P as PreferenceRepo
     participant CR as ContactReader
-    participant E as EmailSender
     participant R as NotifRepo
+    participant E as EmailSender
 
-    N->>C: msg "payment.captured.v1" {tenant_id, ...}
-    C->>C: unmarshal payload; sin tenant_id o malformado → ack nil
-    C->>C: buildTemplateData(subject, payload); desconocido → ack nil
-    C->>UC: Execute(SendNotificationCmd{TenantID, EventType, TemplateData})
+    N->>C: msg payment.captured.v1 (tenant_id, ...)
+    C->>C: unmarshal payload (sin tenant_id o malformado → ack)
+    C->>C: buildTemplateData(subject, payload) (sin datos → ack)
+    C->>UC: Execute(TenantID, EventType, TemplateData, NatsMsgID)
+    UC->>UC: NormalizeEventType (payment.captured.v1 → payment.captured)
     UC->>T: FindTemplate(eventType)
     alt sin template
         UC-->>C: nil (skip silencioso, sin registro)
     end
-    UC->>P: FindByTenantAndEvent(tenant, et)
-    Note over UC,P: error ≠ not_found → skip + warn (sin registro)<br/>pref deshabilitada → "" → skip silencioso<br/>pref con recipient_email → se usa ese email
-    UC->>CR: GetTenantAdminEmail(tenant) (si no override)
-    Note over UC,CR: error → skip + warn (sin registro)
+    UC->>P: FindByTenantAndEvent(tenant, eventType)
+    Note over UC,P: pref deshabilitada → skip silencioso<br/>pref con recipient_email → se usa ese email
+    UC->>CR: GetTenantAdminEmail(tenant) (si no hay override)
+    Note over UC,CR: sin admin activo → skip + warn (sin registro)
+    UC->>R: ExistsByEventMsg(tenant, eventType, NatsMsgID)
+    alt ya procesado (re-entrega)
+        UC-->>C: nil (skip, sin enviar)
+    else error de BD
+        UC-->>C: error
+        C-->>N: nak (reintento, MaxDeliver 3)
+    end
     UC->>T: tmpl.Render(data) → subject, body
     UC->>E: Send(to, subject, body)
     alt éxito
         UC->>UC: notif.MarkSent()
-    else fallo
+    else fallo de envío
         UC->>UC: notif.MarkFailed(err) + log Error
     end
-    UC->>R: Save(notif)  ← siempre (sent o failed)
-    UC-->>C: nil → ack
+    UC->>R: Save(notif) (sent o failed, UNIQUE tenant+evento+msg)
+    UC-->>C: nil
+    C-->>N: ack
 ```
 
 ---
