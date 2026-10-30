@@ -124,6 +124,25 @@ func (r *pgAuditLogRepository) FindLast(ctx context.Context) (*domain.AuditLogEn
 	return entry, nil
 }
 
+// FindBefore retorna la predecesora en la cadena de la entrada beforeID.
+func (r *pgAuditLogRepository) FindBefore(ctx context.Context, beforeID int64) (*domain.AuditLogEntry, error) {
+	row := r.pool.QueryRow(ctx, `
+		SELECT id, tenant_id, actor, action, resource_type, resource_id,
+		       metadata, correlation_id, event_id, occurred_at, prev_hash, hash, created_at
+		FROM audit_log
+		WHERE id < $1
+		ORDER BY id DESC
+		LIMIT 1`, beforeID)
+	entry, err := scanEntry(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("audit repo: find before: %w", err)
+	}
+	return entry, nil
+}
+
 func (r *pgAuditLogRepository) ListRecent(ctx context.Context, limit int) ([]*domain.AuditLogEntry, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, tenant_id, actor, action, resource_type, resource_id,

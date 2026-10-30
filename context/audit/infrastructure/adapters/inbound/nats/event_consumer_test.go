@@ -31,6 +31,9 @@ func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error {
 }
 func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) { return nil, nil }
 func (r *fakeRepo) LockChain(ctx context.Context) error                         { return nil }
+func (r *fakeRepo) FindBefore(ctx context.Context, id int64) (*domain.AuditLogEntry, error) {
+	return nil, nil
+}
 func (r *fakeRepo) ExistsByEventID(ctx context.Context, id string) (bool, error) {
 	for _, e := range r.saved {
 		if e.EventID() == id {

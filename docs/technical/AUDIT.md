@@ -280,24 +280,24 @@ publicados. Solo un fallo al escribir hace **nak** (reintento hasta
 ### 5.3 Verificación (`VerifyChain`)
 
 ```
-entries := repo.ListFromID(from_id, limit)     (limit ≤ 0 → 500; sin máximo)
-para cada entrada i:
+entries := repo.ListFromID(from_id, limit)       (limit ≤ 0 → 500; máximo 5000)
+prev    := repo.FindBefore(entries[0].id)        (predecesora del lote; nil = génesis)
+para cada entrada:
     VerifyHash falla                → Valid=false, FirstInvalidID=id, "hash mismatch …"
-    i > 0 y !ChainLinksTo(entries[i-1]) → Valid=false, "chain broken …"
-    i = 0 y from_id = 0 y prev_hash ≠ vacío → Valid=false, "first entry … unexpected prev_hash"
-→ Valid=true, EntriesChecked=len(entries)
+    !ChainLinksTo(prev)             → Valid=false, "chain broken …"
+                                      (prev = nil: "first entry … unexpected prev_hash")
+    prev = entrada
+→ Valid=true, EntriesChecked, Complete = len(entries) < limit,
+  NextFromID = último id + 1 (si no está completo)
 ```
 
-Alcance real de la verificación:
-
-- Verifica **un lote** (`limit` filas desde `from_id`); recorrer la cadena
-  completa requiere paginar desde el cliente.
-- Con `from_id > 0` no se verifica que la primera fila del lote enlace con su
-  predecesora: la verificación por lotes deja sin chequear los bordes.
-- No detecta el **borrado de las últimas filas** (truncar la cola deja una
-  cadena consistente).
-
----
+- Cada lote se enlaza con la fila **anterior a su primera fila**, así que no
+  quedan bordes sin chequear: paginar con `next_from_id` hasta
+  `complete = true` verifica la cadena completa.
+- Un lote cuya primera fila no tiene predecesora debe empezar en la génesis
+  (`prev_hash` vacío): borrar las primeras filas se detecta.
+- Borrar filas intermedias rompe el enlace de la siguiente. Los huecos de `id`
+  sin borrado (secuencia consumida por una tx revertida) no afectan.
 
 ## 6. API HTTP
 
@@ -340,8 +340,12 @@ Ejemplo de `LogEntryView`:
 }
 ```
 
-`VerifyChainResult`: `{Valid, EntriesChecked, FirstInvalidID, FirstInvalidMsg}`
-(sin tags JSON: los campos salen en PascalCase).
+`VerifyChainResult`:
+
+```json
+{ "valid": true, "entries_checked": 500, "first_invalid_id": 0, "first_invalid_msg": "",
+  "next_from_id": 501, "complete": false }
+```
 
 ---
 
@@ -418,7 +422,8 @@ Queries ([outbound/postgres/audit_log_repo.go](../../context/audit/infrastructur
 | `FindLast` | `SELECT … ORDER BY id DESC LIMIT 1` | En la tx del contexto, después de `LockChain`. |
 | `ListRecent` | `SELECT … ORDER BY id DESC LIMIT $1` | |
 | `ListByTenant` | `SELECT … WHERE tenant_id=$1 ORDER BY id DESC LIMIT $2` | |
-| `ListFromID` | `SELECT … WHERE id >= $1 ORDER BY id ASC LIMIT $2` | Base de `VerifyChain`. |
+| `ListFromID` | `SELECT … WHERE id >= $1 ORDER BY id ASC LIMIT $2` | Lote de `VerifyChain`. |
+| `FindBefore` | `SELECT … WHERE id < $1 ORDER BY id DESC LIMIT 1` | Predecesora del lote (enlace del borde). |
 
 Al leer, `ParseAction`/`ParseResourceType` ignoran errores: un valor fuera del
 catálogo se reconstituye como vacío.
@@ -444,7 +449,6 @@ catálogo se reconstituye como vacío.
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
 | 1 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
-| 2 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
 
 ---
 

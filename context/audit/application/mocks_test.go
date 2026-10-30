@@ -28,12 +28,15 @@ type fakeRepo struct {
 	fromIDErr   error
 	lockErr     error
 	existsErr   error
+	before      *domain.AuditLogEntry // predecesora devuelta por FindBefore
+	beforeErr   error
 
 	// capturados para aserciones
 	calls        []string // orden de LockChain / FindLast / Save
 	lastLimit    int
 	lastTenantID string
 	lastFromID   int64
+	lastBeforeID int64
 }
 
 func (r *fakeRepo) LockChain(ctx context.Context) error {
@@ -86,6 +89,11 @@ func (r *fakeRepo) ListByTenant(ctx context.Context, tenantID string, limit int)
 		return nil, r.tenantErr
 	}
 	return r.byTenant, nil
+}
+
+func (r *fakeRepo) FindBefore(ctx context.Context, beforeID int64) (*domain.AuditLogEntry, error) {
+	r.lastBeforeID = beforeID
+	return r.before, r.beforeErr
 }
 
 func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*domain.AuditLogEntry, error) {

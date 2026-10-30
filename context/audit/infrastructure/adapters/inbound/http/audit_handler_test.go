@@ -33,9 +33,12 @@ type fakeRepo struct {
 	gotTenantID string
 }
 
-func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error      { return nil }
-func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error)  { return nil, nil }
-func (r *fakeRepo) LockChain(ctx context.Context) error                          { return nil }
+func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error     { return nil }
+func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) { return nil, nil }
+func (r *fakeRepo) LockChain(ctx context.Context) error                         { return nil }
+func (r *fakeRepo) FindBefore(ctx context.Context, id int64) (*domain.AuditLogEntry, error) {
+	return nil, nil
+}
 func (r *fakeRepo) ExistsByEventID(ctx context.Context, id string) (bool, error) { return false, nil }
 func (r *fakeRepo) ListRecent(ctx context.Context, limit int) ([]*domain.AuditLogEntry, error) {
 	return r.recent, r.recentErr

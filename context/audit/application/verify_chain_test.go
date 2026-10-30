@@ -19,6 +19,21 @@ func validChain(n int) []*domain.AuditLogEntry {
 	return entries
 }
 
+// withIDs reconstituye las entradas con IDs consecutivos desde first (como
+// las devolvería la base).
+func withIDs(entries []*domain.AuditLogEntry, first int64) []*domain.AuditLogEntry {
+	out := make([]*domain.AuditLogEntry, len(entries))
+	for i, e := range entries {
+		out[i] = domain.ReconstituteAuditLogEntry(domain.EntrySnapshot{
+			ID: first + int64(i), TenantID: e.TenantID(), Actor: e.Actor(), Action: e.Action(),
+			ResourceType: e.ResourceType(), ResourceID: e.ResourceID(), Metadata: e.Metadata(),
+			CorrelationID: e.CorrelationID(), EventID: e.EventID(), OccurredAt: e.OccurredAt(),
+			PrevHash: e.PrevHash(), Hash: e.Hash(), CreatedAt: e.CreatedAt(),
+		})
+	}
+	return out
+}
+
 func TestVerifyChainUseCase_Execute(t *testing.T) {
 	t.Run("valid chain from genesis", func(t *testing.T) {
 		repo := &fakeRepo{fromID: validChain(3)}
@@ -131,18 +146,62 @@ func TestVerifyChainUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("partial verification from non-zero FromID skips genesis check", func(t *testing.T) {
-		// Con FromID != 0 la primera entrada puede legítimamente tener prevHash.
-		e := buildEntry("t", domain.ActionLogin, domain.ResourceUser, "u", []byte("some-prev-hash-of-32-bytes-len!!"))
-		repo := &fakeRepo{fromID: []*domain.AuditLogEntry{e}}
-		uc := NewVerifyChainUseCase(repo, newHasher())
-
-		res, err := uc.Execute(context.Background(), VerifyChainQuery{FromID: 100})
+	t.Run("batch from a non-zero FromID is linked to its predecessor", func(t *testing.T) {
+		chain := withIDs(validChain(4), 1)
+		repo := &fakeRepo{fromID: chain[2:], before: chain[1]}
+		res, err := NewVerifyChainUseCase(repo, newHasher()).Execute(context.Background(), VerifyChainQuery{FromID: 3})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !res.Valid {
-			t.Errorf("expected valid, got %+v", res)
+		if !res.Valid || repo.lastBeforeID != 3 {
+			t.Errorf("res = %+v, FindBefore(%d)", res, repo.lastBeforeID)
+		}
+	})
+
+	t.Run("broken link at the batch border is detected", func(t *testing.T) {
+		chain := withIDs(validChain(4), 1)
+		repo := &fakeRepo{fromID: chain[2:], before: chain[0]} // la predecesora real (id 2) no es esta
+		res, _ := NewVerifyChainUseCase(repo, newHasher()).Execute(context.Background(), VerifyChainQuery{FromID: 3})
+		if res.Valid || res.FirstInvalidID != 3 {
+			t.Errorf("border break not detected: %+v", res)
+		}
+	})
+
+	t.Run("batch without predecessor must start at genesis", func(t *testing.T) {
+		chain := withIDs(validChain(3), 1)
+		repo := &fakeRepo{fromID: chain[1:]} // falta la génesis: FindBefore no encuentra nada
+		res, _ := NewVerifyChainUseCase(repo, newHasher()).Execute(context.Background(), VerifyChainQuery{FromID: 2})
+		if res.Valid || res.FirstInvalidID != 2 {
+			t.Errorf("missing genesis not detected: %+v", res)
+		}
+	})
+
+	t.Run("pagination: full batch is incomplete and points to the next id", func(t *testing.T) {
+		chain := withIDs(validChain(3), 10)
+		repo := &fakeRepo{fromID: chain}
+		res, _ := NewVerifyChainUseCase(repo, newHasher()).Execute(context.Background(), VerifyChainQuery{Limit: 3})
+		if !res.Valid || res.Complete || res.NextFromID != 13 {
+			t.Errorf("res = %+v, want incomplete with next_from_id 13", res)
+		}
+		repo = &fakeRepo{fromID: chain}
+		res, _ = NewVerifyChainUseCase(repo, newHasher()).Execute(context.Background(), VerifyChainQuery{Limit: 10})
+		if !res.Complete || res.NextFromID != 0 {
+			t.Errorf("res = %+v, want complete", res)
+		}
+	})
+
+	t.Run("limit is capped", func(t *testing.T) {
+		repo := &fakeRepo{}
+		_, _ = NewVerifyChainUseCase(repo, newHasher()).Execute(context.Background(), VerifyChainQuery{Limit: 1_000_000})
+		if repo.lastLimit != maxVerifyBatchSize {
+			t.Errorf("limit = %d, want %d", repo.lastLimit, maxVerifyBatchSize)
+		}
+	})
+
+	t.Run("predecessor lookup error propagated", func(t *testing.T) {
+		repo := &fakeRepo{fromID: validChain(1), beforeErr: errBoom}
+		if _, err := NewVerifyChainUseCase(repo, newHasher()).Execute(context.Background(), VerifyChainQuery{}); err == nil {
+			t.Fatal("expected error")
 		}
 	})
 

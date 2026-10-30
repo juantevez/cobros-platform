@@ -156,6 +156,36 @@ func TestRepo_ExistsByEventID(t *testing.T) {
 	}
 }
 
+func TestRepo_FindBefore(t *testing.T) {
+	t.Run("returns the predecessor", func(t *testing.T) {
+		mock := newMock(t)
+		tid, rid := "tenant-1", "user-1"
+		mock.ExpectQuery(`WHERE id < \$1\s+ORDER BY id DESC\s+LIMIT 1`).WithArgs(int64(10)).
+			WillReturnRows(addRow(pgxmock.NewRows(repoCols), 9, &tid, &rid, nil, nil))
+		e, err := NewAuditLogRepository(mock).FindBefore(context.Background(), 10)
+		if err != nil || e == nil || e.ID() != 9 {
+			t.Fatalf("got %+v, %v", e, err)
+		}
+	})
+
+	t.Run("no predecessor returns nil,nil", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectQuery("WHERE id < ").WithArgs(int64(1)).WillReturnRows(pgxmock.NewRows(repoCols))
+		e, err := NewAuditLogRepository(mock).FindBefore(context.Background(), 1)
+		if err != nil || e != nil {
+			t.Fatalf("got %+v, %v", e, err)
+		}
+	})
+
+	t.Run("db error propagated", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectQuery("WHERE id < ").WillReturnError(errors.New("boom"))
+		if _, err := NewAuditLogRepository(mock).FindBefore(context.Background(), 1); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
 func TestRepo_FindLast(t *testing.T) {
 	t.Run("returns last entry", func(t *testing.T) {
 		mock := newMock(t)

@@ -38,6 +38,10 @@ type AuditLogRepository interface {
 	// ListByTenant retorna las últimas n entradas de un tenant específico.
 	ListByTenant(ctx context.Context, tenantID string, limit int) ([]*domain.AuditLogEntry, error)
 
+	// FindBefore retorna la última entrada con id < beforeID (la predecesora
+	// en la cadena), o nil, nil si no hay ninguna.
+	FindBefore(ctx context.Context, beforeID int64) (*domain.AuditLogEntry, error)
+
 	// ListFromID retorna todas las entradas desde un ID dado, en orden ascendente.
 	// Usado por VerifyChain para recorrer la cadena.
 	ListFromID(ctx context.Context, fromID int64, limit int) ([]*domain.AuditLogEntry, error)
