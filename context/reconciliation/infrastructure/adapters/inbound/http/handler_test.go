@@ -334,13 +334,18 @@ func TestGetReport(t *testing.T) {
 func TestUploadReport(t *testing.T) {
 	csv := "transaction_id,amount,currency,status\nPSP-1,100,ARS,captured\nPSP-2,50,ARS,captured\n"
 
-	t.Run("processes CSV and returns 202", func(t *testing.T) {
+	t.Run("processes CSV and returns the completed run", func(t *testing.T) {
 		e := newEnv([]application.SystemPayment{{PaymentID: "p1", PSPReference: "PSP-1", Amount: 100, Currency: "ARS", Status: "captured"}}, 0)
 		run := e.seedRun(domain.TypePayment)
 
 		rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", csv, testTenant, runParam(run.ID().String()))
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body)
+		}
+		var view application.RunView
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil || view.ID != run.ID().String() ||
+			view.Status != "completed" || view.MatchedCount != 1 || view.DiscrepancyCount != 1 {
+			t.Errorf("body = %s (%v)", rec.Body, err)
 		}
 		if run.Status() != domain.RunStatusCompleted || run.MatchedCount() != 1 || run.DiscrepancyCount() != 1 {
 			t.Errorf("status=%q matched=%d discrepancies=%d", run.Status(), run.MatchedCount(), run.DiscrepancyCount())
@@ -400,6 +405,40 @@ func TestUploadReport(t *testing.T) {
 		}
 	})
 
+	t.Run("report over 50 MB returns 413 instead of being truncated", func(t *testing.T) {
+		e := newEnv(nil, 0)
+		run := e.seedRun(domain.TypePayment)
+		// Filas completas hasta pasar el tope por un byte: truncado justo en
+		// un salto de línea, un LimitReader lo habría aceptado.
+		row := "PSP-X,1,ARS,captured\n"
+		header := "transaction_id,amount,currency,status\n"
+		body := header + strings.Repeat(row, (maxReportBytes-len(header))/len(row)+1)
+
+		rec := doRequest(e.h.UploadReport, http.MethodPost, "/x", body, testTenant, runParam(run.ID().String()))
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", rec.Code)
+		}
+		if run.Status() != domain.RunStatusPending {
+			t.Error("run must not be touched")
+		}
+	})
+
+	t.Run("report of exactly 50 MB is accepted", func(t *testing.T) {
+		e := newEnv(nil, 0)
+		run := e.seedRun(domain.TypePayment)
+		header, tail := "transaction_id,amount,currency,status\n", ",1,ARS,captured\n"
+		// Una sola fila con un transaction_id largo completa los 50 MB exactos.
+		body := header + strings.Repeat("X", maxReportBytes-len(header)-len(tail)) + tail
+		if len(body) != maxReportBytes {
+			t.Fatalf("body is %d bytes", len(body))
+		}
+
+		rec := doRequest(e.h.UploadReport, http.MethodPost, "/x", body, testTenant, runParam(run.ID().String()))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%.200s", rec.Code, rec.Body)
+		}
+	})
+
 	t.Run("unreadable body returns 400", func(t *testing.T) {
 		e := newEnv(nil, 0)
 		rec := httptest.NewRecorder()
@@ -425,13 +464,17 @@ func (errReader) Read([]byte) (int, error) { return 0, errBoom }
 // ── ProcessInternal ───────────────────────────────────────────────────────────
 
 func TestProcessInternal(t *testing.T) {
-	t.Run("runs ledger check and returns 202", func(t *testing.T) {
+	t.Run("runs ledger check and returns the completed run", func(t *testing.T) {
 		e := newEnv(nil, 1)
 		run := e.seedRun(domain.TypeInternal)
 
 		rec := doRequest(e.h.ProcessInternal, http.MethodPost, "/runs/x/process-internal", "", testTenant, runParam(run.ID().String()))
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body)
+		}
+		var view application.RunView
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil || view.Status != "completed" || view.DiscrepancyCount != 1 {
+			t.Errorf("body = %s (%v)", rec.Body, err)
 		}
 		if run.Status() != domain.RunStatusCompleted || len(e.discs.saved) != 1 {
 			t.Errorf("status=%q saved=%d", run.Status(), len(e.discs.saved))

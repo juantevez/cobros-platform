@@ -45,41 +45,44 @@ func NewProcessReportUseCase(
 	}
 }
 
-func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCmd) error {
+func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCmd) (RunView, error) {
 	if len(cmd.ReportData) == 0 {
-		return domain.ErrEmptyReport
+		return RunView{}, domain.ErrEmptyReport
 	}
 
 	runID, err := domain.ParseRunID(cmd.RunID)
 	if err != nil {
-		return err
+		return RunView{}, err
 	}
 
 	// Parsear antes de tomar el run: un informe mal formado es un error del
 	// cliente y no debe dejar el run failed.
 	pspRecords, err := uc.reportParser.Parse(cmd.ReportData)
 	if err != nil {
-		return fmt.Errorf("parse report: %w", err)
+		return RunView{}, fmt.Errorf("parse report: %w", err)
 	}
 
 	run, err := uc.runs.FindByID(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("find run: %w", err)
+		return RunView{}, fmt.Errorf("find run: %w", err)
 	}
 	if !ownedBy(run, cmd.TenantID) {
-		return domain.ErrRunNotFound
+		return RunView{}, domain.ErrRunNotFound
 	}
 
 	if err := uc.claim(ctx, run, domain.TypePayment); err != nil {
-		return err
+		return RunView{}, err
 	}
 
 	discrepancies, total, matched, err := uc.compare(ctx, run, pspRecords)
 	if err != nil {
-		return uc.fail(ctx, run, fmt.Errorf("compare: %w", err))
+		return RunView{}, uc.fail(ctx, run, fmt.Errorf("compare: %w", err))
 	}
 
-	return uc.complete(ctx, run, discrepancies, total, matched)
+	if err := uc.complete(ctx, run, discrepancies, total, matched); err != nil {
+		return RunView{}, err
+	}
+	return toRunView(run), nil
 }
 
 func (uc *ProcessReportUseCase) compare(
@@ -244,32 +247,35 @@ func NewProcessInternalUseCase(
 	}
 }
 
-func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessInternalCmd) error {
+func (uc *ProcessInternalUseCase) Execute(ctx context.Context, cmd ProcessInternalCmd) (RunView, error) {
 	runID, err := domain.ParseRunID(cmd.RunID)
 	if err != nil {
-		return err
+		return RunView{}, err
 	}
 
 	run, err := uc.runs.FindByID(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("find run: %w", err)
+		return RunView{}, fmt.Errorf("find run: %w", err)
 	}
 	if !ownedBy(run, cmd.TenantID) {
-		return domain.ErrRunNotFound
+		return RunView{}, domain.ErrRunNotFound
 	}
 
 	if err := uc.claim(ctx, run, domain.TypeInternal); err != nil {
-		return err
+		return RunView{}, err
 	}
 
 	check, err := uc.ledgerChecker.Check(ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo())
 	if err != nil {
-		return uc.fail(ctx, run, fmt.Errorf("check ledger: %w", err))
+		return RunView{}, uc.fail(ctx, run, fmt.Errorf("check ledger: %w", err))
 	}
 
 	discrepancies := ledgerDiscrepancies(run, check, uc.clock.Now())
 	total := check.EntriesChecked + check.CapturesChecked
-	return uc.complete(ctx, run, discrepancies, total, total-len(discrepancies))
+	if err := uc.complete(ctx, run, discrepancies, total, total-len(discrepancies)); err != nil {
+		return RunView{}, err
+	}
+	return toRunView(run), nil
 }
 
 // ledgerDiscrepancies arma una discrepancia por asiento desbalanceado (con el

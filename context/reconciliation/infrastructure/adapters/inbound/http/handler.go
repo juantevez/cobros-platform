@@ -122,7 +122,11 @@ func (h *ReconciliationHandler) GetReport(c *gin.Context) {
 	c.JSON(http.StatusOK, report)
 }
 
-// UploadReport procesa el CSV del PSP para un run de tipo "payment".
+// maxReportBytes es el tamaño máximo del CSV del PSP.
+const maxReportBytes = 50 << 20 // 50 MB
+
+// UploadReport procesa el CSV del PSP para un run de tipo "payment". El
+// procesamiento es síncrono: responde con el run ya terminado.
 //
 //	POST /api/v1/reconciliation/runs/:runID/report
 //	Content-Type: text/csv
@@ -131,8 +135,16 @@ func (h *ReconciliationHandler) UploadReport(c *gin.Context) {
 	if !ok {
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(c.Request.Body, 50*1024*1024)) // 50 MB max
+
+	// MaxBytesReader falla si el body supera el tope. Un LimitReader lo
+	// truncaría en silencio y se conciliaría un informe incompleto.
+	data, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxReportBytes))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "report exceeds 50 MB"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read request body"})
 		return
 	}
@@ -141,18 +153,20 @@ func (h *ReconciliationHandler) UploadReport(c *gin.Context) {
 		return
 	}
 
-	if err := h.processReport.Execute(c.Request.Context(), application.ProcessReportCmd{
+	run, err := h.processReport.Execute(c.Request.Context(), application.ProcessReportCmd{
 		TenantID:   tenantID,
 		RunID:      c.Param("runID"),
 		ReportData: data,
-	}); err != nil {
+	})
+	if err != nil {
 		respondError(c, err)
 		return
 	}
-	c.Status(http.StatusAccepted)
+	c.JSON(http.StatusOK, run)
 }
 
-// ProcessInternal ejecuta la reconciliación interna del Ledger.
+// ProcessInternal ejecuta la reconciliación interna del Ledger y responde con
+// el run ya terminado.
 //
 //	POST /api/v1/reconciliation/runs/:runID/process-internal
 func (h *ReconciliationHandler) ProcessInternal(c *gin.Context) {
@@ -160,14 +174,16 @@ func (h *ReconciliationHandler) ProcessInternal(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := h.processInternal.Execute(c.Request.Context(), application.ProcessInternalCmd{
+
+	run, err := h.processInternal.Execute(c.Request.Context(), application.ProcessInternalCmd{
 		TenantID: tenantID,
 		RunID:    c.Param("runID"),
-	}); err != nil {
+	})
+	if err != nil {
 		respondError(c, err)
 		return
 	}
-	c.Status(http.StatusAccepted)
+	c.JSON(http.StatusOK, run)
 }
 
 // ResolveDiscrepancy resuelve o ignora una discrepancia. Queda firmada por el

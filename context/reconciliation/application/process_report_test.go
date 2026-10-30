@@ -21,6 +21,7 @@ type reportDeps struct {
 	parser *fakeParser
 	tx     *fakeTx
 	pub    *fakePublisher
+	view   RunView // devuelto por la última ejecución
 }
 
 func newReportDeps() *reportDeps {
@@ -38,7 +39,9 @@ func newReportDeps() *reportDeps {
 
 func (d *reportDeps) exec() error {
 	uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
-	return uc.Execute(context.Background(), ProcessReportCmd{TenantID: d.run.TenantID().String(), RunID: d.run.ID().String(), ReportData: testReport})
+	var err error
+	d.view, err = uc.Execute(context.Background(), ProcessReportCmd{TenantID: d.run.TenantID().String(), RunID: d.run.ID().String(), ReportData: testReport})
+	return err
 }
 
 func sysPay(ref string, amount int64, status string) SystemPayment {
@@ -77,6 +80,9 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		}
 		if d.run.StartedAt() == nil || !d.run.StartedAt().Equal(testNow) {
 			t.Errorf("startedAt = %v, want %v", d.run.StartedAt(), testNow)
+		}
+		if !reflect.DeepEqual(d.view, toRunView(d.run)) || d.view.Status != "completed" {
+			t.Errorf("returned view = %+v, want the completed run", d.view)
 		}
 		if d.tx.calls != 1 {
 			t.Errorf("tx calls = %d, want 1", d.tx.calls)
@@ -351,7 +357,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		d := newReportDeps()
 		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
-		err := uc.Execute(context.Background(), ProcessReportCmd{TenantID: tenantB, RunID: d.run.ID().String(), ReportData: testReport})
+		_, err := uc.Execute(context.Background(), ProcessReportCmd{TenantID: tenantB, RunID: d.run.ID().String(), ReportData: testReport})
 		if !errors.Is(err, domain.ErrRunNotFound) {
 			t.Fatalf("expected ErrRunNotFound, got %v", err)
 		}
@@ -366,7 +372,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		d.runs = newRunRepo(d.run)
 		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
-		err := uc.Execute(context.Background(), ProcessReportCmd{TenantID: tenantA, RunID: d.run.ID().String(), ReportData: testReport})
+		_, err := uc.Execute(context.Background(), ProcessReportCmd{TenantID: tenantA, RunID: d.run.ID().String(), ReportData: testReport})
 		if !errors.Is(err, domain.ErrRunNotFound) {
 			t.Fatalf("expected ErrRunNotFound, got %v", err)
 		}
@@ -389,7 +395,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		d := newReportDeps()
 		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
-		err := uc.Execute(context.Background(), ProcessReportCmd{RunID: "not-even-a-uuid"})
+		_, err := uc.Execute(context.Background(), ProcessReportCmd{RunID: "not-even-a-uuid"})
 		if !errors.Is(err, domain.ErrEmptyReport) {
 			t.Fatalf("expected ErrEmptyReport, got %v", err)
 		}
@@ -402,7 +408,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		d := newReportDeps()
 		uc := NewProcessReportUseCase(d.runs, d.discs, d.reader, d.parser, d.tx, d.pub, clock)
 
-		err := uc.Execute(context.Background(), ProcessReportCmd{RunID: "x", ReportData: testReport})
+		_, err := uc.Execute(context.Background(), ProcessReportCmd{RunID: "x", ReportData: testReport})
 		if err == nil || !strings.Contains(err.Error(), "invalid run id") {
 			t.Fatalf("expected invalid run id error, got %v", err)
 		}
@@ -643,6 +649,7 @@ type internalDeps struct {
 	ledger *fakeLedger
 	tx     *fakeTx
 	pub    *fakePublisher
+	view   RunView // devuelto por la última ejecución
 }
 
 func newInternalDeps() *internalDeps {
@@ -659,7 +666,9 @@ func newInternalDeps() *internalDeps {
 
 func (d *internalDeps) exec() error {
 	uc := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub, clock)
-	return uc.Execute(context.Background(), ProcessInternalCmd{TenantID: d.run.TenantID().String(), RunID: d.run.ID().String()})
+	var err error
+	d.view, err = uc.Execute(context.Background(), ProcessInternalCmd{TenantID: d.run.TenantID().String(), RunID: d.run.ID().String()})
+	return err
 }
 
 func TestProcessInternalUseCase_Execute(t *testing.T) {
@@ -739,7 +748,7 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 
 	t.Run("invalid run id", func(t *testing.T) {
 		d := newInternalDeps()
-		err := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub, clock).Execute(context.Background(), ProcessInternalCmd{RunID: "x"})
+		_, err := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub, clock).Execute(context.Background(), ProcessInternalCmd{RunID: "x"})
 		if err == nil || !strings.Contains(err.Error(), "invalid run id") {
 			t.Fatalf("expected invalid run id error, got %v", err)
 		}
@@ -757,7 +766,7 @@ func TestProcessInternalUseCase_Execute(t *testing.T) {
 		d := newInternalDeps()
 		uc := NewProcessInternalUseCase(d.runs, d.discs, d.ledger, d.tx, d.pub, clock)
 
-		err := uc.Execute(context.Background(), ProcessInternalCmd{TenantID: tenantB, RunID: d.run.ID().String()})
+		_, err := uc.Execute(context.Background(), ProcessInternalCmd{TenantID: tenantB, RunID: d.run.ID().String()})
 		if !errors.Is(err, domain.ErrRunNotFound) {
 			t.Fatalf("expected ErrRunNotFound, got %v", err)
 		}
