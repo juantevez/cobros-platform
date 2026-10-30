@@ -20,21 +20,21 @@ func NewPostingID() PostingID { return PostingID(uuid.NewString()) }
 
 func ParseAccountID(s string) (AccountID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid account id: %w", err)
+		return "", fmt.Errorf("%w: account id %q", ErrInvalidID, s)
 	}
 	return AccountID(s), nil
 }
 
 func ParseEntryID(s string) (EntryID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid entry id: %w", err)
+		return "", fmt.Errorf("%w: entry id %q", ErrInvalidID, s)
 	}
 	return EntryID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: tenant id %q", ErrInvalidID, s)
 	}
 	return TenantID(s), nil
 }

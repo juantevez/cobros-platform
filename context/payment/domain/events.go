@@ -30,9 +30,9 @@ func (e baseEvent) OccurredAt() time.Time { return e.occurredAt }
 // PaymentCapturedEvent es el evento más importante del contexto Payment.
 //
 // El Ledger lo consume para crear el asiento contable:
-//   in_transit     CREDIT  amount
-//   merchant_balance DEBIT (amount - platform_fee)
-//   platform_fees  DEBIT  platform_fee
+//   in_transit       DEBIT   amount - psp_fee
+//   merchant_balance CREDIT  amount - platform_fee - psp_fee
+//   platform_fees    CREDIT  platform_fee
 //
 // Otros contextos (Webhooks, Notifications) también lo consumen.
 type PaymentCapturedEvent struct {

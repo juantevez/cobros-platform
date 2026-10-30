@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
@@ -63,8 +64,11 @@ func (uc *ReverseEntryUseCase) Execute(ctx context.Context, cmd ReverseEntryCmd)
 
 	reverseKey := "reverse_" + original.IdempotencyKey()
 	existing, err := uc.entryRepo.FindByIdempotencyKey(ctx, tenantID, reverseKey)
-	if err == nil && existing != nil {
+	switch {
+	case err == nil:
 		return ReverseEntryResult{ReverseEntryID: existing.ID().String()}, nil
+	case !errors.Is(err, domain.ErrEntryNotFound):
+		return ReverseEntryResult{}, fmt.Errorf("check idempotency: %w", err)
 	}
 
 	// ── Construir el asiento de reversa ───────────────────────────────────────
@@ -86,6 +90,12 @@ func (uc *ReverseEntryUseCase) Execute(ctx context.Context, cmd ReverseEntryCmd)
 		}
 		return uc.publisher.Publish(ctx, reverse.PullEvents()...)
 	}); err != nil {
+		// Carrera: otra ejecución creó la reversa entre el chequeo y el INSERT.
+		if errors.Is(err, domain.ErrEntryAlreadyExists) {
+			if existing, findErr := uc.entryRepo.FindByIdempotencyKey(ctx, tenantID, reverseKey); findErr == nil {
+				return ReverseEntryResult{ReverseEntryID: existing.ID().String()}, nil
+			}
+		}
 		return ReverseEntryResult{}, err
 	}
 

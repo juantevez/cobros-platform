@@ -1,14 +1,14 @@
 # Ledger (Libro Mayor) — Documentación técnico-funcional
 
 > **Bounded Context:** `context/ledger`
-> **Migraciones:** [`000003_ledger_init`](../../migrations/000003_ledger_init.up.sql), ajuste del `CHECK` de tipos en [`000007_payout_init`](../../migrations/000007_payout_init.up.sql)
+> **Migraciones:** [`000003_ledger_init`](../../migrations/000003_ledger_init.up.sql), ajuste del `CHECK` de tipos en [`000007_payout_init`](../../migrations/000007_payout_init.up.sql), cuentas de plataforma faltantes en [`000036_ledger_platform_accounts_backfill`](../../migrations/000036_ledger_platform_accounts_backfill.up.sql), RLS en [`000037_ledger_rls_nullif`](../../migrations/000037_ledger_rls_nullif.up.sql), orden de postings en [`000038_ledger_posting_position`](../../migrations/000038_ledger_posting_position.up.sql), tenant de los saldos en [`000039_ledger_balances_tenant`](../../migrations/000039_ledger_balances_tenant.up.sql)
 > **Stream NATS:** `LEDGER` (`ledger.>`)
 
 ---
 
 ## 1. Propósito
 
-Ledger es el **libro mayor de doble partida** de la plataforma y la **fuente de verdad del dinero**. Registra cada hecho económico (pago capturado, desembolso, disputa) como un **asiento** inmutable compuesto por **postings** que balancean, y mantiene el **saldo** de cada cuenta.
+Ledger es el **libro mayor de doble partida** de la plataforma y la **fuente de verdad del dinero**. Registra cada hecho económico (pago capturado, reembolso, desembolso, disputa) como un **asiento** inmutable compuesto por **postings** que balancean, y mantiene el **saldo** de cada cuenta.
 
 Principios de diseño:
 
@@ -44,8 +44,8 @@ Ledger es mayormente **reactivo**: la mayoría de los asientos los generan sus c
 | `dispute_hold` | Fondos congelados por disputas. | Consumer de Onboarding |
 | `payout_transit` | Fondos en camino al banco del comercio. | Consumer de Onboarding |
 | `payout_sent` | Fondos confirmados como enviados. | Consumer de Onboarding |
-| `in_transit` | Fondos cobrados que el PSP aún no liquidó. | ⚠️ **Nadie** (§10.1) |
-| `platform_fees` | Comisiones de la plataforma (y hoy, contrapartida de disputas perdidas). | ⚠️ **Nadie** (§10.1) |
+| `in_transit` | Fondos cobrados que el PSP aún no liquidó. Saldo negativo: lo que el PSP adeuda. | Consumer de Onboarding |
+| `platform_fees` | Comisiones de la plataforma. | Consumer de Onboarding |
 
 ---
 
@@ -64,11 +64,11 @@ sequenceDiagram
 
     OB-->>N: onboarding.application.approved.v1
     N-->>L: ledger-onboarding-consumer
-    L->>DB: 5 × CreateAccount (merchant_balance, reserve, dispute_hold, payout_transit, payout_sent)
+    L->>DB: 7 × CreateAccount (§2.1)
 
-    PAY-->>N: payment.captured.v1
+    PAY-->>N: payment.captured | refunded
     N-->>L: ledger-payment-consumer
-    L->>DB: PostEntry payment_captured_<id> (in_transit / merchant_balance / platform_fees)
+    L->>DB: PostEntry payment_captured_<id> / payment_refunded_<id>
 
     PO->>DB: lee account_balances (merchant_balance) para validar el saldo
     PO-->>N: payout.initiated | confirmed | failed
@@ -128,7 +128,17 @@ credit → balance += amount
 debit  → balance -= amount
 ```
 
-El comentario del repositorio declara que *"merchant_balance positivo = la plataforma le debe ese monto al comercio"*, y Payout se apoya en eso. Los consumers, en cambio, **debitan** `merchant_balance` para aumentarlo. Ver §10.3.
+Los consumers asientan con las direcciones de la contabilidad estándar, así que el saldo se lee igual en todas las cuentas de pasivo e ingreso:
+
+| Cuenta | Saldo positivo significa | Sube con |
+|---|---|---|
+| `merchant_balance` | Lo que la plataforma le debe al comercio. Payout exige que sea > 0. | Pago capturado, disputa ganada, payout fallido |
+| `platform_fees` | Comisiones ganadas. | Pago capturado |
+| `dispute_hold` | Fondos congelados por disputas abiertas. | Disputa abierta |
+| `payout_transit` | Payouts iniciados sin confirmar. | Payout iniciado |
+| `payout_sent` | Total enviado a bancos. | Payout confirmado |
+
+`in_transit` es la única cuenta de activo: queda **negativa** mientras el PSP adeuda la liquidación (un pago la debita; un reembolso o un contracargo la acreditan). Reporting calcula su neto con la misma regla.
 
 ### 4.5 Errores
 
@@ -136,11 +146,12 @@ Archivo: [domain/errors.go](../../context/ledger/domain/errors.go)
 
 | Error | HTTP |
 |---|---|
+| `ErrInvalidID` (cuenta, asiento o tenant que no es UUID) | 400 |
 | `ErrAccountNotFound` (incluye cuentas de otro tenant), `ErrEntryNotFound` | 404 |
-| `ErrEntryNotBalanced`, `ErrCurrencyMismatch`, `ErrAccountCurrencyMismatch`, `ErrNotEnoughPostings`, `ErrZeroAmount`, `ErrInvalidDirection`, `ErrInvalidAccountType`, `ErrInvalidCurrency`, `ErrNegativeAmount` | 422 |
-| `ErrEntryAlreadyExists` | 409 (declarado pero **nunca devuelto**) |
-| `ErrAccountAlreadyExists` | 409 (en la práctica no llega al HTTP: `CreateAccount` la resuelve devolviendo la cuenta existente) |
-| Otros: IDs inválidos, violación de `UNIQUE` de asientos o del trigger, cuenta inexistente en `Apply` | 500 |
+| `ErrEntryNotBalanced`, `ErrCurrencyMismatch`, `ErrAccountCurrencyMismatch`, `ErrNotEnoughPostings`, `ErrZeroAmount`, `ErrInvalidDirection`, `ErrInvalidAccountType`, `ErrInvalidCurrency`, `ErrNegativeAmount`, `ErrIdempotencyKeyRequired` | 422 |
+| `ErrIdempotencyKeyConflict` (clave ya usada con otros movimientos) | 409 |
+| `ErrEntryAlreadyExists`, `ErrAccountAlreadyExists` | 409 (en la práctica no llegan al HTTP: el repo las devuelve ante el `UNIQUE` y los casos de uso las resuelven releyendo el existente) |
+| Otros: fallas de infraestructura, el trigger de doble partida, una cuenta validada sin fila de saldo en `Apply` (inconsistencia de datos) | 500 |
 
 ---
 
@@ -151,29 +162,32 @@ Directorio: [application/](../../context/ledger/application/)
 | Caso de uso | Qué hace | Evento |
 |---|---|---|
 | `CreateAccount` | **Idempotente** por `(tenant, tipo, moneda)`: si ya existe devuelve su ID con `WasExisting=true`, sin evento. Si no existe, crea la cuenta y su saldo en 0 en una transacción. Ante una carrera, el `UNIQUE` → `ErrAccountAlreadyExists` → se relee la cuenta y se devuelve. | `ledger.account.created.v1` (solo si la crea) |
-| `PostEntry` | Valida, chequea idempotencia y en **una transacción** guarda el asiento + postings, aplica los saldos y publica en el outbox. | `ledger.entry.posted.v1` |
-| `ReverseEntry` | Carga el original, verifica el tenant y la idempotencia (`reverse_<clave original>`), y persiste la reversa igual que `PostEntry`. | `ledger.entry.reversed.v1` |
+| `PostEntry` | Valida, chequea idempotencia (comparando los movimientos) y en **una transacción** guarda el asiento + postings, aplica los saldos y publica en el outbox. | `ledger.entry.posted.v1` |
+| `ReverseEntry` | Carga el original, verifica el tenant y la idempotencia (`reverse_<clave original>`), y persiste la reversa igual que `PostEntry`. Ante una carrera devuelve la reversa que ganó. | `ledger.entry.reversed.v1` |
 | `GetBalance` | Devuelve el saldo y la moneda de una cuenta **del tenant**. Una cuenta de otro tenant → `ErrAccountNotFound`. | — |
 
 ### 5.1 `PostEntry` en detalle
 
 ```
 1. idempotency_key no vacía, ≥ 2 líneas, tenant_id válido
-2. FindByIdempotencyKey(tenant, key)
-     └─ existe → devuelve {entry_id, was_existing: true}   (sin comparar contenido)
-3. Parsear líneas → validateAccounts: cada cuenta existe, es del tenant
+2. Parsear líneas (IDs y direcciones)
+3. FindByIdempotencyKey(tenant, key)
+     └─ existe → mismos movimientos (SameMovements) → {entry_id, was_existing: true}
+                 otros movimientos → ErrIdempotencyKeyConflict (409)
+4. validateAccounts: cada cuenta existe, es del tenant
    (si no → ErrAccountNotFound) y su moneda = la del posting (ErrAccountCurrencyMismatch)
    → NewJournalEntry (invariantes §4.3)
-4. RunInTx {
-     entryRepo.Save      → journal_entries + postings
+5. RunInTx {
+     entryRepo.Save      → journal_entries + postings (con su position)
      balanceRepo.Apply   → UPDATE account_balances SET balance = balance ± amount
+                           (en orden de account_id, §9)
      publisher.Publish   → outbox_messages
    }   // al COMMIT corre el trigger diferido check_entry_balance
+   └─ UNIQUE (tenant, key) → ErrEntryAlreadyExists → se relee y sigue como en 3
 ```
 
 - Si `occurred_at` viene vacío se usa el reloj. El HTTP siempre lo completa.
-- La idempotencia es **check-then-insert**: dos requests concurrentes con la misma clave pasan el chequeo, y la segunda falla con una violación de `UNIQUE` → **500** en lugar de devolver el asiento existente.
-- Reusar una clave con **otro contenido** devuelve el asiento original sin avisar.
+- "Mismos movimientos" compara cuentas, direcciones, montos y moneda, sin importar el orden. La descripción, la metadata y `occurred_at` no se comparan.
 
 ---
 
@@ -215,7 +229,7 @@ Si la cuenta ya existe para `(tenant, tipo, moneda)` → `200` con el `account_i
 }
 ```
 
-Binding HTTP: `idempotency_key` requerido, `lines` mínimo 2, y cada línea con `account_id`, `direction`, `amount ≥ 1` y `currency`. Una cuenta inexistente o de otro tenant → `404`. Una moneda distinta a la de la cuenta → `422`.
+Binding HTTP: `idempotency_key` requerido, `lines` mínimo 2, y cada línea con `account_id`, `direction`, `amount ≥ 1` y `currency`. Un `account_id` que no es UUID → `400`. Una cuenta inexistente o de otro tenant → `404`. Una moneda distinta a la de la cuenta → `422`. La misma clave con otros movimientos → `409`.
 
 ### 6.3 Saldo
 
@@ -237,20 +251,20 @@ Los headers son los estándar del Outbox (ver ONBOARDING.MD §7).
 
 ### 7.2 Consumidos
 
-Todos corren en `cmd/worker` con `MaxDeliver: 5`. Si fallan los 5 intentos, el mensaje se descarta y no queda registro del asiento.
+Todos corren en `cmd/worker` con `MaxDeliver: 5`. Un evento que el Ledger nunca va a aceptar se descarta sin reintentos (`eventbus.Permanent`): payload ilegible, tenant inválido, neto ≤ 0, `outcome` de disputa desconocido o un error de validación del dominio. Una cuenta inexistente sí se reintenta, porque puede crearla Onboarding. En los dos casos (descarte o reintentos agotados) el eventbus deja un log de error con el subject y la secuencia del stream.
 
 | Durable | Filtro | Asiento (según el código) | Clave de idempotencia |
 |---|---|---|---|
-| `ledger-onboarding-consumer` | `onboarding.application.approved.v1` | Crea 5 cuentas (§2.1) en `currency` (default `ARS`). | — (no es un asiento) |
-| `ledger-payment-consumer` | `payment.captured.v1` | `in_transit` **C** amount · `merchant_balance` **D** (amount − platform_fee − psp_fee) · `platform_fees` **D** platform_fee (si existe la cuenta) | `payment_captured_<payment_id>` |
-| `ledger-payout-consumer` | `payout.>` | **initiated:** `merchant_balance` C · `payout_transit` D. **confirmed:** `payout_transit` C · `payout_sent` D. **failed:** `payout_transit` C · `merchant_balance` D | evento `idempotency_key` o `payout_initiated_<id>`; `payout_confirmed_<id>`; `payout_failed_<id>` |
-| `ledger-dispute-consumer` | `dispute.>` | **opened:** `merchant_balance` C · `dispute_hold` D. **resolved won:** `dispute_hold` C · `merchant_balance` D. **resolved lost/accepted/expired:** `dispute_hold` C · `platform_fees` D | `dispute_opened_<id>`, `dispute_resolved_<id>` |
+| `ledger-onboarding-consumer` | `onboarding.application.approved.v1` | Crea las 7 cuentas (§2.1) en `currency` (default `ARS`). La migración 000036 completó `in_transit` y `platform_fees` a los comercios aprobados antes. | — (no es un asiento) |
+| `ledger-payment-consumer` | `payment.>` | **captured:** `in_transit` D (amount − psp_fee) · `merchant_balance` C (amount − platform_fee − psp_fee) · `platform_fees` C platform_fee (si es > 0; sin la cuenta, error). **refunded:** `merchant_balance` D · `in_transit` C, por `refund_amount` (las comisiones no se devuelven). El resto de los eventos se ignora. | `payment_captured_<payment_id>`, `payment_refunded_<payment_id>` |
+| `ledger-payout-consumer` | `payout.>` | **initiated:** `merchant_balance` D · `payout_transit` C. **confirmed:** `payout_transit` D · `payout_sent` C. **failed:** `payout_transit` D · `merchant_balance` C | evento `idempotency_key` o `payout_initiated_<id>`; `payout_confirmed_<id>`; `payout_failed_<id>` |
+| `ledger-dispute-consumer` | `dispute.>` | **opened:** `merchant_balance` D · `dispute_hold` C. **resolved won:** `dispute_hold` D · `merchant_balance` C. **resolved lost/accepted/expired:** `dispute_hold` D · `in_transit` C (el PSP descuenta el contracargo) | `dispute_opened_<id>`, `dispute_resolved_<id>` |
 
 C = crédito (suma al saldo), D = débito (resta del saldo), según `Apply`.
 
 ### 7.3 Lecturas directas de otros BCs
 
-[`payout/.../outbound/ledger/balance_checker.go`](../../context/payout/infrastructure/adapters/outbound/ledger/balance_checker.go) consulta `account_balances` ⨝ `ledger_accounts` (tipo `merchant_balance`) para validar el saldo antes de iniciar un payout: exige **saldo > 0 y ≥ monto**. Esto acopla Payout al esquema y a la **convención de signo** de Ledger.
+[`payout/.../outbound/ledger/balance_checker.go`](../../context/payout/infrastructure/adapters/outbound/ledger/balance_checker.go) consulta `account_balances` ⨝ `ledger_accounts` (tipo `merchant_balance`) para validar el saldo antes de iniciar un payout: exige **disponible > 0 y ≥ monto**. Como el débito de `payout.initiated.v1` llega de forma asíncrona, el disponible resta los payouts cuyo asiento (`ledger_entry_key`) todavía no está en `journal_entries`, salvo los fallidos. Lee con la conexión de la tx de Payout, que tiene el tenant fijado y el advisory lock. Esto acopla Payout al esquema y a la **convención de signo** de Ledger.
 
 ---
 
@@ -268,6 +282,7 @@ erDiagram
                       char3 currency
                       text description }
     account_balances { uuid account_id PK,FK
+                       uuid tenant_id FK
                        bigint balance
                        timestamptz updated_at }
     journal_entries { uuid id PK
@@ -282,46 +297,36 @@ erDiagram
                uuid account_id FK
                text direction
                bigint amount
-               char3 currency }
+               char3 currency
+               smallint position }
 ```
 
 | Tabla | Restricciones clave | RLS |
 |---|---|---|
-| `ledger_accounts` | `UNIQUE (tenant_id, type, currency)`; `CHECK type IN (…7 tipos)` desde la migración 000007 | Sí |
-| `account_balances` | PK = `account_id`; `balance BIGINT` (puede ser negativo) | **No** (no tiene `tenant_id`) |
-| `journal_entries` | `UNIQUE (tenant_id, idempotency_key)`; índice `(tenant_id, created_at DESC)` | Sí |
-| `postings` | `amount > 0`; `direction IN ('debit','credit')`; FK a la cuenta (sin chequear el tenant) | Sí |
+| `ledger_accounts` | `UNIQUE (tenant_id, type, currency)`; `CHECK type IN (…7 tipos)` desde la migración 000007 | Sí (tenant + operador) |
+| `account_balances` | PK = `account_id`; FK `(account_id, tenant_id)` → `ledger_accounts (id, tenant_id)`; `balance BIGINT` (puede ser negativo) | Sí (tenant + operador) |
+| `journal_entries` | `UNIQUE (tenant_id, idempotency_key)`; índice `(tenant_id, created_at DESC)` | Sí (tenant + operador) |
+| `postings` | `amount > 0`; `direction IN ('debit','credit')`; FK a la cuenta (sin chequear el tenant); `UNIQUE (entry_id, position)`, que conserva el orden de las líneas | Sí (tenant + operador) |
 
 **Trigger `trg_check_entry_balance`**: `CONSTRAINT TRIGGER … AFTER INSERT ON postings DEFERRABLE INITIALLY DEFERRED`. Al hacer COMMIT, por cada posting insertado recalcula Σ débitos y Σ créditos del asiento, y aborta la transacción si hay ≥ 2 postings y no balancean. Es la segunda línea de defensa, por si alguien inserta por fuera del dominio.
 
-Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDING.MD §10.2). Todo el aislamiento depende de las queries.
+**RLS** (migraciones 000037 y 000039): cada tabla tiene dos políticas, aislamiento por `NULLIF(current_setting('app.current_tenant', true), '')::uuid` y operador de plataforma (`app.platform_operator = 'on'`, lectura cross-tenant). Los repos fijan el tenant en cada operación con `withTenant` ([rls.go](../../context/ledger/infrastructure/adapters/outbound/postgres/rls.go)): el del argumento, o el del caller en las búsquedas por ID. Dentro de una transacción lo fija el `TxManager` con el tenant del contexto; los consumers lo toman del payload. Sin tenant, las consultas devuelven 0 filas en lugar de fallar. Hoy la app conecta como owner y el RLS no filtra (ONBOARDING.MD §10.2), pero ya funciona con un rol sin `BYPASSRLS`.
 
 ---
 
 ## 9. Concurrencia
 
 - `UPDATE account_balances SET balance = balance + $delta` es atómico por fila: no se pierden actualizaciones.
-- Los postings se aplican en el orden en que llegan, sin ordenar por `account_id`. Dos asientos concurrentes que tocan las mismas cuentas en distinto orden pueden generar un **deadlock**. Postgres aborta uno; el consumer reintenta, y el HTTP devuelve 500.
-- Las lecturas de idempotencia y del asiento original (en la reversa) se hacen **fuera** de la transacción.
+- `Apply` actualiza los saldos en orden de `account_id`: dos asientos concurrentes sobre las mismas cuentas bloquean las filas en el mismo orden, así que el segundo espera al primero en lugar de generar un deadlock.
+- Las lecturas de idempotencia y del asiento original (en la reversa) se hacen **fuera** de la transacción. Si otra ejecución con la misma clave gana el `UNIQUE` en el medio, el caso de uso relee y devuelve el asiento existente.
 
 ---
 
 ## 10. Limitaciones conocidas y deuda técnica
 
-| # | Tema | Detalle | Impacto |
+| # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | **Los pagos capturados nunca llegan al Ledger** | (a) Ningún flujo crea las cuentas `in_transit` ni `platform_fees`: el consumer de Onboarding crea las otras 5. `FindByTenantAndType(in_transit)` falla y el mensaje se descarta tras 5 intentos. (b) Aunque existieran, el asiento acredita `amount` y debita `amount − platform_fee − psp_fee` + `platform_fee` = `amount − psp_fee`: **no balancea si `psp_fee > 0`**, y el PSP mock cobra siempre ≥ 1. El comentario *"el asiento balancea igual"* del consumer es incorrecto. Falta una línea para `psp_fee`. (c) Las disputas perdidas también fallan por falta de `platform_fees`. | **Crítico (funcional)** |
-| 2 | ~~Un comercio puede crear saldo~~ ✅ **Resuelto** | Las escrituras HTTP exigen `platform_support` (`writeGuard`). `PostEntry` valida que cada cuenta exista, sea del tenant y tenga la moneda del posting. `GetBalance` verifica el tenant. Pendiente: un endpoint de operador para ajustes manuales sobre otro tenant (§6). | — |
-| 3 | **Convención de signo inconsistente** | `Apply` suma créditos y resta débitos en todas las cuentas. Los consumers **debitan** `merchant_balance` cuando el comercio gana dinero (pago, disputa ganada) y lo **acreditan** cuando sale (payout, disputa abierta). Con #1 resuelto, cada pago dejaría `merchant_balance` **más negativo**, y Payout (que exige saldo > 0) rechazaría todos los payouts. Se puede arreglar con saldo por naturaleza de cuenta (deudora/acreedora) o invirtiendo las direcciones en los consumers. Hay que alinearlo con Reporting. | **Alto (funcional)** |
-| 4 | ~~Creación de cuentas no idempotente~~ ✅ **Resuelto** | `CreateAccount` devuelve la cuenta existente (chequeo previo + traducción de `23505` a `ErrAccountAlreadyExists` ante carreras). Los reintentos del consumer de Onboarding completan las cuentas faltantes. La moneda se normaliza a mayúsculas para que la búsqueda coincida. | — |
-| 5 | Idempotencia con carrera | Check-then-insert: un duplicado concurrente → 500 en lugar de `was_existing`. No se compara el contenido al reusar una clave. `ErrEntryAlreadyExists` nunca se emite. | Medio |
-| 6 | `account_balances` sin `tenant_id` ni RLS | Depende de que cada query haga join con `ledger_accounts` filtrando por tenant, o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). | Bajo |
-| 7 | Posible deadlock | Los postings no se ordenan por `account_id` antes de `Apply` (§9). | Bajo |
-| 8 | Sin control de sobregiro | Ninguna cuenta impide un saldo negativo, ni siquiera `merchant_balance` ante un payout concurrente que pase el chequeo de Payout dos veces. | Medio |
-| 9 | Cuentas de plataforma por tenant | `platform_fees` es por tenant, y se usa como contrapartida de disputas perdidas (marcado como provisorio: "Fase 4: chargebacks_paid"). No hay cuentas de la plataforma (revenue consolidado, banco del PSP). `reserve` no tiene movimientos. | Diseño |
-| 10 | Errores técnicos → 500 | IDs inválidos, cuenta inexistente en `Apply`, violaciones de `UNIQUE`. | Bajo |
-| 11 | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). | Bajo |
-| 12 | Sin consultas | No hay listado de cuentas, de asientos ni extracto por cuenta. | Funcional |
+| 1 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Un reembolso sale entero de `merchant_balance` (no se devuelven comisiones) y no hay reembolsos parciales. El Ledger no impide saldos negativos: un reembolso o una disputa pueden dejar `merchant_balance` en negativo (solo Payout valida el disponible antes de desembolsar). Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
 
 ---
 
@@ -330,16 +335,16 @@ Recordatorio: la app conecta como owner, así que el RLS no filtra (ver ONBOARDI
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/*_test.go` | `Money`, invariantes de `JournalEntry`, `BuildReverse`, eventos. |
-| Aplicación | `application/*_test.go` | `CreateAccount` (incluye idempotencia y carrera), `PostEntry` (idempotencia, cuenta inexistente, cuenta de otro tenant, moneda distinta a la de la cuenta), `GetBalance` (aislamiento), `ReverseEntry`. |
+| Aplicación | `application/*_test.go` | `CreateAccount` (incluye idempotencia y carrera), `PostEntry` (idempotencia, clave reusada con otros movimientos, carrera contra el `UNIQUE`, cuenta inexistente, cuenta de otro tenant, moneda distinta a la de la cuenta), `GetBalance` (aislamiento), `ReverseEntry` (incluida la carrera). |
 | HTTP | `inbound/http/*_test.go` | Handlers, router, `writeGuard` (403 en las escrituras; la lectura no se ve afectada), 404 cross-tenant y mapeo de errores. |
-| NATS | `inbound/nats/*_test.go` | Los 4 consumers con repos y casos de uso falsos, más redelivery y reintento parcial del consumer de Onboarding. ⚠️ Los fakes no reproducen #1: tienen las cuentas precargadas y usan `psp_fee` que balancea. |
-| Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`), incluido el mapeo de `23505` → `ErrAccountAlreadyExists`; se saltan si no hay DB. |
+| NATS | `inbound/nats/*_test.go` | Los 4 consumers con repos y casos de uso falsos, más redelivery y reintento parcial del consumer de Onboarding. `convention_test.go` encadena pago, reembolso, disputas y payouts y verifica el saldo de cada cuenta según `Apply`, y que cada consumer ponga el tenant del payload en el contexto (RLS). `errors_test.go` distingue los errores permanentes de los que se reintentan. |
+| Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`), incluidos el mapeo de `23505` → `ErrAccountAlreadyExists`/`ErrEntryAlreadyExists` y el orden de los postings; se saltan si no hay DB. `lock_order_test.go` (sin DB) fija el orden de `Apply`. |
 
 ```bash
 go test ./context/ledger/...
 ```
 
-Falta un test de integración de punta a punta: aprobar onboarding → capturar pago → iniciar payout. Ese test haría fallar #1 y #3.
+Falta un test de integración de punta a punta contra NATS y Postgres: aprobar onboarding → capturar pago → iniciar payout.
 
 ---
 
@@ -361,8 +366,8 @@ context/ledger/
 │   └── reverse_entry.go
 └── infrastructure/adapters/
     ├── inbound/http/  # router, account_handler, entry_handler, response
-    ├── inbound/nats/  # onboarding, payment, payout, dispute consumers
-    └── outbound/postgres/  # account_repo, entry_repo, balance_repo
+    ├── inbound/nats/  # onboarding, payment, payout, dispute consumers + errors (strict: errores permanentes)
+    └── outbound/postgres/  # account_repo, entry_repo, balance_repo, rls (withTenant)
 ```
 
 Cableado:

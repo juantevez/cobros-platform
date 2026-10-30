@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
@@ -24,8 +25,12 @@ func NewEntryRepository(pool *pgxpool.Pool) *pgEntryRepository {
 
 // Save persiste el JournalEntry y todos sus Postings en la misma transacción.
 func (r *pgEntryRepository) Save(ctx context.Context, e *domain.JournalEntry) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, e.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return r.save(ctx, conn, e)
+	})
+}
 
+func (r *pgEntryRepository) save(ctx context.Context, conn postgres.Conn, e *domain.JournalEntry) error {
 	metadata, err := json.Marshal(e.Metadata())
 	if err != nil {
 		return fmt.Errorf("entry repo: marshal metadata: %w", err)
@@ -44,14 +49,20 @@ func (r *pgEntryRepository) Save(ctx context.Context, e *domain.JournalEntry) er
 		e.CreatedAt(),
 	)
 	if err != nil {
+		// UNIQUE (tenant_id, idempotency_key): el caso de uso lo resuelve
+		// releyendo el asiento existente.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUniqueViolation {
+			return domain.ErrEntryAlreadyExists
+		}
 		return fmt.Errorf("entry repo: save entry: %w", err)
 	}
 
-	// Guardar los postings del entry.
-	for _, p := range e.Postings() {
+	// Guardar los postings del entry, con su posición para conservar el orden.
+	for i, p := range e.Postings() {
 		if _, err := conn.Exec(ctx, `
-			INSERT INTO postings (id, entry_id, tenant_id, account_id, direction, amount, currency)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			INSERT INTO postings (id, entry_id, tenant_id, account_id, direction, amount, currency, position)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			p.ID().String(),
 			e.ID().String(),
 			e.TenantID().String(),
@@ -59,6 +70,7 @@ func (r *pgEntryRepository) Save(ctx context.Context, e *domain.JournalEntry) er
 			p.Direction().String(),
 			p.Money().Amount(),
 			p.Money().Currency(),
+			i,
 		); err != nil {
 			return fmt.Errorf("entry repo: save posting %s: %w", p.ID(), err)
 		}
@@ -68,13 +80,17 @@ func (r *pgEntryRepository) Save(ctx context.Context, e *domain.JournalEntry) er
 }
 
 func (r *pgEntryRepository) FindByID(ctx context.Context, id domain.EntryID) (*domain.JournalEntry, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
-		FROM journal_entries WHERE id = $1`,
-		id.String(),
-	)
-	return r.scanEntryWithPostings(ctx, conn, row)
+	var entry *domain.JournalEntry
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		entry, err = r.scanEntryWithPostings(ctx, conn, conn.QueryRow(ctx, `
+			SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
+			FROM journal_entries WHERE id = $1`,
+			id.String(),
+		))
+		return err
+	})
+	return entry, err
 }
 
 func (r *pgEntryRepository) FindByIdempotencyKey(
@@ -82,14 +98,18 @@ func (r *pgEntryRepository) FindByIdempotencyKey(
 	tenantID domain.TenantID,
 	key string,
 ) (*domain.JournalEntry, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
-		FROM journal_entries
-		WHERE tenant_id = $1 AND idempotency_key = $2`,
-		tenantID.String(), key,
-	)
-	return r.scanEntryWithPostings(ctx, conn, row)
+	var entry *domain.JournalEntry
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		entry, err = r.scanEntryWithPostings(ctx, conn, conn.QueryRow(ctx, `
+			SELECT id, tenant_id, idempotency_key, description, metadata, occurred_at, created_at
+			FROM journal_entries
+			WHERE tenant_id = $1 AND idempotency_key = $2`,
+			tenantID.String(), key,
+		))
+		return err
+	})
+	return entry, err
 }
 
 // scanEntryWithPostings carga el entry y luego sus postings.
@@ -124,7 +144,7 @@ func (r *pgEntryRepository) scanEntryWithPostings(
 	// Cargar los postings del entry.
 	rows, err := conn.Query(ctx, `
 		SELECT id, account_id, direction, amount, currency
-		FROM postings WHERE entry_id = $1 ORDER BY id`,
+		FROM postings WHERE entry_id = $1 ORDER BY position`,
 		idStr,
 	)
 	if err != nil {

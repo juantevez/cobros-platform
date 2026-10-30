@@ -21,7 +21,7 @@ Payout orquesta el **desembolso** de fondos desde la plataforma hacia la cuenta 
 | Puerto | Implementación cableada | Comentario |
 |---|---|---|
 | `BankTransferAdapter` | `transfer/mock.Adapter` | Confirma siempre, salvo cuenta `REJECT` (rechazo explícito). El `IdempotencyKey` de la transferencia es `transfer_<payout_id>`; el mock lo ignora. **Nunca usar en producción.** |
-| `BalanceChecker` / `BalanceLocker` | `ledger.BalanceChecker` | Query directa a `account_balances` (cuenta `merchant_balance` del tenant) + `pg_advisory_xact_lock` por `(tenant, currency)`. |
+| `BalanceChecker` / `BalanceLocker` | `ledger.BalanceChecker` | Query directa a `account_balances` (cuenta `merchant_balance` del tenant) menos los payouts aún no asentados en el Ledger, con la conexión de la tx + `pg_advisory_xact_lock` por `(tenant, currency)`. |
 | `BankAccountProvider` | `onboarding.BankAccountProvider` | Query directa a `onboarding_bank_accounts` unida a solicitudes `approved`. ⚠️ No filtra `verified` ni moneda (§10.6). |
 | `PayoutGate` | `tenant.PayoutGate` | Lee `tenants.status` y `tenant_compliance_holds` (contexto Auth): exige tenant `active` sin hold de cumplimiento vigente. |
 | `EventPublisher` | `outbox.NewEventPublisher` | Publicación transaccional vía Outbox (ver LEDGER.MD §7). |
@@ -89,9 +89,9 @@ stateDiagram-v2
 | Transición | Evento publicado | Efecto en Ledger |
 |---|---|---|
 | `initiated → processing` | — | — |
-| creación (`initiated`) | `payout.initiated.v1` | `merchant_balance` CREDIT / `payout_transit` DEBIT |
-| `processing → confirmed` | `payout.confirmed.v1` | `payout_transit` CREDIT / `payout_sent` DEBIT |
-| `processing → failed` | `payout.failed.v1` | **Reversa**: `payout_transit` CREDIT / `merchant_balance` DEBIT |
+| creación (`initiated`) | `payout.initiated.v1` | `merchant_balance` DEBIT / `payout_transit` CREDIT |
+| `processing → confirmed` | `payout.confirmed.v1` | `payout_transit` DEBIT / `payout_sent` CREDIT |
+| `processing → failed` | `payout.failed.v1` | **Reversa**: `payout_transit` DEBIT / `merchant_balance` CREDIT |
 | `processing → unknown` | `payout.unknown.v1` | **Ninguno**: los fondos permanecen en `payout_transit` hasta la resolución |
 | `unknown → confirmed / failed` | `payout.confirmed.v1` / `payout.failed.v1` | Como en el camino normal (los asientos son idempotentes por clave) |
 
@@ -319,7 +319,7 @@ Tabla `payouts` ([000007](../../migrations/000007_payout_init.up.sql) + [000015]
 - **Autorización:** cualquier usuario autenticado del tenant (todos los roles) puede iniciar payouts — no hay permiso `payouts:create` ni guard por ruta (§10.8). Un desembolso es una operación sensible: debería requerir `admin` (y doble aprobación en el futuro).
 - **Aislamiento:** `Get` verifica el tenant del payout; `List` y `Initiate` toman el tenant del token.
 - **Estado del comercio y AML:** `PayoutGate` bloquea desembolsos de tenants no activos, suspendidos o en hold preventivo de cumplimiento (ver [COMPLIANCE.md](COMPLIANCE.md) §7.3). El mensaje no revela el motivo (anti tipping-off). Un payout iniciado antes del hold sigue su curso.
-- **Reserva contable:** el lock advisory por `(tenant, currency)` dentro de la misma tx que lee el saldo e inserta el payout impide sobregirar `merchant_balance` con requests concurrentes (TOCTOU cerrado, §10.4).
+- **Reserva contable:** el lock advisory por `(tenant, currency)` dentro de la misma tx que lee el saldo e inserta el payout serializa los requests concurrentes (§10.4). Como el Ledger debita `merchant_balance` de forma asíncrona, el disponible descuenta los payouts cuyo asiento de `initiated` todavía no existe (salvo los fallidos): sin eso, dos payouts seguidos antes de que corriera el consumer leían el mismo saldo.
 - **Idempotencia de extremo a extremo:** clave de negocio (HTTP) → UNIQUE (PG) → `transfer_<payout_id>` (banco) → `ledger_entry_key` (asiento). Cuatro capas: retries del caller nunca duplican dinero.
 
 ---

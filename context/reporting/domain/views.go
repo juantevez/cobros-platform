@@ -55,12 +55,13 @@ type RevenueSummary struct {
 }
 
 // TenantBalance es el saldo neto de un tipo de cuenta del comercio, derivado
-// de los movimientos del ledger. El signo depende de la convención contable
-// del tipo de cuenta; aquí se expone débitos, créditos y neto por separado.
+// de los movimientos del ledger. El neto sigue la convención del Ledger
+// (créditos - débitos): coincide con el saldo de /ledger, merchant_balance
+// positivo es lo que se le debe al comercio e in_transit queda negativo.
 type TenantBalance struct {
 	AccountType string `json:"account_type"`
 	Currency    string `json:"currency"`
 	Debits      int64  `json:"debits"`  // suma de débitos, centavos
 	Credits     int64  `json:"credits"` // suma de créditos, centavos
-	Net         int64  `json:"net"`     // debits - credits, centavos
+	Net         int64  `json:"net"`     // credits - debits, centavos
 }

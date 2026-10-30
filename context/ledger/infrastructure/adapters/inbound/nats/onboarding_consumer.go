@@ -9,6 +9,7 @@ import (
 
 	"github.com/juantevez/cobros-platform/context/ledger/application"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type onboardingApprovedPayload struct {
@@ -43,14 +44,15 @@ func (c *OnboardingConsumer) Start(ctx context.Context) error {
 		Name:          "ledger-onboarding-consumer",
 		FilterSubject: "onboarding.application.approved.v1",
 		MaxDeliver:    5,
-	}, c.handle)
+	}, strict(c.handle))
 }
 
 func (c *OnboardingConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
 	var payload onboardingApprovedPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-		return fmt.Errorf("ledger onboarding consumer: unmarshal: %w", err)
+		return eventbus.Permanent(fmt.Errorf("ledger onboarding consumer: unmarshal: %w", err))
 	}
+	ctx = pkgpostgres.WithTenantID(ctx, payload.TenantID) // RLS de las escrituras
 
 	currency := payload.Currency
 	if currency == "" {
@@ -64,6 +66,8 @@ func (c *OnboardingConsumer) handle(ctx context.Context, msg *eventbus.Message) 
 		{"dispute_hold", "Fondos retenidos por disputas"},
 		{"payout_transit", "Fondos en tránsito al banco del comercio"},
 		{"payout_sent", "Fondos confirmados enviados al banco"},
+		{"in_transit", "Fondos cobrados que el PSP aún no liquidó"},
+		{"platform_fees", "Comisiones de la plataforma"},
 	}
 
 	for _, acc := range accounts {

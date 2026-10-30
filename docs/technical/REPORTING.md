@@ -116,7 +116,7 @@ Montos en centavos.
 |---|---|
 | `VolumePoint` | `bucket`, `currency`, `payment_count`, `gross_amount` |
 | `RevenueSummary` | `currency`, `payment_count`, `gross_amount`, `platform_fees`, `psp_fees`, `refund_count`, `refunded_amount`, `chargeback_count`, `chargeback_amount`, `net_amount` |
-| `TenantBalance` | `account_type`, `currency`, `debits`, `credits`, `net` = `debits - credits` |
+| `TenantBalance` | `account_type`, `currency`, `debits`, `credits`, `net` = `credits - debits` (la convención del Ledger: `merchant_balance` positivo es lo que se le debe al comercio, `in_transit` queda negativo) |
 
 `Granularity`: `day` (default si viene vacío), `week`, `month`. `ParseGranularity` valida.
 
@@ -226,12 +226,11 @@ hecho y las consultas con el del token.
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Signo del neto | `net = debits - credits`; el saldo del Ledger es `credits - debits`, así que el mismo saldo sale con signo opuesto en `/ledger` y en `/reports/balances`. El neto de Reporting es coherente con cómo asientan los consumers del Ledger (sobre `merchant_balance`, un pago capturado es débito y un payout es crédito): el que está al revés es el saldo del Ledger, y por eso Payout rechazaría todo payout ([LEDGER.md §10.3](LEDGER.md)). Se resuelve en el Ledger; después Reporting expone el neto según la naturaleza de cada cuenta. |
-| 2 | Baja | Zona horaria | Los buckets de `day`/`week`/`month` se cortan en UTC; para un comercio en Argentina el "día" empieza a las 21:00. No hay parámetro de zona. |
-| 3 | Baja | Descartes silenciosos | Un payload ilegible o sin tenant se descarta sin log. Una cuenta que no se encuentra se proyecta con `account_type` vacío sin aviso, y su saldo aparece bajo un tipo vacío. |
-| 4 | Baja | Consultas sin tope | Sin `from`/`to` se agrega todo el histórico; con `granularity=day` sobre años, la serie no tiene límite de puntos. |
-| 5 | Baja | Comentarios desactualizados | La migración describe `captured_at`/`posted_at` como "momento de proyección"; hoy son la hora del evento. |
-| 6 | Producto | Alcance | Saldos sin fecha de corte. Sin métricas de payouts, pagos fallidos ni tasa de aprobación. Sin reportes de plataforma ni exportación. |
+| 1 | Baja | Zona horaria | Los buckets de `day`/`week`/`month` se cortan en UTC; para un comercio en Argentina el "día" empieza a las 21:00. No hay parámetro de zona. |
+| 2 | Baja | Descartes silenciosos | Un payload ilegible o sin tenant se descarta sin log. Una cuenta que no se encuentra se proyecta con `account_type` vacío sin aviso, y su saldo aparece bajo un tipo vacío. |
+| 3 | Baja | Consultas sin tope | Sin `from`/`to` se agrega todo el histórico; con `granularity=day` sobre años, la serie no tiene límite de puntos. |
+| 4 | Baja | Comentarios desactualizados | La migración describe `captured_at`/`posted_at` como "momento de proyección"; hoy son la hora del evento. |
+| 5 | Producto | Alcance | Saldos sin fecha de corte. Sin métricas de payouts, pagos fallidos ni tasa de aprobación. Sin reportes de plataforma ni exportación. |
 
 ---
 

@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -65,6 +66,33 @@ type JournalEntry struct {
 	createdAt      time.Time
 
 	events []Event
+}
+
+// SameMovements indica si el asiento mueve exactamente lo mismo que inputs:
+// mismas cuentas, direcciones, montos y moneda, sin importar el orden. Detecta
+// una clave de idempotencia reusada con otro contenido.
+func (e *JournalEntry) SameMovements(inputs []PostingInput) bool {
+	if len(inputs) != len(e.postings) {
+		return false
+	}
+	type movement struct {
+		account   AccountID
+		direction Direction
+		amount    int64
+		currency  string
+	}
+	pending := make(map[movement]int, len(e.postings))
+	for _, p := range e.postings {
+		pending[movement{p.accountID, p.direction, p.money.Amount(), p.money.Currency()}]++
+	}
+	for _, in := range inputs {
+		m := movement{in.AccountID, in.Direction, in.Amount, strings.ToUpper(strings.TrimSpace(in.Currency))}
+		if pending[m] == 0 {
+			return false
+		}
+		pending[m]--
+	}
+	return true
 }
 
 // PostingInput es el input para construir un posting al crear un JournalEntry.

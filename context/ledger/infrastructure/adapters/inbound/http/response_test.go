@@ -27,6 +27,9 @@ func TestRespondDomainError(t *testing.T) {
 		{"negative amount", domain.ErrNegativeAmount, http.StatusUnprocessableEntity},
 		{"already exists", domain.ErrEntryAlreadyExists, http.StatusConflict},
 		{"account already exists", domain.ErrAccountAlreadyExists, http.StatusConflict},
+		{"idempotency key conflict", domain.ErrIdempotencyKeyConflict, http.StatusConflict},
+		{"invalid id", domain.ErrInvalidID, http.StatusBadRequest},
+		{"idempotency key required", domain.ErrIdempotencyKeyRequired, http.StatusUnprocessableEntity},
 		{"unknown internal", errors.New("db exploded"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {

@@ -29,7 +29,7 @@ func TestPostEntry_Success(t *testing.T) {
 func TestPostEntry_Idempotent200(t *testing.T) {
 	env := newTestEnv(t)
 	// Preload un asiento con la misma clave de idempotencia del tenant.
-	existing := buildEntry(t, env.tenantID, "pay-123")
+	existing := env.entry(t, "pay-123", 100)
 	env.entries.preload(existing)
 
 	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
@@ -44,6 +44,19 @@ func TestPostEntry_Idempotent200(t *testing.T) {
 	decodeBody(t, rec, &body)
 	if !body.WasExisting || body.EntryID != existing.ID().String() {
 		t.Errorf("expected existing entry, got %+v", body)
+	}
+}
+
+func TestPostEntry_IdempotencyKeyConflict409(t *testing.T) {
+	env := newTestEnv(t)
+	env.entries.preload(env.entry(t, "pay-123", 100))
+
+	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{
+		"idempotency_key": "pay-123",
+		"lines":           env.lines(500, 500),
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -147,5 +160,29 @@ func TestPostEntry_CurrencyDifferentFromAccount422(t *testing.T) {
 	rec := env.do(http.MethodPost, "/api/v1/ledger/entries", map[string]any{"idempotency_key": "k", "lines": lines})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+}
+
+// Un ID que no es UUID es un error del cliente, no un 500.
+func TestInvalidIDs400(t *testing.T) {
+	env := newTestEnv(t)
+	lines := env.balancedLines()
+	lines[0]["account_id"] = "not-a-uuid"
+
+	cases := []struct {
+		name, method, path string
+		body               any
+	}{
+		{"post entry", http.MethodPost, "/api/v1/ledger/entries", map[string]any{"idempotency_key": "k", "lines": lines}},
+		{"reverse", http.MethodPost, "/api/v1/ledger/entries/not-a-uuid/reverse", nil},
+		{"balance", http.MethodGet, "/api/v1/ledger/accounts/not-a-uuid/balance", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := env.do(tc.method, tc.path, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

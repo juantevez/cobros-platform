@@ -119,7 +119,7 @@ func TestGetReportsUseCase_GetBalances(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("delegates tenant to reader", func(t *testing.T) {
-		balances := []domain.TenantBalance{{AccountType: "merchant_balance", Currency: "ARS", Debits: 100, Credits: 400, Net: -300}}
+		balances := []domain.TenantBalance{{AccountType: "merchant_balance", Currency: "ARS", Debits: 100, Credits: 400, Net: 300}}
 		r := &fakeReader{balances: balances}
 
 		got, err := NewGetReportsUseCase(r).GetBalances(ctx, tenantA)

@@ -22,11 +22,11 @@ func TestOnboarding_CreatesFiveAccounts(t *testing.T) {
 	if err := consumer.handle(context.Background(), msg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if accountRepo.saveCount != 5 {
-		t.Errorf("expected 5 accounts created, got %d", accountRepo.saveCount)
+	if accountRepo.saveCount != 7 {
+		t.Errorf("expected 7 accounts created, got %d", accountRepo.saveCount)
 	}
-	if len(pub.published) != 5 {
-		t.Errorf("expected 5 AccountCreated events, got %d", len(pub.published))
+	if len(pub.published) != 7 {
+		t.Errorf("expected 7 AccountCreated events, got %d", len(pub.published))
 	}
 	// La moneda del evento se respeta.
 	if _, err := accountRepo.FindByTenantAndType(context.Background(), tenantID, "merchant_balance", "USD"); err != nil {
@@ -63,11 +63,11 @@ func TestOnboarding_RedeliveryIsIdempotent(t *testing.T) {
 			t.Fatalf("delivery %d: unexpected error: %v", i+1, err)
 		}
 	}
-	if accountRepo.saveCount != 5 {
-		t.Errorf("expected 5 accounts total, got %d", accountRepo.saveCount)
+	if accountRepo.saveCount != 7 {
+		t.Errorf("expected 7 accounts total, got %d", accountRepo.saveCount)
 	}
-	if len(pub.published) != 5 {
-		t.Errorf("expected 5 AccountCreated events total, got %d", len(pub.published))
+	if len(pub.published) != 7 {
+		t.Errorf("expected 7 AccountCreated events total, got %d", len(pub.published))
 	}
 }
 
@@ -85,11 +85,11 @@ func TestOnboarding_RetryAfterPartialFailureCompletesAccounts(t *testing.T) {
 	if err := consumer.handle(context.Background(), msg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if accountRepo.saveCount != 3 {
-		t.Errorf("expected only the 3 missing accounts to be created, got %d", accountRepo.saveCount)
+	if accountRepo.saveCount != 5 {
+		t.Errorf("expected only the 5 missing accounts to be created, got %d", accountRepo.saveCount)
 	}
-	if len(pub.published) != 3 {
-		t.Errorf("expected 3 AccountCreated events, got %d", len(pub.published))
+	if len(pub.published) != 5 {
+		t.Errorf("expected 5 AccountCreated events, got %d", len(pub.published))
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/ledger/application"
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // ── Fake eventbus.Consumer ────────────────────────────────────────────────────
@@ -38,6 +39,14 @@ type fakeAccountRepo struct {
 	byType    map[string]*domain.Account // key: accountType|currency
 	saveCount int
 	saveErr   error
+	// ctxTenants registra el tenant del contexto en cada llamada: las
+	// escrituras dependen de él para el RLS (lo fija el TxManager).
+	ctxTenants []string
+}
+
+func (r *fakeAccountRepo) recordTenant(ctx context.Context) {
+	tid, _ := pkgpostgres.TenantIDFromContext(ctx)
+	r.ctxTenants = append(r.ctxTenants, tid)
 }
 
 func newFakeAccountRepo() *fakeAccountRepo {
@@ -56,6 +65,7 @@ func (r *fakeAccountRepo) seed(t *testing.T, tenantID domain.TenantID, at domain
 }
 
 func (r *fakeAccountRepo) Save(ctx context.Context, a *domain.Account) error {
+	r.recordTenant(ctx)
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -72,6 +82,7 @@ func (r *fakeAccountRepo) FindByID(ctx context.Context, id domain.AccountID) (*d
 	return nil, domain.ErrAccountNotFound
 }
 func (r *fakeAccountRepo) FindByTenantAndType(ctx context.Context, tid domain.TenantID, at domain.AccountType, cur string) (*domain.Account, error) {
+	r.recordTenant(ctx)
 	a, ok := r.byType[at.String()+"|"+cur]
 	if !ok {
 		return nil, domain.ErrAccountNotFound
@@ -155,4 +166,13 @@ func newCreateAccount(accountRepo *fakeAccountRepo) (*application.CreateAccountU
 	pub := &fakePublisher{}
 	uc := application.NewCreateAccountUseCase(accountRepo, fakeTx{}, pub)
 	return uc, pub
+}
+
+// postingAmounts indexa el monto de cada posting del asiento por cuenta.
+func postingAmounts(e *domain.JournalEntry) map[domain.AccountID]int64 {
+	out := map[domain.AccountID]int64{}
+	for _, p := range e.Postings() {
+		out[p.AccountID()] = p.Money().Amount()
+	}
+	return out
 }

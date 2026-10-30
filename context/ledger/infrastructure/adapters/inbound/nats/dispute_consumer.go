@@ -9,6 +9,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/ledger/application"
 	"github.com/juantevez/cobros-platform/context/ledger/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type disputeEventPayload struct {
@@ -23,17 +24,16 @@ type disputeEventPayload struct {
 // DisputeConsumer registra los asientos contables para disputas.
 //
 // dispute.opened.v1:
-//   merchant_balance CREDIT  amount   (congelar: sale del saldo disponible)
-//   dispute_hold     DEBIT   amount   (fondos en disputa)
+//   merchant_balance DEBIT   amount   (congelar: sale del saldo disponible)
+//   dispute_hold     CREDIT  amount   (fondos en disputa)
 //
 // dispute.resolved.v1 outcome=won:
-//   dispute_hold     CREDIT  amount   (liberar: sale del hold)
-//   merchant_balance DEBIT   amount   (vuelven al saldo disponible)
+//   dispute_hold     DEBIT   amount   (liberar: sale del hold)
+//   merchant_balance CREDIT  amount   (vuelven al saldo disponible)
 //
 // dispute.resolved.v1 outcome=lost/accepted/expired:
-//   dispute_hold     CREDIT  amount   (liberar: sale del hold)
-//   -- los fondos salen del sistema; no hay débito interno
-//   (En producción: payout_sent u otra cuenta de "fondos devueltos al banco")
+//   dispute_hold     DEBIT   amount   (liberar: sale del hold)
+//   in_transit       CREDIT  amount   (el PSP descuenta el contracargo de la liquidación)
 type DisputeConsumer struct {
 	consumer    eventbus.Consumer
 	postEntry   *application.PostEntryUseCase
@@ -57,16 +57,20 @@ func (c *DisputeConsumer) Start(ctx context.Context) error {
 		Name:          "ledger-dispute-consumer",
 		FilterSubject: "dispute.>",
 		MaxDeliver:    5,
-	}, c.handle)
+	}, strict(c.handle))
 }
 
 func (c *DisputeConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
 	var p disputeEventPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
-		return fmt.Errorf("dispute consumer: unmarshal: %w", err)
+		return eventbus.Permanent(fmt.Errorf("dispute consumer: unmarshal: %w", err))
 	}
+	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
-	tenantID := domain.TenantID(p.TenantID)
+	tenantID, err := domain.ParseTenantID(p.TenantID)
+	if err != nil {
+		return eventbus.Permanent(err)
+	}
 
 	switch msg.Subject {
 	case "dispute.opened.v1":
@@ -93,8 +97,8 @@ func (c *DisputeConsumer) postOpened(ctx context.Context, tenantID domain.Tenant
 		Description:    fmt.Sprintf("Disputa abierta: %s", p.DisputeID),
 		Metadata:       map[string]string{"dispute_id": p.DisputeID, "payment_id": p.PaymentID},
 		Lines: []application.PostingLine{
-			{AccountID: merchantBalance.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
-			{AccountID: disputeHold.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: merchantBalance.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
+			{AccountID: disputeHold.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
 		},
 	})
 	return err
@@ -107,29 +111,32 @@ func (c *DisputeConsumer) postResolved(ctx context.Context, tenantID domain.Tena
 	}
 
 	lines := []application.PostingLine{
-		{AccountID: disputeHold.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
+		{AccountID: disputeHold.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
 	}
 
-	if p.Outcome == "won" {
+	switch p.Outcome {
+	case "won":
 		// El comercio ganó: los fondos vuelven a su saldo disponible.
 		merchantBalance, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeMerchantBalance, p.Currency)
 		if err != nil {
 			return fmt.Errorf("find merchant_balance: %w", err)
 		}
 		lines = append(lines, application.PostingLine{
-			AccountID: merchantBalance.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency,
+			AccountID: merchantBalance.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency,
 		})
-	} else {
-		// El comercio perdió / aceptó / expiró: fondos salen del sistema.
-		// Usamos platform_fees como contrapartida de salida en Fase 3.
-		// En Fase 4: cuenta específica "chargebacks_paid".
-		platformFees, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypePlatformFees, p.Currency)
+	case "lost", "accepted", "expired":
+		// El comercio perdió / aceptó / expiró: el PSP le devuelve el monto al
+		// tarjetahabiente y lo descuenta de lo que nos liquida.
+		inTransit, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeInTransit, p.Currency)
 		if err != nil {
-			return fmt.Errorf("find platform_fees: %w", err)
+			return fmt.Errorf("find in_transit: %w", err)
 		}
 		lines = append(lines, application.PostingLine{
-			AccountID: platformFees.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency,
+			AccountID: inTransit.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency,
 		})
+	default:
+		// Asentarlo como perdida movería dinero por un desenlace que no existe.
+		return eventbus.Permanent(fmt.Errorf("dispute consumer: unknown outcome %q for dispute %s", p.Outcome, p.DisputeID))
 	}
 
 	_, err = c.postEntry.Execute(ctx, application.PostEntryCmd{

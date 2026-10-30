@@ -50,7 +50,7 @@ func TestPostEntry_Success(t *testing.T) {
 
 func TestPostEntry_Idempotent(t *testing.T) {
 	f := newEntryFixture(t)
-	existing := buildEntry(t, f.tenantID, "pay-123")
+	existing := f.entry(t, "pay-123", 100)
 	entryRepo := newFakeEntryRepo()
 	entryRepo.preload(existing)
 	balRepo := &fakeBalanceRepo{}
@@ -74,6 +74,65 @@ func TestPostEntry_Idempotent(t *testing.T) {
 	}
 }
 
+// Reusar la clave con otros movimientos no devuelve el asiento original.
+func TestPostEntry_IdempotencyKeyConflict(t *testing.T) {
+	f := newEntryFixture(t)
+	entryRepo := newFakeEntryRepo()
+	entryRepo.preload(f.entry(t, "pay-123", 100))
+	balRepo := &fakeBalanceRepo{}
+	uc := newPostEntryUC(f.accounts, entryRepo, balRepo, &fakePublisher{})
+
+	_, err := uc.Execute(context.Background(), PostEntryCmd{
+		TenantID:       f.tenantID.String(),
+		IdempotencyKey: "pay-123",
+		Lines:          f.lines(250, 250),
+	})
+	if !errors.Is(err, domain.ErrIdempotencyKeyConflict) {
+		t.Fatalf("expected ErrIdempotencyKeyConflict, got %v", err)
+	}
+	if len(entryRepo.saved) != 0 || len(balRepo.applied) != 0 {
+		t.Error("conflict must not save or apply")
+	}
+}
+
+// Dos requests concurrentes con la misma clave: el que pierde el UNIQUE
+// devuelve el asiento del otro en lugar de un error.
+func TestPostEntry_RaceReturnsExisting(t *testing.T) {
+	f := newEntryFixture(t)
+	winner := f.entry(t, "pay-123", 100)
+	entryRepo := newFakeEntryRepo()
+	entryRepo.raceEntry = winner
+	uc := newPostEntryUC(f.accounts, entryRepo, &fakeBalanceRepo{}, &fakePublisher{})
+
+	res, err := uc.Execute(context.Background(), PostEntryCmd{
+		TenantID:       f.tenantID.String(),
+		IdempotencyKey: "pay-123",
+		Lines:          f.balancedLines(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.WasExisting || res.EntryID != winner.ID().String() {
+		t.Errorf("expected winner entry, got %+v", res)
+	}
+}
+
+func TestPostEntry_RaceWithDifferentContentConflicts(t *testing.T) {
+	f := newEntryFixture(t)
+	entryRepo := newFakeEntryRepo()
+	entryRepo.raceEntry = f.entry(t, "pay-123", 999)
+	uc := newPostEntryUC(f.accounts, entryRepo, &fakeBalanceRepo{}, &fakePublisher{})
+
+	_, err := uc.Execute(context.Background(), PostEntryCmd{
+		TenantID:       f.tenantID.String(),
+		IdempotencyKey: "pay-123",
+		Lines:          f.balancedLines(),
+	})
+	if !errors.Is(err, domain.ErrIdempotencyKeyConflict) {
+		t.Fatalf("expected ErrIdempotencyKeyConflict, got %v", err)
+	}
+}
+
 func TestPostEntry_ValidationErrors(t *testing.T) {
 	f := newEntryFixture(t)
 	uc := newPostEntryUC(f.accounts, newFakeEntryRepo(), &fakeBalanceRepo{}, &fakePublisher{})
@@ -81,8 +140,8 @@ func TestPostEntry_ValidationErrors(t *testing.T) {
 
 	t.Run("missing idempotency key", func(t *testing.T) {
 		_, err := uc.Execute(context.Background(), PostEntryCmd{TenantID: tenant, Lines: f.balancedLines()})
-		if err == nil {
-			t.Fatal("expected error for missing idempotency key")
+		if !errors.Is(err, domain.ErrIdempotencyKeyRequired) {
+			t.Fatalf("expected ErrIdempotencyKeyRequired, got %v", err)
 		}
 	})
 	t.Run("fewer than 2 lines", func(t *testing.T) {

@@ -17,16 +17,19 @@ import (
 //
 // Flujo:
 //  1. Validar y parsear el comando.
-//  2. Verificar idempotencia: si ya existe un entry con esa clave, retornarlo.
-//  3. Verificar que cada cuenta exista, sea del tenant y tenga la moneda del posting.
+//  2. Parsear las líneas.
+//  3. Verificar idempotencia: si ya existe un entry con esa clave y los mismos
+//     movimientos, retornarlo; con otros movimientos, ErrIdempotencyKeyConflict.
+//  4. Verificar que cada cuenta exista, sea del tenant y tenga la moneda del posting.
 //     Crear el JournalEntry en el dominio (valida doble partida).
-//  4. En una sola transacción:
+//  5. En una sola transacción:
 //     a. Persistir el entry y sus postings.
 //     b. Actualizar los saldos de cada cuenta afectada.
 //     c. Guardar el evento en el outbox.
 //
 // Garantías:
-//   - Un mismo (tenantID, idempotencyKey) produce exactamente un asiento.
+//   - Un mismo (tenantID, idempotencyKey) produce exactamente un asiento,
+//     también ante requests concurrentes (el UNIQUE decide y se relee).
 //   - El saldo de las cuentas siempre refleja los postings persistidos.
 //   - El evento EntryPosted solo se publica si el asiento fue persistido.
 type PostEntryUseCase struct {
@@ -60,7 +63,7 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 	// ── 1. Validar inputs ────────────────────────────────────────────────────
 
 	if cmd.IdempotencyKey == "" {
-		return PostEntryResult{}, fmt.Errorf("idempotency key is required")
+		return PostEntryResult{}, domain.ErrIdempotencyKeyRequired
 	}
 	if len(cmd.Lines) < 2 {
 		return PostEntryResult{}, domain.ErrNotEnoughPostings
@@ -76,22 +79,7 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 		occurredAt = uc.clock.Now()
 	}
 
-	// ── 2. Idempotencia ──────────────────────────────────────────────────────
-	// Si ya existe un entry con esta clave, retornarlo sin crear uno nuevo.
-
-	existing, err := uc.entryRepo.FindByIdempotencyKey(ctx, tenantID, cmd.IdempotencyKey)
-	if err != nil && !errors.Is(err, domain.ErrEntryNotFound) {
-		return PostEntryResult{}, fmt.Errorf("check idempotency: %w", err)
-	}
-	if existing != nil {
-		return PostEntryResult{
-			EntryID:     existing.ID().String(),
-			CreatedAt:   existing.CreatedAt(),
-			WasExisting: true,
-		}, nil
-	}
-
-	// ── 3. Construir el agregado (valida doble partida en el dominio) ─────────
+	// ── 2. Parsear las líneas ────────────────────────────────────────────────
 
 	inputs := make([]domain.PostingInput, len(cmd.Lines))
 	for i, line := range cmd.Lines {
@@ -111,6 +99,20 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 		}
 	}
 
+	// ── 3. Idempotencia ──────────────────────────────────────────────────────
+	// Si ya existe un entry con esta clave, retornarlo sin crear uno nuevo,
+	// siempre que mueva lo mismo.
+
+	existing, err := uc.entryRepo.FindByIdempotencyKey(ctx, tenantID, cmd.IdempotencyKey)
+	if err != nil && !errors.Is(err, domain.ErrEntryNotFound) {
+		return PostEntryResult{}, fmt.Errorf("check idempotency: %w", err)
+	}
+	if existing != nil {
+		return existingEntryResult(existing, inputs)
+	}
+
+	// ── 4. Construir el agregado (valida doble partida en el dominio) ─────────
+
 	if err := uc.validateAccounts(ctx, tenantID, inputs); err != nil {
 		return PostEntryResult{}, err
 	}
@@ -129,7 +131,7 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 		return PostEntryResult{}, err
 	}
 
-	// ── 4. Persistir en una sola transacción ─────────────────────────────────
+	// ── 5. Persistir en una sola transacción ─────────────────────────────────
 
 	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		// a. Persistir entry + postings
@@ -145,6 +147,13 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 		// c. Guardar evento en outbox (misma tx)
 		return uc.publisher.Publish(ctx, entry.PullEvents()...)
 	}); err != nil {
+		// Carrera: otra ejecución con la misma clave ganó el UNIQUE entre el
+		// chequeo y el INSERT. Se resuelve como un reintento idempotente.
+		if errors.Is(err, domain.ErrEntryAlreadyExists) {
+			if existing, findErr := uc.entryRepo.FindByIdempotencyKey(ctx, tenantID, cmd.IdempotencyKey); findErr == nil {
+				return existingEntryResult(existing, inputs)
+			}
+		}
 		return PostEntryResult{}, err
 	}
 
@@ -152,6 +161,19 @@ func (uc *PostEntryUseCase) Execute(ctx context.Context, cmd PostEntryCmd) (Post
 		EntryID:     entryID.String(),
 		CreatedAt:   uc.clock.Now(),
 		WasExisting: false,
+	}, nil
+}
+
+// existingEntryResult devuelve el asiento ya registrado con la clave, o
+// ErrIdempotencyKeyConflict si la clave se reusó con otros movimientos.
+func existingEntryResult(existing *domain.JournalEntry, inputs []domain.PostingInput) (PostEntryResult, error) {
+	if !existing.SameMovements(inputs) {
+		return PostEntryResult{}, fmt.Errorf("%w: %s", domain.ErrIdempotencyKeyConflict, existing.IdempotencyKey())
+	}
+	return PostEntryResult{
+		EntryID:     existing.ID().String(),
+		CreatedAt:   existing.CreatedAt(),
+		WasExisting: true,
 	}, nil
 }
 

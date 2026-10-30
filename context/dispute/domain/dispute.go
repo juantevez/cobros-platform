@@ -21,9 +21,9 @@ import (
 //
 // Impacto contable (via eventos al Ledger):
 //
-//	opened:   merchant_balance CREDIT → dispute_hold DEBIT   (congelar fondos)
-//	won:      dispute_hold CREDIT → merchant_balance DEBIT   (liberar fondos)
-//	lost:     dispute_hold CREDIT → (fondos devueltos al banco, salen del sistema)
+//	opened:   merchant_balance DEBIT → dispute_hold CREDIT   (congelar fondos)
+//	won:      dispute_hold DEBIT → merchant_balance CREDIT   (liberar fondos)
+//	lost:     dispute_hold DEBIT → in_transit CREDIT         (el PSP descuenta el contracargo)
 //	accepted: igual que lost
 type Dispute struct {
 	id             DisputeID

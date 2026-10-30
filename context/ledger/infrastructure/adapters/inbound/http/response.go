@@ -25,6 +25,9 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrEntryNotFound):
 		respondError(c, http.StatusNotFound, err.Error())
 
+	case errors.Is(err, domain.ErrInvalidID):
+		respondError(c, http.StatusBadRequest, err.Error())
+
 	case errors.Is(err, domain.ErrEntryNotBalanced),
 		errors.Is(err, domain.ErrCurrencyMismatch),
 		errors.Is(err, domain.ErrAccountCurrencyMismatch),
@@ -33,14 +36,18 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidDirection),
 		errors.Is(err, domain.ErrInvalidAccountType),
 		errors.Is(err, domain.ErrInvalidCurrency),
-		errors.Is(err, domain.ErrNegativeAmount):
+		errors.Is(err, domain.ErrNegativeAmount),
+		errors.Is(err, domain.ErrIdempotencyKeyRequired):
 		respondError(c, http.StatusUnprocessableEntity, err.Error())
 
 	case errors.Is(err, domain.ErrEntryAlreadyExists),
-		errors.Is(err, domain.ErrAccountAlreadyExists):
+		errors.Is(err, domain.ErrAccountAlreadyExists),
+		errors.Is(err, domain.ErrIdempotencyKeyConflict):
 		respondError(c, http.StatusConflict, err.Error())
 
 	default:
+		// Fallas de infraestructura o inconsistencias de datos (p. ej. una
+		// cuenta validada sin fila de saldo en Apply).
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
 	}
 }

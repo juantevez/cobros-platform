@@ -431,9 +431,9 @@ Cliente paga
 [Payment Processing] captura contra PSP → payment.captured.v1
     ↓
 [Ledger] registra asiento:
-    in_transit         CREDIT  $100
-    merchant_balance   DEBIT   $ 97
-    platform_fees      DEBIT   $  3
+    in_transit         DEBIT   $100   (lo que liquida el PSP, sin su comisión)
+    merchant_balance   CREDIT  $ 97
+    platform_fees      CREDIT  $  3
     ↓
 [Outbox → NATS] publica ledger.entry.posted.v1 (lo consumen Reporting y Audit)
     ↓
@@ -442,8 +442,8 @@ Cliente paga
 [Payouts] transfiere al banco del comercio
     ↓
 [Ledger] registra asiento del desembolso:
-    merchant_balance   CREDIT  $ 97
-    payout_transit     DEBIT   $ 97
+    merchant_balance   DEBIT   $ 97
+    payout_transit     CREDIT  $ 97
 ```
 
 ---

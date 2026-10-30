@@ -75,6 +75,47 @@ func TestReverseEntry_Idempotent(t *testing.T) {
 	}
 }
 
+func TestReverseEntry_RaceReturnsExisting(t *testing.T) {
+	tenantID := testTenantID(t)
+	original := buildEntry(t, tenantID, "orig-key")
+	winner := buildEntry(t, tenantID, "reverse_orig-key")
+	entryRepo := newFakeEntryRepo()
+	entryRepo.byID[original.ID()] = original
+	entryRepo.raceEntry = winner
+	uc := newReverseUC(entryRepo, &fakeBalanceRepo{}, &fakePublisher{})
+
+	res, err := uc.Execute(context.Background(), ReverseEntryCmd{
+		TenantID:        tenantID.String(),
+		OriginalEntryID: original.ID().String(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.ReverseEntryID != winner.ID().String() {
+		t.Errorf("expected winner reverse, got %s", res.ReverseEntryID)
+	}
+}
+
+// Un error al chequear la idempotencia no sigue de largo a crear otra reversa.
+func TestReverseEntry_IdempotencyCheckError(t *testing.T) {
+	tenantID := testTenantID(t)
+	original := buildEntry(t, tenantID, "orig-key")
+	entryRepo := newFakeEntryRepo()
+	entryRepo.byID[original.ID()] = original
+	entryRepo.idempotencyErr = errors.New("db down")
+	uc := newReverseUC(entryRepo, &fakeBalanceRepo{}, &fakePublisher{})
+
+	if _, err := uc.Execute(context.Background(), ReverseEntryCmd{
+		TenantID:        tenantID.String(),
+		OriginalEntryID: original.ID().String(),
+	}); err == nil {
+		t.Fatal("expected error")
+	}
+	if len(entryRepo.saved) != 0 {
+		t.Error("must not save a reverse when the idempotency check fails")
+	}
+}
+
 func TestReverseEntry_Errors(t *testing.T) {
 	tenantID := testTenantID(t)
 
