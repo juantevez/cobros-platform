@@ -60,12 +60,21 @@ func NewAuditLogEntry(
 		metadata:      metadata,
 		correlationID: correlationID,
 		prevHash:      prevHash,
-		createdAt:     createdAt.UTC(),
+		createdAt:     TruncateToStorage(createdAt),
 	}
 
 	e.hash = computeHash(e.canonicalPayload())
 	return e, nil
 }
+
+// StoragePrecision es la precisión de created_at en PostgreSQL (TIMESTAMPTZ
+// guarda microsegundos). El hash se calcula sobre el timestamp ya truncado:
+// si se calculara con los nanosegundos de time.Now(), al releer la fila el
+// payload canónico cambiaría y VerifyHash fallaría siempre.
+const StoragePrecision = time.Microsecond
+
+// TruncateToStorage lleva un instante a la precisión con que se persiste.
+func TruncateToStorage(t time.Time) time.Time { return t.UTC().Truncate(StoragePrecision) }
 
 // ReconstituteAuditLogEntry reconstruye una entrada desde la base sin recalcular.
 func ReconstituteAuditLogEntry(

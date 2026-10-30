@@ -108,6 +108,23 @@ func TestNewAuditLogEntry(t *testing.T) {
 	})
 }
 
+func TestNewAuditLogEntry_storagePrecision(t *testing.T) {
+	// Regresión: el hash se calculaba con nanosegundos, PostgreSQL guarda
+	// microsegundos y al releer la fila VerifyHash fallaba siempre.
+	withNanos := time.Date(2026, 10, 27, 1, 1, 45, 852_809_123, time.UTC)
+	e, _ := NewAuditLogEntry("t", "a", ActionLogin, ResourceUser, "r", nil, "", nil, withNanos, sha256Hash)
+
+	if got := e.CreatedAt().Nanosecond(); got != 852_809_000 {
+		t.Fatalf("createdAt nanos = %d, want truncated to µs (852809000)", got)
+	}
+	// Simula la ida y vuelta por TIMESTAMPTZ (precisión de microsegundos).
+	fromDB := ReconstituteAuditLogEntry(1, "t", "a", ActionLogin, ResourceUser, "r",
+		nil, "", nil, e.Hash(), withNanos.Truncate(time.Microsecond))
+	if !fromDB.VerifyHash(sha256Hash) {
+		t.Error("entry read back with µs precision must verify")
+	}
+}
+
 func TestVerifyHash(t *testing.T) {
 	createdAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	e, _ := NewAuditLogEntry("t", "a", ActionLogin, ResourceUser, "r", nil, "c", nil, createdAt, sha256Hash)
