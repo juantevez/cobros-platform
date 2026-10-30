@@ -44,13 +44,13 @@ func (c *OnboardingConsumer) Start(ctx context.Context) error {
 		Name:          "ledger-onboarding-consumer",
 		FilterSubject: "onboarding.application.approved.v1",
 		MaxDeliver:    5,
-	}, c.handle)
+	}, strict(c.handle))
 }
 
 func (c *OnboardingConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
 	var payload onboardingApprovedPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-		return fmt.Errorf("ledger onboarding consumer: unmarshal: %w", err)
+		return eventbus.Permanent(fmt.Errorf("ledger onboarding consumer: unmarshal: %w", err))
 	}
 	ctx = pkgpostgres.WithTenantID(ctx, payload.TenantID) // RLS de las escrituras
 

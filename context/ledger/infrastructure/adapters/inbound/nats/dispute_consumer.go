@@ -57,17 +57,20 @@ func (c *DisputeConsumer) Start(ctx context.Context) error {
 		Name:          "ledger-dispute-consumer",
 		FilterSubject: "dispute.>",
 		MaxDeliver:    5,
-	}, c.handle)
+	}, strict(c.handle))
 }
 
 func (c *DisputeConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
 	var p disputeEventPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
-		return fmt.Errorf("dispute consumer: unmarshal: %w", err)
+		return eventbus.Permanent(fmt.Errorf("dispute consumer: unmarshal: %w", err))
 	}
 	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
-	tenantID := domain.TenantID(p.TenantID)
+	tenantID, err := domain.ParseTenantID(p.TenantID)
+	if err != nil {
+		return eventbus.Permanent(err)
+	}
 
 	switch msg.Subject {
 	case "dispute.opened.v1":
@@ -111,7 +114,8 @@ func (c *DisputeConsumer) postResolved(ctx context.Context, tenantID domain.Tena
 		{AccountID: disputeHold.ID().String(), Direction: "debit", Amount: p.Amount, Currency: p.Currency},
 	}
 
-	if p.Outcome == "won" {
+	switch p.Outcome {
+	case "won":
 		// El comercio ganó: los fondos vuelven a su saldo disponible.
 		merchantBalance, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeMerchantBalance, p.Currency)
 		if err != nil {
@@ -120,7 +124,7 @@ func (c *DisputeConsumer) postResolved(ctx context.Context, tenantID domain.Tena
 		lines = append(lines, application.PostingLine{
 			AccountID: merchantBalance.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency,
 		})
-	} else {
+	case "lost", "accepted", "expired":
 		// El comercio perdió / aceptó / expiró: el PSP le devuelve el monto al
 		// tarjetahabiente y lo descuenta de lo que nos liquida.
 		inTransit, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeInTransit, p.Currency)
@@ -130,6 +134,9 @@ func (c *DisputeConsumer) postResolved(ctx context.Context, tenantID domain.Tena
 		lines = append(lines, application.PostingLine{
 			AccountID: inTransit.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency,
 		})
+	default:
+		// Asentarlo como perdida movería dinero por un desenlace que no existe.
+		return eventbus.Permanent(fmt.Errorf("dispute consumer: unknown outcome %q for dispute %s", p.Outcome, p.DisputeID))
 	}
 
 	_, err = c.postEntry.Execute(ctx, application.PostEntryCmd{

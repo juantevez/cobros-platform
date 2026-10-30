@@ -13,7 +13,10 @@
 //	  audit.log.recorded.v1
 package eventbus
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Message es la unidad de intercambio del bus de eventos.
 type Message struct {
@@ -30,9 +33,31 @@ type Message struct {
 }
 
 // Handler procesa un mensaje recibido.
-// Si retorna error, el mensaje se re-entrega (hasta MaxDeliver del consumer).
+// Si retorna error, el mensaje se re-entrega (hasta MaxDeliver del consumer),
+// salvo que sea Permanent: entonces se descarta sin reintentar.
 // Las implementaciones deben ser idempotentes.
 type Handler func(ctx context.Context, msg *Message) error
+
+// Permanent marca un error que ningún reintento resuelve (payload ilegible,
+// datos inválidos): el consumer termina el mensaje y lo registra en el log en
+// lugar de re-entregarlo hasta MaxDeliver.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return permanentError{err: err}
+}
+
+// IsPermanent indica si err (o alguno que envuelva) fue marcado con Permanent.
+func IsPermanent(err error) bool {
+	var p permanentError
+	return errors.As(err, &p)
+}
+
+type permanentError struct{ err error }
+
+func (e permanentError) Error() string { return e.err.Error() }
+func (e permanentError) Unwrap() error { return e.err }
 
 // HeaderOccurredAt lleva el instante (RFC3339Nano, UTC) en que ocurrió el
 // evento de dominio. Lo agrega el outbox relay; los consumers lo usan para

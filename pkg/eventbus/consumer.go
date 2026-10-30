@@ -70,11 +70,11 @@ func (c *NatsConsumer) Start(ctx context.Context, cfg ConsumerConfig, handler Ha
 	c.logger.Info("eventbus: consumer started",
 		"stream", cfg.Stream, "consumer", cfg.Name, "filter", cfg.FilterSubject)
 
-	return c.loop(ctx, cons, handler)
+	return c.loop(ctx, cons, handler, maxDeliver)
 }
 
 // loop es el ciclo de fetch-process-ack.
-func (c *NatsConsumer) loop(ctx context.Context, cons jetstream.Consumer, handler Handler) error {
+func (c *NatsConsumer) loop(ctx context.Context, cons jetstream.Consumer, handler Handler, maxDeliver int) error {
 	for {
 		// Salir limpiamente si el contexto fue cancelado.
 		if ctx.Err() != nil {
@@ -91,7 +91,7 @@ func (c *NatsConsumer) loop(ctx context.Context, cons jetstream.Consumer, handle
 		}
 
 		for msg := range batch.Messages() {
-			c.process(ctx, msg, handler)
+			c.process(ctx, msg, handler, maxDeliver)
 		}
 
 		if batchErr := batch.Error(); batchErr != nil {
@@ -103,7 +103,12 @@ func (c *NatsConsumer) loop(ctx context.Context, cons jetstream.Consumer, handle
 }
 
 // process invoca el handler y gestiona el ack/nak.
-func (c *NatsConsumer) process(ctx context.Context, msg jetstream.Msg, handler Handler) {
+//
+// Un error Permanent termina el mensaje (Term) sin reintentos. Cualquier otro
+// lo re-entrega; en el último intento el broker ya no lo vuelve a entregar,
+// así que se registra como descartado (stream y secuencia permiten recuperarlo
+// del stream mientras se retenga).
+func (c *NatsConsumer) process(ctx context.Context, msg jetstream.Msg, handler Handler, maxDeliver int) {
 	busMsg := &Message{
 		Subject: msg.Subject(),
 		Payload: msg.Data(),
@@ -115,8 +120,27 @@ func (c *NatsConsumer) process(ctx context.Context, msg jetstream.Msg, handler H
 	}
 
 	if err := handler(ctx, busMsg); err != nil {
-		c.logger.Error("eventbus: handler error, sending nak",
-			"subject", msg.Subject(), "msgID", busMsg.ID, "error", err)
+		var delivered, streamSeq uint64
+		if md, mdErr := msg.Metadata(); mdErr == nil {
+			delivered, streamSeq = md.NumDelivered, md.Sequence.Stream
+		}
+		if IsPermanent(err) {
+			c.logger.Error("eventbus: permanent handler error, message discarded",
+				"subject", msg.Subject(), "msgID", busMsg.ID, "streamSeq", streamSeq, "error", err)
+			if termErr := msg.Term(); termErr != nil {
+				c.logger.Error("eventbus: term failed", "error", termErr)
+			}
+			return
+		}
+		if delivered >= uint64(maxDeliver) {
+			c.logger.Error("eventbus: max deliveries reached, message discarded",
+				"subject", msg.Subject(), "msgID", busMsg.ID, "streamSeq", streamSeq,
+				"deliveries", delivered, "error", err)
+		} else {
+			c.logger.Error("eventbus: handler error, sending nak",
+				"subject", msg.Subject(), "msgID", busMsg.ID, "streamSeq", streamSeq,
+				"deliveries", delivered, "error", err)
+		}
 		// Nak con backoff: el broker reintentará según la config del consumer.
 		if nakErr := msg.NakWithDelay(5 * time.Second); nakErr != nil {
 			c.logger.Error("eventbus: nak failed", "error", nakErr)

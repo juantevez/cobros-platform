@@ -76,7 +76,7 @@ func (c *PaymentConsumer) Start(ctx context.Context) error {
 		Name:          "ledger-payment-consumer",
 		FilterSubject: "payment.>",
 		MaxDeliver:    5,
-	}, c.handle)
+	}, strict(c.handle))
 }
 
 func (c *PaymentConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
@@ -93,15 +93,19 @@ func (c *PaymentConsumer) handle(ctx context.Context, msg *eventbus.Message) err
 func (c *PaymentConsumer) handleCaptured(ctx context.Context, msg *eventbus.Message) error {
 	var p paymentCapturedPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
-		return fmt.Errorf("ledger payment consumer: unmarshal: %w", err)
+		return eventbus.Permanent(fmt.Errorf("ledger payment consumer: unmarshal: %w", err))
 	}
 	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
-	tenantID := domain.TenantID(p.TenantID)
+	tenantID, err := domain.ParseTenantID(p.TenantID)
+	if err != nil {
+		return eventbus.Permanent(err)
+	}
 
 	netAmount := p.Amount - p.PlatformFee - p.PSPFee
 	if netAmount <= 0 {
-		return fmt.Errorf("ledger payment consumer: non-positive net amount for payment %s", p.PaymentID)
+		// Las comisiones se comen el pago: reintentar no lo cambia.
+		return eventbus.Permanent(fmt.Errorf("ledger payment consumer: non-positive net amount for payment %s", p.PaymentID))
 	}
 
 	inTransit, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeInTransit, p.Currency)
@@ -159,11 +163,14 @@ func (c *PaymentConsumer) handleCaptured(ctx context.Context, msg *eventbus.Mess
 func (c *PaymentConsumer) handleRefunded(ctx context.Context, msg *eventbus.Message) error {
 	var p paymentRefundedPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
-		return fmt.Errorf("ledger payment consumer: unmarshal refund: %w", err)
+		return eventbus.Permanent(fmt.Errorf("ledger payment consumer: unmarshal refund: %w", err))
 	}
 	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
-	tenantID := domain.TenantID(p.TenantID)
+	tenantID, err := domain.ParseTenantID(p.TenantID)
+	if err != nil {
+		return eventbus.Permanent(err)
+	}
 
 	merchantBalance, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypeMerchantBalance, p.Currency)
 	if err != nil {

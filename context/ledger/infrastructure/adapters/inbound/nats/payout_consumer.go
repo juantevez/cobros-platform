@@ -49,7 +49,7 @@ func (c *PayoutConsumer) Start(ctx context.Context) error {
 		Name:          "ledger-payout-consumer",
 		FilterSubject: "payout.>",
 		MaxDeliver:    5,
-	}, c.handle)
+	}, strict(c.handle))
 }
 
 type payoutEventPayload struct {
@@ -65,11 +65,14 @@ type payoutEventPayload struct {
 func (c *PayoutConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
 	var p payoutEventPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
-		return fmt.Errorf("payout consumer: unmarshal: %w", err)
+		return eventbus.Permanent(fmt.Errorf("payout consumer: unmarshal: %w", err))
 	}
 	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID) // RLS de las escrituras
 
-	tenantID := domain.TenantID(p.TenantID)
+	tenantID, err := domain.ParseTenantID(p.TenantID)
+	if err != nil {
+		return eventbus.Permanent(err)
+	}
 
 	switch msg.Subject {
 	case "payout.initiated.v1":
