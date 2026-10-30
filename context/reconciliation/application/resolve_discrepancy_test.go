@@ -152,6 +152,15 @@ func TestResolveDiscrepancyUseCase_Execute(t *testing.T) {
 
 func TestGetReportUseCase_Execute(t *testing.T) {
 	ctx := context.Background()
+
+	t.Run("invalid status filter is rejected", func(t *testing.T) {
+		run := pendingRun(tenantA, domain.TypePayment)
+		discs := newDiscRepo()
+		_, err := NewGetReportUseCase(newRunRepo(run), discs).Execute(ctx, GetReportQuery{TenantID: tenantA, RunID: run.ID().String(), StatusFilter: "closed"})
+		if !errors.Is(err, domain.ErrInvalidArgument) || !strings.Contains(err.Error(), `"closed"`) {
+			t.Fatalf("expected ErrInvalidArgument, got %v", err)
+		}
+	})
 	created := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
 	completed := created.Add(time.Hour)
 

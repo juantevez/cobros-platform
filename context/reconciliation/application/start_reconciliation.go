@@ -25,7 +25,7 @@ func (uc *StartReconciliationUseCase) Execute(ctx context.Context, cmd StartReco
 	}
 
 	if cmd.PeriodFrom.IsZero() || cmd.PeriodTo.IsZero() {
-		return StartReconciliationResult{}, fmt.Errorf("period_from and period_to are required")
+		return StartReconciliationResult{}, fmt.Errorf("%w: period_from and period_to are required", domain.ErrInvalidArgument)
 	}
 
 	var tenantID domain.TenantID

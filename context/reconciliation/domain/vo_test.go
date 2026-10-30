@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -39,7 +40,7 @@ func TestParseIDs(t *testing.T) {
 			}
 			for _, in := range invalid {
 				got, err := p.parse(in)
-				if err == nil || !strings.Contains(err.Error(), p.errText) {
+				if !errors.Is(err, ErrInvalidArgument) || !strings.Contains(err.Error(), p.errText) {
 					t.Errorf("parse(%q) expected %q error, got %v", in, p.errText, err)
 				}
 				if got != "" {

@@ -360,12 +360,24 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	t.Run("parse error leaves the run untouched", func(t *testing.T) {
+		d := newReportDeps()
+		d.parser.err = errBoom
+
+		err := d.exec()
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "parse report") {
+			t.Fatalf("expected wrapped errBoom, got %v", err)
+		}
+		if d.run.Status() != domain.RunStatusPending || len(d.runs.updates) != 0 || d.reader.calls != 0 {
+			t.Error("a malformed report must not claim nor fail the run")
+		}
+	})
+
 	failures := []struct {
 		name    string
 		setup   func(*reportDeps)
 		wantMsg string
 	}{
-		{"parse error", func(d *reportDeps) { d.parser.err = errBoom }, "compare: parse report"},
 		{"reader error", func(d *reportDeps) { d.reader.err = errBoom }, "compare: read payments"},
 		{"save discrepancies error", func(d *reportDeps) {
 			d.reader.payments = []SystemPayment{sysPay("A", 100, "captured")}
@@ -456,7 +468,7 @@ func TestProcessReportUseCase_Execute(t *testing.T) {
 
 	t.Run("error marking the run failed is reported with the cause", func(t *testing.T) {
 		d := newReportDeps()
-		d.parser.err = errBoom
+		d.reader.err = errBoom
 		d.runs.updateErr = errors.New("db down")
 		d.runs.updateErrAt = 2
 

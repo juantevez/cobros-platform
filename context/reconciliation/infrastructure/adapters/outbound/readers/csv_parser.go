@@ -119,8 +119,9 @@ func parseRow(row []string, col columnMapping, line int) (application.PSPRecord,
 	}
 
 	amount, err := strconv.ParseInt(strings.TrimSpace(row[col.amount]), 10, 64)
-	if err != nil {
-		return application.PSPRecord{}, fmt.Errorf("row %d: invalid amount %q: %w", line, row[col.amount], err)
+	if err != nil || amount <= 0 {
+		return application.PSPRecord{}, fmt.Errorf("%w: row %d: invalid amount %q: must be a positive integer in cents",
+			domain.ErrInvalidReportFormat, line, row[col.amount])
 	}
 
 	processedAt := time.Now().UTC()

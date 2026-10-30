@@ -22,7 +22,7 @@ func NewResolveDiscrepancyUseCase(repo DiscrepancyRepository, txManager TxManage
 
 func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDiscrepancyCmd) error {
 	if cmd.ResolvedBy == "" {
-		return fmt.Errorf("resolved_by is required")
+		return fmt.Errorf("%w: resolved_by is required", domain.ErrInvalidArgument)
 	}
 
 	id, err := domain.ParseDiscrepancyID(cmd.DiscrepancyID)
@@ -49,7 +49,7 @@ func (uc *ResolveDiscrepancyUseCase) Execute(ctx context.Context, cmd ResolveDis
 			return err
 		}
 	default:
-		return fmt.Errorf("invalid action %q: must be 'resolve' or 'ignore'", cmd.Action)
+		return fmt.Errorf("%w: invalid action %q: must be 'resolve' or 'ignore'", domain.ErrInvalidArgument, cmd.Action)
 	}
 
 	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
@@ -76,6 +76,11 @@ func (uc *GetReportUseCase) Execute(ctx context.Context, q GetReportQuery) (Repo
 	runID, err := domain.ParseRunID(q.RunID)
 	if err != nil {
 		return ReportView{}, err
+	}
+	switch domain.DiscrepancyStatus(q.StatusFilter) {
+	case "", domain.DiscrepancyOpen, domain.DiscrepancyResolved, domain.DiscrepancyIgnored:
+	default:
+		return ReportView{}, fmt.Errorf("%w: invalid status filter %q: must be open, resolved or ignored", domain.ErrInvalidArgument, q.StatusFilter)
 	}
 
 	run, err := uc.runRepo.FindByID(ctx, runID)

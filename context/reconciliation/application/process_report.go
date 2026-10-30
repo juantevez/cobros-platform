@@ -56,6 +56,13 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 		return err
 	}
 
+	// Parsear antes de tomar el run: un informe mal formado es un error del
+	// cliente y no debe dejar el run failed.
+	pspRecords, err := uc.reportParser.Parse(cmd.ReportData)
+	if err != nil {
+		return fmt.Errorf("parse report: %w", err)
+	}
+
 	run, err := uc.runRepo.FindByID(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("find run: %w", err)
@@ -68,7 +75,7 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 		return err
 	}
 
-	discrepancies, total, matched, err := uc.compare(ctx, run, cmd.ReportData)
+	discrepancies, total, matched, err := uc.compare(ctx, run, pspRecords)
 	if err != nil {
 		return fail(ctx, uc.runRepo, run, fmt.Errorf("compare: %w", err))
 	}
@@ -79,16 +86,10 @@ func (uc *ProcessReportUseCase) Execute(ctx context.Context, cmd ProcessReportCm
 func (uc *ProcessReportUseCase) compare(
 	ctx context.Context,
 	run *domain.ReconciliationRun,
-	reportData []byte,
+	pspRecords []PSPRecord,
 ) (discrepancies []*domain.Discrepancy, total, matched int, err error) {
 
-	// 1. Parsear el informe del PSP.
-	pspRecords, err := uc.reportParser.Parse(reportData)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("parse report: %w", err)
-	}
-
-	// 2. Cargar pagos del sistema para el período.
+	// 1. Cargar pagos del sistema para el período.
 	systemPayments, err := uc.paymentReader.ReadByPeriod(
 		ctx, run.TenantID(), run.PeriodFrom(), run.PeriodTo(),
 	)
@@ -96,7 +97,7 @@ func (uc *ProcessReportUseCase) compare(
 		return nil, 0, 0, fmt.Errorf("read payments: %w", err)
 	}
 
-	// 3. Indexar por psp_reference / transaction_id para O(1) lookup.
+	// 2. Indexar por psp_reference / transaction_id para O(1) lookup.
 	pspIndex := make(map[string]PSPRecord, len(pspRecords))
 	for _, r := range pspRecords {
 		pspIndex[r.TransactionID] = r
@@ -111,7 +112,7 @@ func (uc *ProcessReportUseCase) compare(
 
 	total = max(len(pspRecords), len(systemPayments))
 
-	// 4. Recorrer sistema → buscar en PSP.
+	// 3. Recorrer sistema → buscar en PSP.
 	for ref, sysPayment := range systemIndex {
 		pspRec, found := pspIndex[ref]
 		if !found {
@@ -153,7 +154,7 @@ func (uc *ProcessReportUseCase) compare(
 		matched++
 	}
 
-	// 5. Recorrer PSP → buscar los que no existen en sistema.
+	// 4. Recorrer PSP → buscar los que no existen en sistema.
 	for ref, pspRec := range pspIndex {
 		if _, found := systemIndex[ref]; !found {
 			discrepancies = append(discrepancies, domain.NewDiscrepancy(

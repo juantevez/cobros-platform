@@ -355,17 +355,22 @@ func TestUploadReport(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid CSV format returns 400", func(t *testing.T) {
-		e := newEnv(nil, 0)
-		run := e.seedRun(domain.TypePayment)
-		rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", "id,amount\nA,1\n", testTenant, runParam(run.ID().String()))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body)
-		}
-		if run.Status() != domain.RunStatusFailed {
-			t.Errorf("status = %q, want failed", run.Status())
-		}
-	})
+	for name, csv := range map[string]string{
+		"missing columns": "id,amount\nA,1\n",
+		"decimal amount":  "transaction_id,amount,currency,status\nA,12.50,ARS,captured\n",
+	} {
+		t.Run("invalid CSV ("+name+") returns 400 and leaves the run untouched", func(t *testing.T) {
+			e := newEnv(nil, 0)
+			run := e.seedRun(domain.TypePayment)
+			rec := doRequest(e.h.UploadReport, http.MethodPost, "/runs/x/report", csv, testTenant, runParam(run.ID().String()))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body)
+			}
+			if run.Status() != domain.RunStatusPending {
+				t.Errorf("status = %q, want pending (reprocesable con un CSV corregido)", run.Status())
+			}
+		})
+	}
 
 	t.Run("unknown run returns 404", func(t *testing.T) {
 		e := newEnv(nil, 0)
@@ -579,6 +584,38 @@ func TestOtherTenantGets404(t *testing.T) {
 	})
 }
 
+// ── Errores de cliente ────────────────────────────────────────────────────────
+
+func TestClientErrorsReturn400(t *testing.T) {
+	e := newEnv(nil, 0)
+	run := e.seedRun(domain.TypePayment)
+	d := e.seedDiscrepancy()
+
+	cases := []struct {
+		name   string
+		h      gin.HandlerFunc
+		target string
+		body   string
+		params gin.Params
+	}{
+		{"invalid run id", e.h.GetReport, "/x", "", runParam("not-a-uuid")},
+		{"invalid status filter", e.h.GetReport, "/x?status=closed", "", runParam(run.ID().String())},
+		{"invalid run type", e.h.StartRun, "/x", `{"type":"payout","period_from":"2026-09-01T00:00:00Z","period_to":"2026-10-01T00:00:00Z"}`, nil},
+		{"invalid discrepancy id", e.h.ResolveDiscrepancy, "/x", `{"action":"resolve"}`, discParam("nope")},
+		{"invalid action", e.h.ResolveDiscrepancy, "/x", `{"action":"delete"}`, discParam(d.ID().String())},
+		{"invalid run id on upload", e.h.UploadReport, "/x", "transaction_id,amount,currency,status\nA,1,ARS,captured\n", runParam("nope")},
+		{"invalid run id on process-internal", e.h.ProcessInternal, "/x", "", runParam("nope")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(tc.h, http.MethodPost, tc.target, tc.body, testTenant, tc.params)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
 // ── respondError ──────────────────────────────────────────────────────────────
 
 func TestRespondError(t *testing.T) {
@@ -594,6 +631,7 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrEmptyReport, http.StatusBadRequest},
 		{domain.ErrInvalidReportFormat, http.StatusBadRequest},
 		{domain.ErrRunTypeMismatch, http.StatusUnprocessableEntity},
+		{domain.ErrInvalidArgument, http.StatusBadRequest},
 		{fmt.Errorf("find run: %w", domain.ErrRunNotFound), http.StatusNotFound},
 		{domain.ErrRunNotCompleted, http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},

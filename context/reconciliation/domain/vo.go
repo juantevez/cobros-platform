@@ -17,21 +17,21 @@ func NewDiscrepancyID() DiscrepancyID { return DiscrepancyID(uuid.NewString()) }
 
 func ParseRunID(s string) (RunID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid run id: %w", err)
+		return "", fmt.Errorf("%w: invalid run id: %w", ErrInvalidArgument, err)
 	}
 	return RunID(s), nil
 }
 
 func ParseDiscrepancyID(s string) (DiscrepancyID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid discrepancy id: %w", err)
+		return "", fmt.Errorf("%w: invalid discrepancy id: %w", ErrInvalidArgument, err)
 	}
 	return DiscrepancyID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: invalid tenant id: %w", ErrInvalidArgument, err)
 	}
 	return TenantID(s), nil
 }
@@ -58,7 +58,7 @@ func ParseReconciliationType(s string) (ReconciliationType, error) {
 	case TypePayment, TypeInternal:
 		return t, nil
 	}
-	return "", fmt.Errorf("invalid reconciliation type: %q", s)
+	return "", fmt.Errorf("%w: invalid reconciliation type: %q", ErrInvalidArgument, s)
 }
 
 func (t ReconciliationType) String() string { return string(t) }
