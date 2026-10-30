@@ -1,14 +1,14 @@
 # Ledger (Libro Mayor) — Documentación técnico-funcional
 
 > **Bounded Context:** `context/ledger`
-> **Migraciones:** [`000003_ledger_init`](../../migrations/000003_ledger_init.up.sql), ajuste del `CHECK` de tipos en [`000007_payout_init`](../../migrations/000007_payout_init.up.sql)
+> **Migraciones:** [`000003_ledger_init`](../../migrations/000003_ledger_init.up.sql), ajuste del `CHECK` de tipos en [`000007_payout_init`](../../migrations/000007_payout_init.up.sql), cuentas de plataforma faltantes en [`000036_ledger_platform_accounts_backfill`](../../migrations/000036_ledger_platform_accounts_backfill.up.sql), RLS en [`000037_ledger_rls_nullif`](../../migrations/000037_ledger_rls_nullif.up.sql)
 > **Stream NATS:** `LEDGER` (`ledger.>`)
 
 ---
 
 ## 1. Propósito
 
-Ledger es el **libro mayor de doble partida** de la plataforma y la **fuente de verdad del dinero**. Registra cada hecho económico (pago capturado, desembolso, disputa) como un **asiento** inmutable compuesto por **postings** que balancean, y mantiene el **saldo** de cada cuenta.
+Ledger es el **libro mayor de doble partida** de la plataforma y la **fuente de verdad del dinero**. Registra cada hecho económico (pago capturado, reembolso, desembolso, disputa) como un **asiento** inmutable compuesto por **postings** que balancean, y mantiene el **saldo** de cada cuenta.
 
 Principios de diseño:
 
@@ -326,7 +326,7 @@ erDiagram
 | 4 | Baja | Orden de postings no preservado | Se cargan con `ORDER BY id` (UUID aleatorio). |
 | 5 | Baja | `account_balances` sin `tenant_id` | Sin RLS propio: depende de que cada query haga join con `ledger_accounts` o valide la cuenta antes (Payout hace el join; `GetBalance` y `PostEntry` validan la cuenta). |
 | 6 | Baja | Consumers poco estrictos | Una disputa con `outcome` desconocido se asienta como perdida. Un pago con neto ≤ 0 reintenta 5 veces un error permanente. Tras 5 fallos el mensaje se descarta sin registro. |
-| 7 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Un reembolso sale entero de `merchant_balance` (no se devuelven comisiones) y no hay reembolsos parciales. Sin control de sobregiro. Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
+| 7 | Producto | Alcance | Las cuentas de plataforma (`platform_fees`, `in_transit`) son por tenant: no hay revenue consolidado ni cuenta del banco del PSP. `reserve` no tiene movimientos. Un reembolso sale entero de `merchant_balance` (no se devuelven comisiones) y no hay reembolsos parciales. El Ledger no impide saldos negativos: un reembolso o una disputa pueden dejar `merchant_balance` en negativo (solo Payout valida el disponible antes de desembolsar). Sin listado de cuentas, asientos ni extracto. Sin endpoint de operador para ajustes manuales sobre un comercio (§6). |
 
 ---
 
