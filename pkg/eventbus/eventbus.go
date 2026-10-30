@@ -39,6 +39,16 @@ type Handler func(ctx context.Context, msg *Message) error
 // fechar hechos sin depender del momento de entrega (re-entregas, replays).
 const HeaderOccurredAt = "occurred-at"
 
+// HeaderActor lleva quién originó el evento: el userID del JWT, "apikey:<id>"
+// o "system" (procesos del worker). Lo agrega el EventPublisher del outbox a
+// partir del contexto de la request. Es metadato interno: los webhooks
+// reenvían solo el payload.
+const HeaderActor = "actor"
+
+// HeaderCorrelationID lleva el correlation ID de la request que originó el
+// evento (CorrelationIDMiddleware), para trazar un hecho entre servicios.
+const HeaderCorrelationID = "correlation-id"
+
 // Publisher publica mensajes en el bus de eventos.
 // La implementación garantiza entrega al broker (ack de JetStream).
 type Publisher interface {

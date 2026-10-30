@@ -11,6 +11,7 @@ import (
 
 	"github.com/juantevez/cobros-platform/context/auth/application"
 	"github.com/juantevez/cobros-platform/context/auth/domain"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 type pgRefreshTokenRepository struct {
@@ -25,7 +26,7 @@ func NewRefreshTokenRepository(pool *pgxpool.Pool) *pgRefreshTokenRepository {
 // No usa ConnFromContext porque los refresh tokens se guardan fuera de la
 // transacción del dominio (en authenticate.go no hay TxManager).
 func (r *pgRefreshTokenRepository) Save(ctx context.Context, token application.RefreshToken) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := postgres.ConnFromContext(ctx, r.pool).Exec(ctx, `
 		INSERT INTO refresh_tokens
 			(id, user_id, tenant_id, token_hash, issued_at, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -88,7 +89,7 @@ func (r *pgRefreshTokenRepository) Revoke(ctx context.Context, tokenID string, r
 		replacedByPtr = &replacedBy
 	}
 
-	tag, err := r.pool.Exec(ctx, `
+	tag, err := postgres.ConnFromContext(ctx, r.pool).Exec(ctx, `
 		UPDATE refresh_tokens
 		SET revoked_at = $2, replaced_by = $3
 		WHERE id = $1 AND revoked_at IS NULL`,

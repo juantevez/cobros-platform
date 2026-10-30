@@ -154,9 +154,9 @@ func main() {
 	activateTenant := application.NewActivateTenantUseCase(tenantRepo, txManager, authPub)
 	suspendTenant := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
 	registerUser := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
-	authenticate := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock)
+	authenticate := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock, txManager, authPub)
 	refreshTokenUC := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock)
-	logoutUC := application.NewLogoutUseCase(refreshRepo)
+	logoutUC := application.NewLogoutUseCase(refreshRepo, txManager, authPub)
 	issueApiKey := application.NewIssueApiKeyUseCase(tenantRepo, apiKeyRepo, hasher, txManager, authPub)
 	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)
 	assignRole := application.NewAssignRoleUseCase(tenantRepo, userRepo, membershipRepo, txManager, authPub)
@@ -193,8 +193,11 @@ func main() {
 	auditRepo := auditpg.NewAuditLogRepository(pool)
 	auditHasher := auditcrypto.NewSHA256Hasher()
 	listLogs := auditapp.NewListLogsUseCase(auditRepo)
-	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditHasher)
-	audithttp.RegisterRoutes(protected, audithttp.NewAuditHandler(listLogs, verifyChain))
+	verifyChain := auditapp.NewVerifyChainUseCase(auditRepo, auditpg.NewCheckpointRepository(pool), auditHasher)
+	audithttp.RegisterRoutes(protected, audithttp.NewAuditHandler(listLogs, verifyChain), audithttp.RouteGuards{
+		ReadTenantLogs: authttp.RequireRole(authdomain.RoleAdmin, authdomain.RolePlatformSupport),
+		PlatformAudit:  authttp.RequireRole(authdomain.RolePlatformSupport),
+	})
 
 	// ── Onboarding ────────────────────────────────────────────────────────────
 

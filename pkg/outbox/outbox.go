@@ -58,6 +58,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // DomainEvent es la interfaz mínima que todo evento de dominio debe implementar
@@ -102,20 +105,33 @@ func (p *EventPublisher[E]) Publish(ctx context.Context, events ...E) error {
 			return fmt.Errorf("outbox publisher: marshal %q: %w", ev.EventType(), err)
 		}
 		if err := p.store.Save(ctx, Message{
-			ID:       ev.EventID(),
-			TenantID: ev.EventTenantID(),
-			Subject:  ev.EventType(),
-			Payload:  payload,
-			Headers: map[string]string{
-				"content-type": "application/json",
-				"event-type":   ev.EventType(),
-			},
+			ID:        ev.EventID(),
+			TenantID:  ev.EventTenantID(),
+			Subject:   ev.EventType(),
+			Payload:   payload,
+			Headers:   headersFrom(ctx, ev.EventType()),
 			CreatedAt: ev.OccurredAt(),
 		}); err != nil {
 			return fmt.Errorf("outbox publisher: save %q: %w", ev.EventType(), err)
 		}
 	}
 	return nil
+}
+
+// headersFrom arma los headers del mensaje. Además del tipo, propaga desde el
+// contexto quién originó el evento (actor: userID del JWT, "apikey:<id>" o
+// "system") y el correlation ID de la request, para que los consumidores
+// (p. ej. Audit) sepan quién hizo qué sin que cada evento lo declare.
+func headersFrom(ctx context.Context, eventType string) map[string]string {
+	h := map[string]string{
+		"content-type":       "application/json",
+		"event-type":         eventType,
+		eventbus.HeaderActor: postgres.ActorFromContext(ctx),
+	}
+	if id := postgres.CorrelationIDFromContext(ctx); id != "" {
+		h[eventbus.HeaderCorrelationID] = id
+	}
+	return h
 }
 
 // Message es un evento de dominio pendiente de publicación.

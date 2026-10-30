@@ -26,14 +26,39 @@ type fakeRepo struct {
 	recentErr   error
 	tenantErr   error
 	fromIDErr   error
+	lockErr     error
+	existsErr   error
+	before      *domain.AuditLogEntry // predecesora devuelta por FindBefore
+	beforeErr   error
 
 	// capturados para aserciones
+	calls        []string // orden de LockChain / FindLast / Save
 	lastLimit    int
 	lastTenantID string
 	lastFromID   int64
+	lastBeforeID int64
+}
+
+func (r *fakeRepo) LockChain(ctx context.Context) error {
+	r.calls = append(r.calls, "lock:"+txState(ctx))
+	return r.lockErr
+}
+
+func (r *fakeRepo) ExistsByEventID(ctx context.Context, eventID string) (bool, error) {
+	r.calls = append(r.calls, "exists:"+txState(ctx))
+	if r.existsErr != nil {
+		return false, r.existsErr
+	}
+	for _, e := range r.saved {
+		if e.EventID() == eventID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *fakeRepo) Save(ctx context.Context, entry *domain.AuditLogEntry) error {
+	r.calls = append(r.calls, "save:"+txState(ctx))
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -42,6 +67,7 @@ func (r *fakeRepo) Save(ctx context.Context, entry *domain.AuditLogEntry) error 
 }
 
 func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) {
+	r.calls = append(r.calls, "find:"+txState(ctx))
 	if r.findLastErr != nil {
 		return nil, r.findLastErr
 	}
@@ -65,6 +91,11 @@ func (r *fakeRepo) ListByTenant(ctx context.Context, tenantID string, limit int)
 	return r.byTenant, nil
 }
 
+func (r *fakeRepo) FindBefore(ctx context.Context, beforeID int64) (*domain.AuditLogEntry, error) {
+	r.lastBeforeID = beforeID
+	return r.before, r.beforeErr
+}
+
 func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*domain.AuditLogEntry, error) {
 	r.lastFromID = fromID
 	r.lastLimit = limit
@@ -75,6 +106,55 @@ func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*
 }
 
 // sha256Hasher es la implementación real de HashComputer para los tests.
+// fakeCheckpoints implementa CheckpointRepository en memoria.
+type fakeCheckpoints struct {
+	saved       []domain.ChainCheckpoint
+	mismatch    *domain.CheckpointMismatch
+	latestErr   error
+	saveErr     error
+	mismatchErr error
+}
+
+func (f *fakeCheckpoints) Save(ctx context.Context, cp domain.ChainCheckpoint) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	f.saved = append(f.saved, cp)
+	return nil
+}
+
+func (f *fakeCheckpoints) Latest(ctx context.Context) (*domain.ChainCheckpoint, error) {
+	if f.latestErr != nil || len(f.saved) == 0 {
+		return nil, f.latestErr
+	}
+	cp := f.saved[len(f.saved)-1]
+	return &cp, nil
+}
+
+func (f *fakeCheckpoints) FirstMismatch(ctx context.Context) (*domain.CheckpointMismatch, error) {
+	return f.mismatch, f.mismatchErr
+}
+
+// fakeTx marca el contexto para que el repo fake registre si cada llamada
+// ocurrió dentro de la transacción.
+type fakeTx struct{ err error }
+
+type inTxKey struct{}
+
+func (t fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	if t.err != nil {
+		return t.err
+	}
+	return fn(context.WithValue(ctx, inTxKey{}, true))
+}
+
+func txState(ctx context.Context) string {
+	if ctx.Value(inTxKey{}) == true {
+		return "tx"
+	}
+	return "notx"
+}
+
 type sha256Hasher struct{}
 
 func (sha256Hasher) Compute(payload string) []byte {
@@ -96,9 +176,6 @@ func newClock() fixedClock    { return fixedClock{t: testNow} }
 
 // buildEntry construye una entrada real encadenada al prevHash dado.
 func buildEntry(tenantID string, action domain.Action, rt domain.ResourceType, resourceID string, prevHash []byte) *domain.AuditLogEntry {
-	e, _ := domain.NewAuditLogEntry(
-		tenantID, "actor", action, rt, resourceID,
-		nil, "", prevHash, testNow, newHasher().Compute,
-	)
+	e, _ := domain.NewAuditLogEntry(domain.EntryInput{TenantID: tenantID, Actor: "actor", Action: action, ResourceType: rt, ResourceID: resourceID}, prevHash, testNow, newHasher().Compute)
 	return e
 }

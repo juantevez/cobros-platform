@@ -51,6 +51,8 @@ func TestScanEntry(t *testing.T) {
 			strp("user-1"),              // resource_id
 			[]byte(`{"ip":"10.0.0.1"}`), // metadata
 			strp("corr-1"),              // correlation_id
+			strp("ev-1"),                // event_id
+			createdAt.Add(-time.Minute), // occurred_at
 			[]byte{0xAA, 0xBB},          // prev_hash
 			[]byte{0xCC, 0xDD},          // hash
 			createdAt,                   // created_at
@@ -78,6 +80,9 @@ func TestScanEntry(t *testing.T) {
 		if !e.CreatedAt().Equal(createdAt) || e.CreatedAt().Location() != time.UTC {
 			t.Errorf("createdAt mismatch: %v", e.CreatedAt())
 		}
+		if e.EventID() != "ev-1" || !e.OccurredAt().Equal(createdAt.Add(-time.Minute)) {
+			t.Errorf("event source mismatch: %q / %v", e.EventID(), e.OccurredAt())
+		}
 	})
 
 	t.Run("null optional columns become empty", func(t *testing.T) {
@@ -90,6 +95,8 @@ func TestScanEntry(t *testing.T) {
 			(*string)(nil), // resource_id NULL
 			[]byte(nil),    // metadata NULL
 			(*string)(nil), // correlation_id NULL
+			(*string)(nil), // event_id NULL
+			createdAt,      // occurred_at
 			[]byte(nil),    // prev_hash NULL (genesis)
 			[]byte{0x01},
 			createdAt,
@@ -120,7 +127,7 @@ func TestScanEntry(t *testing.T) {
 	t.Run("invalid metadata json rejected", func(t *testing.T) {
 		row := fakeRow{vals: []any{
 			int64(1), (*string)(nil), "system", "auth.user.login", "user",
-			(*string)(nil), []byte(`{bad json`), (*string)(nil),
+			(*string)(nil), []byte(`{bad json`), (*string)(nil), (*string)(nil), createdAt,
 			[]byte(nil), []byte{0x01}, createdAt,
 		}}
 		_, err := scanEntry(row)

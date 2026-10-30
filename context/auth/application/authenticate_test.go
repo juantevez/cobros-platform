@@ -29,6 +29,7 @@ func newAuthUC(
 	return NewAuthenticateUseCase(
 		tenantRepo, userRepo, newFakeMembershipRepo(memberships...),
 		refreshRepo, hasher, issuer, fakeClock{now: time.Unix(1_700_000_000, 0).UTC()},
+		fakeTx{}, &fakePublisher{},
 	)
 }
 
@@ -142,5 +143,48 @@ func TestAuthenticate_WrongPassword(t *testing.T) {
 	})
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+func TestAuthenticate_PublishesLoginEvent(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	user := newActiveUser(t, tenant.ID(), "user@example.com")
+	membership := domain.NewMembership(user.ID(), tenant.ID(), domain.RoleOperator, domain.NewUserID())
+	users := newFakeUserRepo()
+	users.byID[user.ID()] = user
+	users.byEmail[user.TenantID().String()+"|"+user.Email().String()] = user
+	pub := &fakePublisher{}
+	uc := NewAuthenticateUseCase(newFakeTenantRepo(tenant), users, newFakeMembershipRepo(membership),
+		&fakeRefreshRepo{}, &fakeHasher{verifyResult: true}, &fakeTokenIssuer{access: "a", refresh: "r"},
+		fakeClock{now: time.Unix(1_700_000_000, 0).UTC()}, fakeTx{}, pub)
+
+	if _, err := uc.Execute(context.Background(), AuthenticateCmd{
+		TenantID: tenant.ID().String(), Email: "user@example.com", Password: "secret",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(pub.published))
+	}
+	ev, ok := pub.published[0].(domain.UserLoggedInEvent)
+	if !ok || ev.EventType() != "auth.user.login.v1" || ev.UserID != user.ID().String() || ev.TenantID != tenant.ID().String() {
+		t.Errorf("unexpected event: %+v", pub.published[0])
+	}
+}
+
+func TestAuthenticate_PublishErrorFailsLogin(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	user := newActiveUser(t, tenant.ID(), "user@example.com")
+	membership := domain.NewMembership(user.ID(), tenant.ID(), domain.RoleOperator, domain.NewUserID())
+	users := newFakeUserRepo()
+	users.byEmail[user.TenantID().String()+"|"+user.Email().String()] = user
+	uc := NewAuthenticateUseCase(newFakeTenantRepo(tenant), users, newFakeMembershipRepo(membership),
+		&fakeRefreshRepo{}, &fakeHasher{verifyResult: true}, &fakeTokenIssuer{access: "a", refresh: "r"},
+		fakeClock{now: time.Unix(1_700_000_000, 0).UTC()}, fakeTx{}, &fakePublisher{err: errors.New("outbox down")})
+
+	if _, err := uc.Execute(context.Background(), AuthenticateCmd{
+		TenantID: tenant.ID().String(), Email: "user@example.com", Password: "secret",
+	}); err == nil {
+		t.Fatal("login must fail if the audit event cannot be recorded (same tx as the refresh token)")
 	}
 }

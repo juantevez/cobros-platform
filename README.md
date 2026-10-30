@@ -138,7 +138,7 @@ La documentación técnico-funcional de cada contexto (modelo, casos de uso, API
 |---|---|---|
 | Auth & Multi-Tenant | Tenants, usuarios, roles, JWT y API keys | [AUTH.md](docs/technical/AUTH.md) |
 | Ledger | Libro mayor de doble partida, fuente de verdad del dinero | [LEDGER.md](docs/technical/LEDGER.md) |
-| Audit | Bitácora inmutable con verificación de cadena | *(pendiente)* |
+| Audit | Bitácora inmutable con verificación de cadena | [AUDIT.md](docs/technical/AUDIT.md) |
 | Onboarding | Solicitudes KYC/KYB y revisión por operador | [ONBOARDING.md](docs/technical/ONBOARDING.md) |
 | Payment Processing | Cobros contra PSP con evaluación de riesgo y comisión | [PAYMENT.md](docs/technical/PAYMENT.md) |
 | Payouts | Desembolsos del saldo del comercio a su banco | [PAYOUT.md](docs/technical/PAYOUT.md) |
@@ -403,7 +403,7 @@ Subjects publicados hoy, por stream:
 
 | Stream | Subjects |
 |---|---|
-| `AUTH` (`auth.>`) | `auth.tenant.{created,activated,suspended}.v1`, `auth.user.{registered,suspended}.v1`, `auth.apikey.{issued,revoked}.v1`, `auth.role.assigned.v1` |
+| `AUTH` (`auth.>`) | `auth.tenant.{created,activated,suspended}.v1`, `auth.user.{registered,suspended,login,logout}.v1`, `auth.apikey.{issued,revoked}.v1`, `auth.role.assigned.v1` |
 | `LEDGER` (`ledger.>`) | `ledger.account.created.v1`, `ledger.entry.{posted,reversed}.v1` |
 | `ONBOARDING` (`onboarding.>`) | `onboarding.application.{submitted,sent_for_review,approved,rejected,more_info,reopened}.v1` |
 | `PAYMENT` (`payment.>`) | `payment.{captured,failed,refunded}.v1` |

@@ -102,7 +102,7 @@ func main() {
 	// ── Audit consumers ───────────────────────────────────────────────────────
 
 	auditRepo    := auditpg.NewAuditLogRepository(pool)
-	recordAction := auditapp.NewRecordActionUseCase(auditRepo, auditcrypto.NewSHA256Hasher(), realClock{})
+	recordAction := auditapp.NewRecordActionUseCase(auditRepo, auditcrypto.NewSHA256Hasher(), realClock{}, postgres.NewTxManager(pool))
 	auditConsumer := auditnats.NewEventConsumer(
 		eventbus.NewConsumer(natsClient, logger.With("component", "audit")),
 		recordAction,
@@ -171,16 +171,24 @@ func main() {
 			logger.Error("relay stopped", "error", err); cancel()
 		}
 	}()
+	// Checkpoints de la cadena: guarda y loguea la cabeza periódicamente
+	// (ancla fuera de la base para detectar truncamientos/reescrituras).
+	auditCheckpointer := auditapp.NewChainCheckpointer(
+		auditRepo, auditpg.NewCheckpointRepository(pool), realClock{},
+		auditapp.DefaultCheckpointInterval, logger.With("component", "audit_checkpoint"),
+	)
 	go func() {
-		if err := auditConsumer.StartAuthConsumer(ctx); err != nil {
-			logger.Error("audit auth consumer stopped", "error", err)
+		if err := auditCheckpointer.Start(ctx); err != nil {
+			logger.Error("audit chain checkpointer stopped", "error", err)
 		}
 	}()
-	go func() {
-		if err := auditConsumer.StartLedgerConsumer(ctx); err != nil {
-			logger.Error("audit ledger consumer stopped", "error", err)
-		}
-	}()
+	for _, sub := range auditnats.Subscriptions {
+		go func(sub auditnats.Subscription) {
+			if err := auditConsumer.Start(ctx, sub); err != nil {
+				logger.Error("audit consumer stopped", "consumer", sub.Name, "error", err)
+			}
+		}(sub)
+	}
 	go func() {
 		if err := authOnboardingConsumer.Start(ctx); err != nil {
 			logger.Error("auth onboarding consumer stopped", "error", err)

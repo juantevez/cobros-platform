@@ -161,10 +161,15 @@ func TestLogout_Success(t *testing.T) {
 	user := newActiveUser(t, tenant.ID(), "user@example.com")
 	stored, byHash := storedToken("tok-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), false)
 	refreshRepo := &fakeRefreshRepo{byHash: byHash}
-	uc := NewLogoutUseCase(refreshRepo)
+	pub := &fakePublisher{}
+	uc := NewLogoutUseCase(refreshRepo, fakeTx{}, pub)
 
 	if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: "raw-refresh"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	ev, ok := pub.published[0].(domain.UserLoggedOutEvent)
+	if len(pub.published) != 1 || !ok || ev.UserID != user.ID().String() || ev.TenantID != tenant.ID().String() {
+		t.Errorf("expected one logout event, got %+v", pub.published)
 	}
 	if !refreshRepo.revokeCalled || refreshRepo.revokedID != stored.ID {
 		t.Errorf("expected revoke of %q, got called=%v id=%q", stored.ID, refreshRepo.revokeCalled, refreshRepo.revokedID)
@@ -177,7 +182,7 @@ func TestLogout_Success(t *testing.T) {
 func TestLogout_Idempotent(t *testing.T) {
 	t.Run("empty token is a no-op", func(t *testing.T) {
 		refreshRepo := &fakeRefreshRepo{}
-		uc := NewLogoutUseCase(refreshRepo)
+		uc := NewLogoutUseCase(refreshRepo, fakeTx{}, &fakePublisher{})
 		if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: ""}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -188,7 +193,7 @@ func TestLogout_Idempotent(t *testing.T) {
 
 	t.Run("unknown token is a no-op", func(t *testing.T) {
 		refreshRepo := &fakeRefreshRepo{} // sin preload → FindByHash falla
-		uc := NewLogoutUseCase(refreshRepo)
+		uc := NewLogoutUseCase(refreshRepo, fakeTx{}, &fakePublisher{})
 		if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: "ghost"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -202,7 +207,7 @@ func TestLogout_Idempotent(t *testing.T) {
 		user := newActiveUser(t, tenant.ID(), "user@example.com")
 		_, byHash := storedToken("tok-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), true)
 		refreshRepo := &fakeRefreshRepo{byHash: byHash}
-		uc := NewLogoutUseCase(refreshRepo)
+		uc := NewLogoutUseCase(refreshRepo, fakeTx{}, &fakePublisher{})
 		if err := uc.Execute(context.Background(), LogoutCmd{RawRefreshToken: "raw-refresh"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

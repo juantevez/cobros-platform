@@ -12,7 +12,7 @@ import (
 
 // AuditHandler expone el log de auditoría via HTTP.
 type AuditHandler struct {
-	listLogs    *application.ListLogsUseCase
+	listLogsUC  *application.ListLogsUseCase
 	verifyChain *application.VerifyChainUseCase
 }
 
@@ -20,23 +20,38 @@ func NewAuditHandler(
 	listLogs *application.ListLogsUseCase,
 	verifyChain *application.VerifyChainUseCase,
 ) *AuditHandler {
-	return &AuditHandler{listLogs: listLogs, verifyChain: verifyChain}
+	return &AuditHandler{listLogsUC: listLogs, verifyChain: verifyChain}
 }
 
-// ListLogs retorna las últimas entradas del log.
+// ListLogs retorna la bitácora del comercio autenticado. El tenant sale
+// siempre del JWT: un tenant_id distinto en la query es un intento de leer
+// otro comercio (403); la vista cross-tenant es ListPlatformLogs.
 //
 //	GET /api/v1/audit/logs?limit=50
-//	GET /api/v1/audit/logs?tenant_id=<uuid>&limit=50
 func (h *AuditHandler) ListLogs(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-
-	// Si no se especifica tenant_id, usa el del JWT (aislamiento por defecto).
-	tenantID := c.Query("tenant_id")
-	if tenantID == "" {
-		tenantID, _ = postgres.TenantIDFromContext(c.Request.Context())
+	tenantID, ok := postgres.TenantIDFromContext(c.Request.Context())
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "tenant required"})
+		return
 	}
+	if q := c.Query("tenant_id"); q != "" && q != tenantID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot read another tenant's audit log"})
+		return
+	}
+	h.listLogs(c, tenantID)
+}
 
-	views, err := h.listLogs.Execute(c.Request.Context(), application.ListLogsQuery{
+// ListPlatformLogs es la vista de plataforma (platform_support): bitácora de
+// un comercio con ?tenant_id=, o de toda la plataforma sin él.
+//
+//	GET /api/v1/audit/platform/logs?tenant_id=<uuid>&limit=50
+func (h *AuditHandler) ListPlatformLogs(c *gin.Context) {
+	h.listLogs(c, c.Query("tenant_id"))
+}
+
+func (h *AuditHandler) listLogs(c *gin.Context, tenantID string) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	views, err := h.listLogsUC.Execute(c.Request.Context(), application.ListLogsQuery{
 		TenantID: tenantID,
 		Limit:    limit,
 	})
@@ -75,13 +90,26 @@ func (h *AuditHandler) VerifyChain(c *gin.Context) {
 	c.JSON(status, result)
 }
 
+// RouteGuards autoriza cada operación de Audit. Se inyectan desde el
+// composition root (cmd/api) para no acoplar este contexto con Auth; en
+// producción son RequireRole(...).
+type RouteGuards struct {
+	ReadTenantLogs gin.HandlerFunc // GET /audit/logs (admin, platform_support)
+	PlatformAudit  gin.HandlerFunc // GET /audit/platform/logs, /audit/verify (platform_support)
+}
+
 // RegisterRoutes registra las rutas del Audit en un grupo Gin existente.
-func RegisterRoutes(rg *gin.RouterGroup, handler *AuditHandler) {
+// El grupo debe autenticar (JWT); los guards autorizan por rol. Todos son
+// obligatorios: gin saltea los handlers nil, así que un guard olvidado dejaría
+// la ruta abierta a cualquier usuario autenticado.
+func RegisterRoutes(rg *gin.RouterGroup, handler *AuditHandler, guards RouteGuards) {
+	if guards.ReadTenantLogs == nil || guards.PlatformAudit == nil {
+		panic("audit: RegisterRoutes requires all RouteGuards (ReadTenantLogs, PlatformAudit)")
+	}
 	audit := rg.Group("/audit")
 	{
-		// Listar logs del tenant autenticado (admin) o de uno específico (platform_support).
-		audit.GET("/logs", handler.ListLogs)
-		// Verificar integridad del chain (solo platform_support).
-		audit.GET("/verify", handler.VerifyChain)
+		audit.GET("/logs", guards.ReadTenantLogs, handler.ListLogs)
+		audit.GET("/platform/logs", guards.PlatformAudit, handler.ListPlatformLogs)
+		audit.GET("/verify", guards.PlatformAudit, handler.VerifyChain)
 	}
 }

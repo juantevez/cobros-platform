@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,11 @@ type fakeRepo struct {
 
 func (r *fakeRepo) Save(ctx context.Context, e *domain.AuditLogEntry) error     { return nil }
 func (r *fakeRepo) FindLast(ctx context.Context) (*domain.AuditLogEntry, error) { return nil, nil }
+func (r *fakeRepo) LockChain(ctx context.Context) error                         { return nil }
+func (r *fakeRepo) FindBefore(ctx context.Context, id int64) (*domain.AuditLogEntry, error) {
+	return nil, nil
+}
+func (r *fakeRepo) ExistsByEventID(ctx context.Context, id string) (bool, error) { return false, nil }
 func (r *fakeRepo) ListRecent(ctx context.Context, limit int) ([]*domain.AuditLogEntry, error) {
 	return r.recent, r.recentErr
 }
@@ -48,8 +54,7 @@ func (r *fakeRepo) ListFromID(ctx context.Context, fromID int64, limit int) ([]*
 func sha(p string) []byte { s := sha256.Sum256([]byte(p)); return s[:] }
 
 func entry(tenantID string, prevHash []byte) *domain.AuditLogEntry {
-	e, _ := domain.NewAuditLogEntry(tenantID, "actor", domain.ActionLogin, domain.ResourceUser, "u1",
-		nil, "", prevHash, time.Now(), sha)
+	e, _ := domain.NewAuditLogEntry(domain.EntryInput{TenantID: tenantID, Actor: "actor", Action: domain.ActionLogin, ResourceType: domain.ResourceUser, ResourceID: "u1"}, prevHash, time.Now(), sha)
 	return e
 }
 
@@ -57,8 +62,19 @@ func newHandler(repo *fakeRepo) *AuditHandler {
 	hasher := hasherFunc(sha)
 	return NewAuditHandler(
 		application.NewListLogsUseCase(repo),
-		application.NewVerifyChainUseCase(repo, hasher),
+		application.NewVerifyChainUseCase(repo, noCheckpoints{}, hasher),
 	)
+}
+
+// noCheckpoints: sin checkpoints registrados (todos respetados).
+type noCheckpoints struct{}
+
+func (noCheckpoints) Save(context.Context, domain.ChainCheckpoint) error { return nil }
+func (noCheckpoints) Latest(context.Context) (*domain.ChainCheckpoint, error) {
+	return nil, nil
+}
+func (noCheckpoints) FirstMismatch(context.Context) (*domain.CheckpointMismatch, error) {
+	return nil, nil
 }
 
 type hasherFunc func(string) []byte
@@ -80,10 +96,14 @@ func doRequest(h gin.HandlerFunc, target string, ctxSetup func(context.Context) 
 
 // ── ListLogs ──────────────────────────────────────────────────────────────────
 
+func withTenant(id string) func(context.Context) context.Context {
+	return func(ctx context.Context) context.Context { return postgres.WithTenantID(ctx, id) }
+}
+
 func TestListLogs(t *testing.T) {
-	t.Run("returns entries and count", func(t *testing.T) {
-		repo := &fakeRepo{recent: []*domain.AuditLogEntry{entry("t1", nil), entry("t2", nil)}}
-		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs", nil)
+	t.Run("returns the authenticated tenant's entries", func(t *testing.T) {
+		repo := &fakeRepo{byTenant: []*domain.AuditLogEntry{entry("ctx-tenant", nil), entry("ctx-tenant", nil)}}
+		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs", withTenant("ctx-tenant"))
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rec.Code)
@@ -98,39 +118,63 @@ func TestListLogs(t *testing.T) {
 		if body.Count != 2 || len(body.Entries) != 2 {
 			t.Errorf("count = %d, entries = %d", body.Count, len(body.Entries))
 		}
-	})
-
-	t.Run("explicit tenant_id query routes to ListByTenant", func(t *testing.T) {
-		repo := &fakeRepo{byTenant: []*domain.AuditLogEntry{entry("tenant-q", nil)}}
-		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs?tenant_id=tenant-q", nil)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d", rec.Code)
-		}
-		if repo.gotTenantID != "tenant-q" {
-			t.Errorf("tenantID = %q, want tenant-q", repo.gotTenantID)
-		}
-	})
-
-	t.Run("falls back to tenant from context", func(t *testing.T) {
-		repo := &fakeRepo{byTenant: []*domain.AuditLogEntry{entry("ctx-tenant", nil)}}
-		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs", func(ctx context.Context) context.Context {
-			return postgres.WithTenantID(ctx, "ctx-tenant")
-		})
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d", rec.Code)
-		}
 		if repo.gotTenantID != "ctx-tenant" {
 			t.Errorf("tenantID = %q, want ctx-tenant", repo.gotTenantID)
 		}
 	})
 
+	t.Run("tenant_id equal to own tenant is allowed", func(t *testing.T) {
+		repo := &fakeRepo{}
+		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs?tenant_id=ctx-tenant", withTenant("ctx-tenant"))
+		if rec.Code != http.StatusOK || repo.gotTenantID != "ctx-tenant" {
+			t.Fatalf("status = %d, tenant = %q", rec.Code, repo.gotTenantID)
+		}
+	})
+
+	t.Run("another tenant's log is forbidden", func(t *testing.T) {
+		repo := &fakeRepo{}
+		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs?tenant_id=other-tenant", withTenant("ctx-tenant"))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		if repo.gotTenantID != "" {
+			t.Error("repo must not be queried")
+		}
+	})
+
+	t.Run("without tenant in context it never falls back to the whole platform", func(t *testing.T) {
+		repo := &fakeRepo{recent: []*domain.AuditLogEntry{entry("t1", nil)}}
+		for _, target := range []string{"/audit/logs", "/audit/logs?tenant_id=t1"} {
+			rec := doRequest(newHandler(repo).ListLogs, target, nil)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s: status = %d, want 403", target, rec.Code)
+			}
+		}
+	})
+
 	t.Run("repo error yields 500", func(t *testing.T) {
-		repo := &fakeRepo{recentErr: errors.New("boom")}
-		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs", nil)
+		repo := &fakeRepo{tenantErr: errors.New("boom")}
+		rec := doRequest(newHandler(repo).ListLogs, "/audit/logs", withTenant("t"))
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+	})
+}
+
+func TestListPlatformLogs(t *testing.T) {
+	t.Run("with tenant_id reads that merchant", func(t *testing.T) {
+		repo := &fakeRepo{}
+		rec := doRequest(newHandler(repo).ListPlatformLogs, "/audit/platform/logs?tenant_id=tenant-q", withTenant("platform"))
+		if rec.Code != http.StatusOK || repo.gotTenantID != "tenant-q" {
+			t.Fatalf("status = %d, tenant = %q", rec.Code, repo.gotTenantID)
+		}
+	})
+
+	t.Run("without tenant_id reads the whole platform", func(t *testing.T) {
+		repo := &fakeRepo{recent: []*domain.AuditLogEntry{entry("t1", nil), entry("t2", nil)}}
+		rec := doRequest(newHandler(repo).ListPlatformLogs, "/audit/platform/logs", withTenant("platform"))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"count":2`) {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
 		}
 	})
 }
@@ -178,15 +222,52 @@ func TestVerifyChain(t *testing.T) {
 
 // ── RegisterRoutes ────────────────────────────────────────────────────────────
 
-func TestRegisterRoutes(t *testing.T) {
-	repo := &fakeRepo{recent: []*domain.AuditLogEntry{entry("t", nil)}}
-	r := gin.New()
-	RegisterRoutes(r.Group("/api/v1"), newHandler(repo))
+func allow(c *gin.Context) { c.Next() }
+func deny(c *gin.Context)  { c.AbortWithStatus(http.StatusForbidden) }
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit/logs", nil)
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/v1/audit/logs status = %d, want 200", rec.Code)
+func TestRegisterRoutes(t *testing.T) {
+	serve := func(guards RouteGuards, target string) int {
+		repo := &fakeRepo{recent: []*domain.AuditLogEntry{entry("t", nil)}}
+		r := gin.New()
+		r.Use(func(c *gin.Context) {
+			c.Request = c.Request.WithContext(postgres.WithTenantID(c.Request.Context(), "t"))
+		})
+		RegisterRoutes(r.Group("/api/v1"), newHandler(repo), guards)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		return rec.Code
 	}
+	routes := []string{"/api/v1/audit/logs", "/api/v1/audit/platform/logs", "/api/v1/audit/verify"}
+
+	t.Run("routes are wired", func(t *testing.T) {
+		for _, target := range routes {
+			if code := serve(RouteGuards{ReadTenantLogs: allow, PlatformAudit: allow}, target); code != http.StatusOK {
+				t.Errorf("%s status = %d, want 200", target, code)
+			}
+		}
+	})
+
+	t.Run("each route enforces its guard", func(t *testing.T) {
+		tenantOnly := RouteGuards{ReadTenantLogs: allow, PlatformAudit: deny}
+		if code := serve(tenantOnly, "/api/v1/audit/logs"); code != http.StatusOK {
+			t.Errorf("tenant logs: status = %d, want 200", code)
+		}
+		for _, target := range routes[1:] {
+			if code := serve(tenantOnly, target); code != http.StatusForbidden {
+				t.Errorf("%s without platform role: status = %d, want 403", target, code)
+			}
+		}
+		if code := serve(RouteGuards{ReadTenantLogs: deny, PlatformAudit: allow}, "/api/v1/audit/logs"); code != http.StatusForbidden {
+			t.Errorf("tenant logs without role: status = %d, want 403", code)
+		}
+	})
+
+	t.Run("missing guard panics", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic for missing guard")
+			}
+		}()
+		RegisterRoutes(gin.New().Group("/api/v1"), newHandler(&fakeRepo{}), RouteGuards{ReadTenantLogs: allow})
+	})
 }

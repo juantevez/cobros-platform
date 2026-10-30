@@ -56,6 +56,8 @@ func (uc *ListLogsUseCase) Execute(ctx context.Context, q ListLogsQuery) ([]LogE
 			ResourceID:    e.ResourceID(),
 			Metadata:      e.Metadata(),
 			CorrelationID: e.CorrelationID(),
+			EventID:       e.EventID(),
+			OccurredAt:    e.OccurredAt().Format(time.RFC3339),
 			PrevHash:      e.PrevHashHex(),
 			Hash:          e.HashHex(),
 			CreatedAt:     e.CreatedAt().Format(time.RFC3339),

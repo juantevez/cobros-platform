@@ -100,6 +100,24 @@ type UserSuspendedEvent struct {
 
 func (e UserSuspendedEvent) EventType() string { return "auth.user.suspended.v1" }
 
+// UserLoggedInEvent se emite en cada login exitoso (lo consume Audit).
+type UserLoggedInEvent struct {
+	baseEvent
+	TenantID string `json:"tenant_id"`
+	UserID   string `json:"user_id"`
+}
+
+func (e UserLoggedInEvent) EventType() string { return "auth.user.login.v1" }
+
+// UserLoggedOutEvent se emite al revocar la sesión con logout (lo consume Audit).
+type UserLoggedOutEvent struct {
+	baseEvent
+	TenantID string `json:"tenant_id"`
+	UserID   string `json:"user_id"`
+}
+
+func (e UserLoggedOutEvent) EventType() string { return "auth.user.logout.v1" }
+
 // ── ApiKey events ─────────────────────────────────────────────────────────────
 
 // ApiKeyIssuedEvent se emite cuando se genera una nueva API key.
@@ -145,4 +163,14 @@ func NewRoleAssignedEvent(tenantID, userID, role, assignedBy string) RoleAssigne
 		Role:       role,
 		AssignedBy: assignedBy,
 	}
+}
+
+// NewUserLoggedInEvent construye el evento de login exitoso.
+func NewUserLoggedInEvent(tenantID TenantID, userID UserID) UserLoggedInEvent {
+	return UserLoggedInEvent{baseEvent: newBase(tenantID.String()), TenantID: tenantID.String(), UserID: userID.String()}
+}
+
+// NewUserLoggedOutEvent construye el evento de logout.
+func NewUserLoggedOutEvent(tenantID TenantID, userID UserID) UserLoggedOutEvent {
+	return UserLoggedOutEvent{baseEvent: newBase(tenantID.String()), TenantID: tenantID.String(), UserID: userID.String()}
 }
