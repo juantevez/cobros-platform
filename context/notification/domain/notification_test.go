@@ -66,7 +66,7 @@ func TestReconstituteNotification(t *testing.T) {
 
 func TestNotification_MarkSent(t *testing.T) {
 	before := time.Now().UTC()
-	n := NewNotification(NewNotificationID(), TenantID("t"), "kyc.approved", ChannelEmail, "u@x.com", "Aprobado")
+	n := NewNotification(NewNotificationID(), TenantID("t"), "onboarding.application.approved", ChannelEmail, "u@x.com", "Aprobado")
 	n.MarkSent()
 	after := time.Now().UTC()
 
@@ -85,7 +85,7 @@ func TestNotification_MarkSent(t *testing.T) {
 }
 
 func TestNotification_MarkFailed(t *testing.T) {
-	n := NewNotification(NewNotificationID(), TenantID("t"), "kyc.rejected", ChannelEmail, "u@x.com", "Rechazado")
+	n := NewNotification(NewNotificationID(), TenantID("t"), "onboarding.application.rejected", ChannelEmail, "u@x.com", "Rechazado")
 	n.MarkFailed("smtp timeout")
 
 	if n.Status() != StatusFailed {

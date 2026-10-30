@@ -1,6 +1,7 @@
 package application
 
 import (
+	"strings"
 	"context"
 	"testing"
 
@@ -234,4 +235,35 @@ func TestListNotificationsUseCase_Execute(t *testing.T) {
 			t.Fatal("expected error from repo")
 		}
 	})
+}
+
+func TestSendNotification_KYCEventsAreDelivered(t *testing.T) {
+	// Regresión: los templates de KYC se registraban como kyc.approved /
+	// kyc.rejected, pero el evento llega como onboarding.application.*.v1 y
+	// se normaliza a onboarding.application.*: el lookup fallaba y el email
+	// se descartaba en silencio.
+	for _, tc := range []struct {
+		subject, wantInBody string
+		data                map[string]string
+	}{
+		{"onboarding.application.approved.v1", "aprobada", map[string]string{}},
+		{"onboarding.application.rejected.v1", "docs_invalid", map[string]string{"rejection_reason": "docs_invalid"}},
+	} {
+		t.Run(tc.subject, func(t *testing.T) {
+			nr, es := &fakeNotifRepo{}, &fakeEmailSender{}
+			uc := newSendUC(nr, newPrefRepo(), es, fakeContactReader{email: "admin@x.com"})
+			err := uc.Execute(context.Background(), SendNotificationCmd{
+				TenantID: validTenant(), EventType: tc.subject, TemplateData: tc.data, NatsMsgID: "msg-1",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(es.sent) != 1 || !strings.Contains(es.sent[0].body, tc.wantInBody) {
+				t.Fatalf("expected the KYC email to be sent, got %+v", es.sent)
+			}
+			if len(nr.saved) != 1 || nr.saved[0].EventType() != domain.NormalizeEventType(tc.subject) {
+				t.Errorf("saved = %+v", nr.saved)
+			}
+		})
+	}
 }
