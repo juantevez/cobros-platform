@@ -21,10 +21,11 @@ var (
 // UpdatePreferenceUseCase actualiza o crea una preferencia de notificación.
 type UpdatePreferenceUseCase struct {
 	prefRepo PreferenceRepository
+	clock    Clock
 }
 
-func NewUpdatePreferenceUseCase(repo PreferenceRepository) *UpdatePreferenceUseCase {
-	return &UpdatePreferenceUseCase{prefRepo: repo}
+func NewUpdatePreferenceUseCase(repo PreferenceRepository, clock Clock) *UpdatePreferenceUseCase {
+	return &UpdatePreferenceUseCase{prefRepo: repo, clock: clock}
 }
 
 // Execute valida, canonicaliza y hace merge de la preferencia antes del upsert.
@@ -76,6 +77,7 @@ func (uc *UpdatePreferenceUseCase) Execute(ctx context.Context, cmd UpdatePrefer
 		domain.ChannelEmail,
 		cmd.Enabled,
 		newEmail,
+		uc.clock.Now(),
 	)
 
 	// RLS (bug 9): el adapter fija app.current_tenant en la sesión antes del upsert.

@@ -27,7 +27,7 @@ type eventPayload struct {
 
 // EventConsumer traduce eventos NATS en comandos de notificación.
 type EventConsumer struct {
-	consumer eventbus.Consumer
+	consumer  eventbus.Consumer
 	sendNotif *application.SendNotificationUseCase
 	logger    *slog.Logger
 }

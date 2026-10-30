@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/notification/domain"
 )
@@ -19,7 +20,7 @@ func TestUpdatePreferenceUseCase_Execute(t *testing.T) {
 
 	t.Run("upserts preference", func(t *testing.T) {
 		pr := newPrefRepo()
-		uc := NewUpdatePreferenceUseCase(pr)
+		uc := NewUpdatePreferenceUseCase(pr, fixedClock{})
 
 		if err := uc.Execute(context.Background(), baseCmd()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -37,7 +38,7 @@ func TestUpdatePreferenceUseCase_Execute(t *testing.T) {
 	})
 
 	t.Run("rejects invalid tenant id", func(t *testing.T) {
-		uc := NewUpdatePreferenceUseCase(newPrefRepo())
+		uc := NewUpdatePreferenceUseCase(newPrefRepo(), fixedClock{})
 		cmd := baseCmd()
 		cmd.TenantID = "bad"
 		if err := uc.Execute(context.Background(), cmd); err == nil {
@@ -47,7 +48,7 @@ func TestUpdatePreferenceUseCase_Execute(t *testing.T) {
 
 	t.Run("rejects event type without template", func(t *testing.T) {
 		pr := newPrefRepo()
-		uc := NewUpdatePreferenceUseCase(pr)
+		uc := NewUpdatePreferenceUseCase(pr, fixedClock{})
 		cmd := baseCmd()
 		cmd.EventType = "unknown.event"
 		if err := uc.Execute(context.Background(), cmd); err == nil {
@@ -61,7 +62,7 @@ func TestUpdatePreferenceUseCase_Execute(t *testing.T) {
 	t.Run("propagates upsert error", func(t *testing.T) {
 		pr := newPrefRepo()
 		pr.upsertErr = errBoom
-		uc := NewUpdatePreferenceUseCase(pr)
+		uc := NewUpdatePreferenceUseCase(pr, fixedClock{})
 		if err := uc.Execute(context.Background(), baseCmd()); err == nil {
 			t.Fatal("expected error from repo")
 		}
@@ -94,7 +95,7 @@ func TestGetPreferencesUseCase_Execute(t *testing.T) {
 		pr := newPrefRepo()
 		pr.listed = []*domain.NotificationPreference{
 			domain.NewNotificationPreference(domain.TenantID("t"), "payment.captured",
-				domain.ChannelEmail, false, "custom@x.com"),
+				domain.ChannelEmail, false, "custom@x.com", time.Now()),
 		}
 		uc := NewGetPreferencesUseCase(pr)
 

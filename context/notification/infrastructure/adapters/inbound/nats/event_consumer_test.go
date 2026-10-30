@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -74,7 +75,7 @@ func newConsumer(es *fakeEmailSender) (*EventConsumer, *fakeConsumer, *fakeNotif
 	fc := &fakeConsumer{}
 	nr := &fakeNotifRepo{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	uc := application.NewSendNotificationUseCase(nr, fakePrefRepo{}, es, fakeContactReader{email: "admin@x.com"}, logger)
+	uc := application.NewSendNotificationUseCase(nr, fakePrefRepo{}, es, fakeContactReader{email: "admin@x.com"}, realClock{}, logger)
 	return NewEventConsumer(fc, uc, logger), fc, nr
 }
 
@@ -238,10 +239,10 @@ func TestHandle(t *testing.T) {
 
 func TestStartConsumers(t *testing.T) {
 	cases := []struct {
-		name              string
-		start             func(*EventConsumer, context.Context) error
-		stream, filter    string
-		consumerName      string
+		name           string
+		start          func(*EventConsumer, context.Context) error
+		stream, filter string
+		consumerName   string
 	}{
 		{"payment", (*EventConsumer).StartPaymentConsumer, "PAYMENT", "payment.>", "notification-payment-consumer"},
 		{"payout", (*EventConsumer).StartPayoutConsumer, "PAYOUT", "payout.>", "notification-payout-consumer"},
@@ -295,3 +296,7 @@ func TestTemplateCatalogConsistency(t *testing.T) {
 		}
 	})
 }
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }

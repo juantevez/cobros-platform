@@ -13,9 +13,9 @@ import (
 
 // NotificationHandler expone el historial y las preferencias de notificaciones.
 type NotificationHandler struct {
-	listNotifs    *application.ListNotificationsUseCase
-	getPrefs      *application.GetPreferencesUseCase
-	updatePref    *application.UpdatePreferenceUseCase
+	listNotifs *application.ListNotificationsUseCase
+	getPrefs   *application.GetPreferencesUseCase
+	updatePref *application.UpdatePreferenceUseCase
 }
 
 func NewNotificationHandler(

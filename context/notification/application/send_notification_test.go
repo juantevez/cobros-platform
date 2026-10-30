@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,7 +14,7 @@ import (
 func validTenant() string { return uuid.NewString() }
 
 func newSendUC(nr *fakeNotifRepo, pr *fakePrefRepo, es *fakeEmailSender, cr fakeContactReader) *SendNotificationUseCase {
-	return NewSendNotificationUseCase(nr, pr, es, cr, discardLogger())
+	return NewSendNotificationUseCase(nr, pr, es, cr, fixedClock{}, discardLogger())
 }
 
 func TestSendNotificationUseCase_Execute(t *testing.T) {
@@ -58,7 +59,7 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 		nr := &fakeNotifRepo{}
 		pr := newPrefRepo()
 		pr.byEvent["payment.captured"] = domain.NewNotificationPreference(
-			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "override@x.com")
+			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "override@x.com", time.Now())
 		es := &fakeEmailSender{}
 		uc := newSendUC(nr, pr, es, fakeContactReader{email: "admin@x.com"})
 
@@ -74,7 +75,7 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 		nr := &fakeNotifRepo{}
 		pr := newPrefRepo()
 		pr.byEvent["payment.captured"] = domain.NewNotificationPreference(
-			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "")
+			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "", time.Now())
 		es := &fakeEmailSender{}
 		uc := newSendUC(nr, pr, es, fakeContactReader{email: "admin@x.com"})
 
@@ -90,7 +91,7 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 		nr := &fakeNotifRepo{}
 		pr := newPrefRepo()
 		pr.byEvent["payment.captured"] = domain.NewNotificationPreference(
-			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, false, "x@x.com")
+			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, false, "x@x.com", time.Now())
 		es := &fakeEmailSender{}
 		uc := newSendUC(nr, pr, es, fakeContactReader{email: "admin@x.com"})
 
@@ -186,8 +187,8 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 func TestListNotificationsUseCase_Execute(t *testing.T) {
 	seed := func() []*domain.Notification {
 		n := domain.NewNotification(domain.NewNotificationID(), domain.TenantID("t"),
-			"payment.captured", domain.ChannelEmail, "u@x.com", "Pago")
-		n.MarkSent()
+			"payment.captured", domain.ChannelEmail, "u@x.com", "Pago", time.Now())
+		n.MarkSent(time.Now())
 		return []*domain.Notification{n}
 	}
 
@@ -275,5 +276,34 @@ func TestSendNotification_KYCEventsAreDelivered(t *testing.T) {
 				t.Errorf("saved = %+v", nr.saved)
 			}
 		})
+	}
+}
+
+func TestTimestampsComeFromTheInjectedClock(t *testing.T) {
+	nr, es := &fakeNotifRepo{}, &fakeEmailSender{}
+	uc := newSendUC(nr, newPrefRepo(), es, fakeContactReader{email: "admin@x.com"})
+	if err := uc.Execute(context.Background(), SendNotificationCmd{
+		TenantID: validTenant(), EventType: "payment.captured.v1", TemplateData: map[string]string{},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	n := nr.saved[0]
+	if !n.CreatedAt().Equal(testNow) || n.SentAt() == nil || !n.SentAt().Equal(testNow) {
+		t.Errorf("created_at=%v sent_at=%v, want %v", n.CreatedAt(), n.SentAt(), testNow)
+	}
+
+	pr := newPrefRepo()
+	if err := NewUpdatePreferenceUseCase(pr, fixedClock{}).Execute(context.Background(), UpdatePreferenceCmd{
+		TenantID: validTenant(), EventType: "payment.captured", Enabled: false,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range pr.upserted {
+		if !p.UpdatedAt().Equal(testNow) {
+			t.Errorf("updated_at = %v, want %v", p.UpdatedAt(), testNow)
+		}
+	}
+	if len(pr.upserted) != 1 {
+		t.Fatalf("expected 1 upsert, got %d", len(pr.upserted))
 	}
 }

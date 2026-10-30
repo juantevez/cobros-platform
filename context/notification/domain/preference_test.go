@@ -8,7 +8,7 @@ import (
 func TestNewNotificationPreference(t *testing.T) {
 	before := time.Now().UTC()
 	tid := TenantID("tenant-1")
-	p := NewNotificationPreference(tid, "payment.captured", ChannelEmail, true, "billing@example.com")
+	p := NewNotificationPreference(tid, "payment.captured", ChannelEmail, true, "billing@example.com", time.Now())
 	after := time.Now().UTC()
 
 	if p.TenantID() != tid || p.EventType() != "payment.captured" {
@@ -29,7 +29,7 @@ func TestNewNotificationPreference(t *testing.T) {
 }
 
 func TestNewNotificationPreference_Disabled(t *testing.T) {
-	p := NewNotificationPreference(TenantID("t"), "payment.failed", ChannelEmail, false, "")
+	p := NewNotificationPreference(TenantID("t"), "payment.failed", ChannelEmail, false, "", time.Now())
 	if p.Enabled() {
 		t.Error("preference should be disabled")
 	}

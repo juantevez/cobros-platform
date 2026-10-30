@@ -49,7 +49,7 @@ var (
 
 func TestNotificationRepository_Save(t *testing.T) {
 	n := domain.NewNotification(domain.NewNotificationID(), domain.TenantID(uuid.NewString()),
-		"payment.captured", domain.ChannelEmail, "u@x.com", "Pago")
+		"payment.captured", domain.ChannelEmail, "u@x.com", "Pago", time.Now())
 
 	t.Run("inserts notification", func(t *testing.T) {
 		mock := newMock(t)
@@ -157,7 +157,7 @@ func TestNotificationRepository_ListByTenant_rejectsCorruptRows(t *testing.T) {
 
 func TestPreferenceRepository_Upsert(t *testing.T) {
 	p := domain.NewNotificationPreference(domain.TenantID(uuid.NewString()),
-		"payment.captured", domain.ChannelEmail, true, "ops@x.com")
+		"payment.captured", domain.ChannelEmail, true, "ops@x.com", time.Now())
 
 	t.Run("upserts preference", func(t *testing.T) {
 		mock := newMock(t)

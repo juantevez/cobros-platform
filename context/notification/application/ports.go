@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/notification/domain"
 )
@@ -36,4 +37,9 @@ type EmailSender interface {
 // Consulta directamente la tabla users + memberships (misma BD).
 type UserContactReader interface {
 	GetTenantAdminEmail(ctx context.Context, tenantID string) (string, error)
+}
+
+// Clock abstrae el tiempo (tests deterministas).
+type Clock interface {
+	Now() time.Time
 }

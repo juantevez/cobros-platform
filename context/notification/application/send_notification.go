@@ -25,11 +25,12 @@ import (
 // El envío no es crítico: si falla, se loguea y la plataforma continúa.
 // No hay reintentos automáticos en Fase 3 (diferente a Webhooks).
 type SendNotificationUseCase struct {
-	notifRepo    NotificationRepository
-	prefRepo     PreferenceRepository
-	emailSender  EmailSender
+	notifRepo     NotificationRepository
+	prefRepo      PreferenceRepository
+	emailSender   EmailSender
 	contactReader UserContactReader
-	logger       *slog.Logger
+	clock         Clock
+	logger        *slog.Logger
 }
 
 func NewSendNotificationUseCase(
@@ -37,6 +38,7 @@ func NewSendNotificationUseCase(
 	prefRepo PreferenceRepository,
 	emailSender EmailSender,
 	contactReader UserContactReader,
+	clock Clock,
 	logger *slog.Logger,
 ) *SendNotificationUseCase {
 	return &SendNotificationUseCase{
@@ -44,6 +46,7 @@ func NewSendNotificationUseCase(
 		prefRepo:      prefRepo,
 		emailSender:   emailSender,
 		contactReader: contactReader,
+		clock:         clock,
 		logger:        logger,
 	}
 }
@@ -111,6 +114,7 @@ func (uc *SendNotificationUseCase) Execute(ctx context.Context, cmd SendNotifica
 		domain.ChannelEmail,
 		recipientEmail,
 		subject,
+		uc.clock.Now(),
 	).WithNatsMsgID(cmd.NatsMsgID)
 
 	// 7. Enviar email.
@@ -124,7 +128,7 @@ func (uc *SendNotificationUseCase) Execute(ctx context.Context, cmd SendNotifica
 			"error", sendErr,
 		)
 	} else {
-		notif.MarkSent()
+		notif.MarkSent(uc.clock.Now())
 		uc.logger.Info("notification: email sent",
 			"tenant_id", cmd.TenantID,
 			"event_type", eventType,
