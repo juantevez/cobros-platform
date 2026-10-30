@@ -138,7 +138,7 @@ La documentación técnico-funcional de cada contexto (modelo, casos de uso, API
 |---|---|---|
 | Auth & Multi-Tenant | Tenants, usuarios, roles, JWT y API keys | [AUTH.md](docs/technical/AUTH.md) |
 | Ledger | Libro mayor de doble partida, fuente de verdad del dinero | [LEDGER.md](docs/technical/LEDGER.md) |
-| Audit | Bitácora inmutable con verificación de cadena | *(pendiente)* |
+| Audit | Bitácora inmutable con verificación de cadena | [AUDIT.md](docs/technical/AUDIT.md) |
 | Onboarding | Solicitudes KYC/KYB y revisión por operador | [ONBOARDING.md](docs/technical/ONBOARDING.md) |
 | Payment Processing | Cobros contra PSP con evaluación de riesgo y comisión | [PAYMENT.md](docs/technical/PAYMENT.md) |
 | Payouts | Desembolsos del saldo del comercio a su banco | [PAYOUT.md](docs/technical/PAYOUT.md) |
