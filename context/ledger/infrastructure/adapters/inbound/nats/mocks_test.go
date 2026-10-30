@@ -156,3 +156,12 @@ func newCreateAccount(accountRepo *fakeAccountRepo) (*application.CreateAccountU
 	uc := application.NewCreateAccountUseCase(accountRepo, fakeTx{}, pub)
 	return uc, pub
 }
+
+// postingAmounts indexa el monto de cada posting del asiento por cuenta.
+func postingAmounts(e *domain.JournalEntry) map[domain.AccountID]int64 {
+	out := map[domain.AccountID]int64{}
+	for _, p := range e.Postings() {
+		out[p.AccountID()] = p.Money().Amount()
+	}
+	return out
+}

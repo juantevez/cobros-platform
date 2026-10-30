@@ -64,6 +64,8 @@ func (c *OnboardingConsumer) handle(ctx context.Context, msg *eventbus.Message) 
 		{"dispute_hold", "Fondos retenidos por disputas"},
 		{"payout_transit", "Fondos en tránsito al banco del comercio"},
 		{"payout_sent", "Fondos confirmados enviados al banco"},
+		{"in_transit", "Fondos cobrados que el PSP aún no liquidó"},
+		{"platform_fees", "Comisiones de la plataforma"},
 	}
 
 	for _, acc := range accounts {

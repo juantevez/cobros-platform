@@ -2,6 +2,7 @@ package nats
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -112,4 +113,52 @@ func TestPayment_StartConfig(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	assertConfig(t, fc.gotCfg, "PAYMENT", "ledger-payment-consumer", "payment.captured.v1")
+}
+
+// Con comisión del PSP el asiento balancea sobre lo que el PSP liquida
+// (amount - psp_fee): antes acreditaba amount y no balanceaba.
+func TestPayment_PSPFeeBalancesOnSettledAmount(t *testing.T) {
+	tenantID := testTenantID(t)
+	accountRepo := newFakeAccountRepo()
+	inTransit := accountRepo.seed(t, tenantID, domain.AccountTypeInTransit, "ARS")
+	merchant := accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
+	fees := accountRepo.seed(t, tenantID, domain.AccountTypePlatformFees, "ARS")
+
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
+	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
+
+	// amount 10000, platform_fee 300, psp_fee 200 → PSP liquida 9800 = 9500 + 300.
+	if err := consumer.handle(context.Background(), paymentMsg(tenantID.String(), validUUID(), 10000, 300, 200)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entryRepo.saved) != 1 {
+		t.Fatalf("expected 1 entry posted, got %d", len(entryRepo.saved))
+	}
+	got := postingAmounts(entryRepo.saved[0])
+	want := map[domain.AccountID]int64{inTransit.ID(): 9800, merchant.ID(): 9500, fees.ID(): 300}
+	for id, amount := range want {
+		if got[id] != amount {
+			t.Errorf("account %s: amount = %d, want %d", id, got[id], amount)
+		}
+	}
+}
+
+// Sin la cuenta platform_fees el asiento no balancea: antes se omitía la línea
+// sin aviso y el asiento fallaba más adelante.
+func TestPayment_MissingPlatformFeesAccountFails(t *testing.T) {
+	tenantID := testTenantID(t)
+	accountRepo := newFakeAccountRepo()
+	accountRepo.seed(t, tenantID, domain.AccountTypeInTransit, "ARS")
+	accountRepo.seed(t, tenantID, domain.AccountTypeMerchantBalance, "ARS")
+
+	postEntry, entryRepo, _ := newPostEntry(accountRepo)
+	consumer := NewPaymentConsumer(&fakeConsumer{}, postEntry, accountRepo, discardLogger())
+
+	err := consumer.handle(context.Background(), paymentMsg(tenantID.String(), validUUID(), 10000, 300, 0))
+	if !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("expected ErrAccountNotFound, got %v", err)
+	}
+	if len(entryRepo.saved) != 0 {
+		t.Errorf("expected no entry posted, got %d", len(entryRepo.saved))
+	}
 }

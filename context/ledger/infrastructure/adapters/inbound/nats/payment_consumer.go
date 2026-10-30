@@ -24,11 +24,12 @@ type paymentCapturedPayload struct {
 // PaymentConsumer crea asientos contables en el Ledger cuando se captura un pago.
 //
 // Asiento generado:
-//   in_transit       CREDIT  amount          (fondos del PSP)
+//   in_transit       CREDIT  amount - pspFee (lo que el PSP liquida)
 //   merchant_balance DEBIT   net_amount      (dinero del comercio: amount - platformFee - pspFee)
-//   platform_fees    DEBIT   platform_fee    (comisión de la plataforma)
+//   platform_fees    DEBIT   platform_fee    (comisión de la plataforma, si hay)
 //
-// Doble partida: sum(debits) = sum(credits) = amount.
+// Doble partida: sum(debits) = sum(credits) = amount - pspFee. La comisión del
+// PSP nunca entra al sistema: el PSP la retiene de la liquidación.
 type PaymentConsumer struct {
 	consumer    eventbus.Consumer
 	postEntry   *application.PostEntryUseCase
@@ -83,23 +84,23 @@ func (c *PaymentConsumer) handle(ctx context.Context, msg *eventbus.Message) err
 	}
 
 	lines := []application.PostingLine{
-		{AccountID: inTransit.ID().String(), Direction: "credit", Amount: p.Amount, Currency: p.Currency},
+		{AccountID: inTransit.ID().String(), Direction: "credit", Amount: p.Amount - p.PSPFee, Currency: p.Currency},
 		{AccountID: merchantBalance.ID().String(), Direction: "debit", Amount: netAmount, Currency: p.Currency},
 	}
 
-	// Si hay comisión de plataforma, agregar la línea de fees.
+	// Si hay comisión de plataforma, agregar la línea de fees. Sin la cuenta
+	// el asiento no balancea: es un error, no una línea que se pueda omitir.
 	if p.PlatformFee > 0 {
 		platformFees, err := c.accountRepo.FindByTenantAndType(ctx, tenantID, domain.AccountTypePlatformFees, p.Currency)
-		if err == nil {
-			lines = append(lines, application.PostingLine{
-				AccountID: platformFees.ID().String(),
-				Direction: "debit",
-				Amount:    p.PlatformFee,
-				Currency:  p.Currency,
-			})
+		if err != nil {
+			return fmt.Errorf("find platform_fees account: %w", err)
 		}
-		// Si no existe la cuenta de platform_fees (tenant sin ella configurada),
-		// el psp_fee ya está absorbido en el netAmount. El asiento balancea igual.
+		lines = append(lines, application.PostingLine{
+			AccountID: platformFees.ID().String(),
+			Direction: "debit",
+			Amount:    p.PlatformFee,
+			Currency:  p.Currency,
+		})
 	}
 
 	idempotencyKey := "payment_captured_" + p.PaymentID
