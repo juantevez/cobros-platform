@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -74,7 +75,7 @@ func newConsumer(es *fakeEmailSender) (*EventConsumer, *fakeConsumer, *fakeNotif
 	fc := &fakeConsumer{}
 	nr := &fakeNotifRepo{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	uc := application.NewSendNotificationUseCase(nr, fakePrefRepo{}, es, fakeContactReader{email: "admin@x.com"}, logger)
+	uc := application.NewSendNotificationUseCase(nr, fakePrefRepo{}, es, fakeContactReader{email: "admin@x.com"}, realClock{}, logger)
 	return NewEventConsumer(fc, uc, logger), fc, nr
 }
 
@@ -100,9 +101,6 @@ func TestBuildTemplateData(t *testing.T) {
 			"payment_id": "pay-1", "amount": "1500.50", "currency": "ARS", "payment_method": "card",
 		}},
 		{"payment.failed.v1", map[string]string{
-			"payment_id": "pay-1", "amount": "1500.50", "currency": "ARS", "failure_reason": "insufficient_funds",
-		}},
-		{"payment.risk_rejected.v1", map[string]string{
 			"payment_id": "pay-1", "amount": "1500.50", "currency": "ARS", "failure_reason": "insufficient_funds",
 		}},
 		{"payment.refunded.v1", map[string]string{
@@ -241,10 +239,10 @@ func TestHandle(t *testing.T) {
 
 func TestStartConsumers(t *testing.T) {
 	cases := []struct {
-		name              string
-		start             func(*EventConsumer, context.Context) error
-		stream, filter    string
-		consumerName      string
+		name           string
+		start          func(*EventConsumer, context.Context) error
+		stream, filter string
+		consumerName   string
 	}{
 		{"payment", (*EventConsumer).StartPaymentConsumer, "PAYMENT", "payment.>", "notification-payment-consumer"},
 		{"payout", (*EventConsumer).StartPayoutConsumer, "PAYOUT", "payout.>", "notification-payout-consumer"},
@@ -270,3 +268,35 @@ func TestStartConsumers(t *testing.T) {
 		})
 	}
 }
+
+// TestTemplateCatalogConsistency: el consumer arma datos para un subject solo
+// si existe un template bajo su event type normalizado, y cada template tiene
+// un subject que lo dispara. Sin esto, un renombre de clave (p. ej. los viejos
+// kyc.approved) deja eventos que se descartan en silencio.
+func TestTemplateCatalogConsistency(t *testing.T) {
+	p := eventPayload{TenantID: "t"}
+
+	t.Run("every template is reachable from its .v1 subject", func(t *testing.T) {
+		for key := range domain.Templates {
+			if buildTemplateData(key+".v1", p) == nil {
+				t.Errorf("template %q: no subject %q.v1 handled by the consumer", key, key)
+			}
+		}
+	})
+
+	t.Run("every handled subject has a template", func(t *testing.T) {
+		for _, subject := range handledSubjects {
+			if buildTemplateData(subject, p) == nil {
+				t.Errorf("%s listed as handled but buildTemplateData returns nil", subject)
+				continue
+			}
+			if _, ok := domain.FindTemplate(domain.NormalizeEventType(subject)); !ok {
+				t.Errorf("%s is handled but has no template (would be dropped silently)", subject)
+			}
+		}
+	})
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }

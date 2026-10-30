@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/notification/domain"
 )
@@ -47,9 +48,9 @@ func (r *fakeNotifRepo) ListByTenant(ctx context.Context, tenantID domain.Tenant
 // ── fakePrefRepo ────────────────────────────────────────────────────────────
 
 type fakePrefRepo struct {
-	upserted []*domain.NotificationPreference
-	byEvent  map[string]*domain.NotificationPreference
-	listed   []*domain.NotificationPreference
+	upserted  []*domain.NotificationPreference
+	byEvent   map[string]*domain.NotificationPreference
+	listed    []*domain.NotificationPreference
 	upsertErr error
 	findErr   error
 	listErr   error
@@ -118,3 +119,10 @@ func (c fakeContactReader) GetTenantAdminEmail(ctx context.Context, tenantID str
 	}
 	return c.email, nil
 }
+
+// fixedClock es el reloj de los tests: fechas deterministas.
+type fixedClock struct{}
+
+var testNow = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+func (fixedClock) Now() time.Time { return testNow }

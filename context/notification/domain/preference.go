@@ -9,10 +9,10 @@ import "time"
 // por defecto es HABILITADO para todos los eventos con template registrado.
 type NotificationPreference struct {
 	tenantID       TenantID
-	eventType      string  // event type normalizado, ej: "payment.captured"
+	eventType      string // event type normalizado, ej: "payment.captured"
 	channel        Channel
 	enabled        bool
-	recipientEmail string  // email destino; vacío = usar email del admin del tenant
+	recipientEmail string // email destino; vacío = usar email del admin del tenant
 	updatedAt      time.Time
 }
 
@@ -23,6 +23,7 @@ func NewNotificationPreference(
 	channel Channel,
 	enabled bool,
 	recipientEmail string,
+	now time.Time,
 ) *NotificationPreference {
 	return &NotificationPreference{
 		tenantID:       tenantID,
@@ -30,7 +31,7 @@ func NewNotificationPreference(
 		channel:        channel,
 		enabled:        enabled,
 		recipientEmail: recipientEmail,
-		updatedAt:      time.Now().UTC(),
+		updatedAt:      now.UTC(),
 	}
 }
 
@@ -47,9 +48,9 @@ func ReconstitutePreference(
 	}
 }
 
-func (p *NotificationPreference) TenantID() TenantID       { return p.tenantID }
-func (p *NotificationPreference) EventType() string        { return p.eventType }
-func (p *NotificationPreference) Channel() Channel         { return p.channel }
-func (p *NotificationPreference) Enabled() bool            { return p.enabled }
-func (p *NotificationPreference) RecipientEmail() string   { return p.recipientEmail }
-func (p *NotificationPreference) UpdatedAt() time.Time     { return p.updatedAt }
+func (p *NotificationPreference) TenantID() TenantID     { return p.tenantID }
+func (p *NotificationPreference) EventType() string      { return p.eventType }
+func (p *NotificationPreference) Channel() Channel       { return p.channel }
+func (p *NotificationPreference) Enabled() bool          { return p.enabled }
+func (p *NotificationPreference) RecipientEmail() string { return p.recipientEmail }
+func (p *NotificationPreference) UpdatedAt() time.Time   { return p.updatedAt }

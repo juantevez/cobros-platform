@@ -70,14 +70,14 @@ sequenceDiagram
     C->>P: POST /payments {idempotency_key, amount, …, payment_token}
     P->>DB: FindByIdempotencyKey → si existe y avanzó: 200 + estado actual
     P->>DB: tenants.status = active? (si no → 403)
-    P->>DB: INSERT payment (initiated)           ← fuera de tx; si ya existía en initiated, se retoma
+    P->>DB: INSERT payment (initiated)           ← fuera de tx (si ya existía en initiated, se retoma)
     P->>R: Evaluate
     alt rechazado por riesgo
         P->>DB: tx{UPDATE risk_rejected + outbox payment.failed.v1}
         P-->>C: 422
     end
     P->>B: Calculate fee
-    P->>DB: UPDATE processing WHERE status=initiated   ← claim atómico; si otro lo tomó: 200 + estado actual
+    P->>DB: UPDATE processing WHERE status=initiated   ← claim atómico (si otro lo tomó: 200 + estado actual)
     P->>PSP: AuthorizeAndCapture
     alt PSP devuelve error (rechazo o timeout ⚠️)
         P->>DB: tx{UPDATE failed + outbox payment.failed.v1}

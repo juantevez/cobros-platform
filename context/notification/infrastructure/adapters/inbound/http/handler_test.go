@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -56,7 +57,7 @@ func newHandler(nr *fakeNotifRepo, pr *fakePrefRepo) *NotificationHandler {
 	return NewNotificationHandler(
 		application.NewListNotificationsUseCase(nr),
 		application.NewGetPreferencesUseCase(pr),
-		application.NewUpdatePreferenceUseCase(pr),
+		application.NewUpdatePreferenceUseCase(pr, realClock{}),
 	)
 }
 
@@ -81,7 +82,7 @@ func TestListNotifications(t *testing.T) {
 
 	t.Run("returns notifications and count", func(t *testing.T) {
 		n := domain.NewNotification(domain.NewNotificationID(), domain.TenantID(tid),
-			"payment.captured", domain.ChannelEmail, "u@x.com", "Pago")
+			"payment.captured", domain.ChannelEmail, "u@x.com", "Pago", time.Now())
 		nr := &fakeNotifRepo{listed: []*domain.Notification{n}}
 		rec := doRequest(newHandler(nr, &fakePrefRepo{}).ListNotifications,
 			http.MethodGet, "/notifications?limit=10", "", tid, nil)
@@ -102,6 +103,20 @@ func TestListNotifications(t *testing.T) {
 			http.MethodGet, "/notifications", "", "bad-tenant", nil)
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+	})
+
+	t.Run("missing tenant yields 403 on every endpoint", func(t *testing.T) {
+		h := newHandler(&fakeNotifRepo{}, &fakePrefRepo{})
+		for name, rec := range map[string]*httptest.ResponseRecorder{
+			"list":      doRequest(h.ListNotifications, http.MethodGet, "/notifications", "", "", nil),
+			"get prefs": doRequest(h.GetPreferences, http.MethodGet, "/notifications/preferences", "", "", nil),
+			"update pref": doRequest(h.UpdatePreference, http.MethodPut, "/x", `{"enabled":false}`, "",
+				gin.Params{{Key: "eventType", Value: "payment.captured"}}),
+		} {
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s: status = %d, want 403", name, rec.Code)
+			}
 		}
 	})
 
@@ -210,3 +225,7 @@ func TestRegisterRoutes(t *testing.T) {
 		t.Fatalf("GET preferences status = %d, want 200", rec.Code)
 	}
 }
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }

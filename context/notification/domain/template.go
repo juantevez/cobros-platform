@@ -86,14 +86,14 @@ var Templates = map[string]Template{
 <p>Los fondos fueron devueltos a tu saldo disponible. Por favor verificá los datos de tu cuenta bancaria.</p>`,
 	},
 
-	"kyc.approved": {
+	"onboarding.application.approved": {
 		Subject: "🎉 Tu cuenta fue aprobada",
 		Body: `<p>Hola,</p>
 <p>¡Buenas noticias! Tu solicitud de verificación fue aprobada.</p>
 <p>Tu cuenta está ahora habilitada para procesar pagos en modo producción.</p>`,
 	},
 
-	"kyc.rejected": {
+	"onboarding.application.rejected": {
 		Subject: "Tu solicitud de verificación fue rechazada",
 		Body: `<p>Hola,</p>
 <p>Lamentablemente tu solicitud de verificación fue rechazada.</p>

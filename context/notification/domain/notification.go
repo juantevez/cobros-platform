@@ -23,13 +23,15 @@ type Notification struct {
 	natsMsgID      string
 }
 
-// NewNotification crea una notificación en estado pending.
+// NewNotification crea una notificación en estado pending. now lo provee la
+// aplicación (reloj inyectable).
 func NewNotification(
 	id NotificationID,
 	tenantID TenantID,
 	eventType string,
 	channel Channel,
 	recipientEmail, subject string,
+	now time.Time,
 ) *Notification {
 	return &Notification{
 		id:             id,
@@ -39,7 +41,7 @@ func NewNotification(
 		recipientEmail: recipientEmail,
 		subject:        subject,
 		status:         StatusPending,
-		createdAt:      time.Now().UTC(),
+		createdAt:      now.UTC(),
 	}
 }
 
@@ -67,11 +69,11 @@ func ReconstituteNotification(
 	}
 }
 
-// MarkSent registra el envío exitoso.
-func (n *Notification) MarkSent() {
-	now := time.Now().UTC()
+// MarkSent registra el envío exitoso en el instante dado.
+func (n *Notification) MarkSent(now time.Time) {
+	sentAt := now.UTC()
 	n.status = StatusSent
-	n.sentAt = &now
+	n.sentAt = &sentAt
 }
 
 // MarkFailed registra el fallo de envío.
@@ -80,16 +82,16 @@ func (n *Notification) MarkFailed(reason string) {
 	n.errorMsg = reason
 }
 
-func (n *Notification) ID() NotificationID          { return n.id }
-func (n *Notification) TenantID() TenantID          { return n.tenantID }
-func (n *Notification) EventType() string           { return n.eventType }
-func (n *Notification) Channel() Channel            { return n.channel }
-func (n *Notification) RecipientEmail() string      { return n.recipientEmail }
-func (n *Notification) Subject() string             { return n.subject }
-func (n *Notification) Status() NotificationStatus  { return n.status }
-func (n *Notification) ErrorMsg() string            { return n.errorMsg }
-func (n *Notification) SentAt() *time.Time          { return n.sentAt }
-func (n *Notification) CreatedAt() time.Time        { return n.createdAt }
+func (n *Notification) ID() NotificationID         { return n.id }
+func (n *Notification) TenantID() TenantID         { return n.tenantID }
+func (n *Notification) EventType() string          { return n.eventType }
+func (n *Notification) Channel() Channel           { return n.channel }
+func (n *Notification) RecipientEmail() string     { return n.recipientEmail }
+func (n *Notification) Subject() string            { return n.subject }
+func (n *Notification) Status() NotificationStatus { return n.status }
+func (n *Notification) ErrorMsg() string           { return n.errorMsg }
+func (n *Notification) SentAt() *time.Time         { return n.sentAt }
+func (n *Notification) CreatedAt() time.Time       { return n.createdAt }
 
 // NatsMsgID retorna el ID del mensaje NATS asociado (vacio si no aplica).
 func (n *Notification) NatsMsgID() string { return n.natsMsgID }

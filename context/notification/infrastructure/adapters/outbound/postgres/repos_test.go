@@ -23,6 +23,13 @@ func newMock(t *testing.T) pgxmock.PgxPoolIface {
 	return mock
 }
 
+// expectSession espera la tx efímera de RunWithAppTenant que fija
+// app.current_tenant antes de la consulta (RLS).
+func expectSession(mock pgxmock.PgxPoolIface) {
+	mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	mock.ExpectExec("set_config").WithArgs(anyArgs(2)...).WillReturnResult(pgxmock.NewResult("SELECT", 1))
+}
+
 func anyArgs(n int) []any {
 	out := make([]any, n)
 	for i := range out {
@@ -32,24 +39,26 @@ func anyArgs(n int) []any {
 }
 
 var (
-	testTime   = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
-	notifCols  = []string{"id", "tenant_id", "event_type", "channel", "recipient_email", "subject", "status", "error_msg", "sent_at", "created_at"}
-	prefCols   = []string{"event_type", "channel", "enabled", "recipient_email", "updated_at"}
-	findCols   = []string{"channel", "enabled", "recipient_email", "updated_at"}
+	testTime  = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	notifCols = []string{"id", "tenant_id", "event_type", "channel", "recipient_email", "subject", "status", "error_msg", "sent_at", "created_at"}
+	prefCols  = []string{"event_type", "channel", "enabled", "recipient_email", "updated_at"}
+	findCols  = []string{"channel", "enabled", "recipient_email", "updated_at"}
 )
 
 // ── NotificationRepository ────────────────────────────────────────────────────
 
 func TestNotificationRepository_Save(t *testing.T) {
 	n := domain.NewNotification(domain.NewNotificationID(), domain.TenantID(uuid.NewString()),
-		"payment.captured", domain.ChannelEmail, "u@x.com", "Pago")
+		"payment.captured", domain.ChannelEmail, "u@x.com", "Pago", time.Now())
 
 	t.Run("inserts notification", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewNotificationRepository(mock)
 		mock.ExpectExec("INSERT INTO notifications").WithArgs(anyArgs(11)...).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
+		mock.ExpectCommit()
 		if err := repo.Save(context.Background(), n); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -60,8 +69,10 @@ func TestNotificationRepository_Save(t *testing.T) {
 
 	t.Run("insert error propagated", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewNotificationRepository(mock)
 		mock.ExpectExec("INSERT INTO notifications").WillReturnError(errors.New("boom"))
+		mock.ExpectRollback()
 		if err := repo.Save(context.Background(), n); err == nil {
 			t.Fatal("expected error")
 		}
@@ -73,6 +84,7 @@ func TestNotificationRepository_ListByTenant(t *testing.T) {
 
 	t.Run("returns notifications", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewNotificationRepository(mock)
 		id := domain.NewNotificationID()
 		mock.ExpectQuery("FROM notifications").WithArgs(tid.String(), 50).
@@ -80,6 +92,7 @@ func TestNotificationRepository_ListByTenant(t *testing.T) {
 				id.String(), tid.String(), "payment.captured", "email",
 				"u@x.com", "Pago", "sent", "", &testTime, testTime))
 
+		mock.ExpectCommit()
 		out, err := repo.ListByTenant(context.Background(), tid, 50)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -97,8 +110,10 @@ func TestNotificationRepository_ListByTenant(t *testing.T) {
 
 	t.Run("query error propagated", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewNotificationRepository(mock)
 		mock.ExpectQuery("FROM notifications").WillReturnError(errors.New("boom"))
+		mock.ExpectRollback()
 		if _, err := repo.ListByTenant(context.Background(), tid, 50); err == nil {
 			t.Fatal("expected error")
 		}
@@ -106,11 +121,13 @@ func TestNotificationRepository_ListByTenant(t *testing.T) {
 
 	t.Run("scan error surfaces", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewNotificationRepository(mock)
 		// created_at con tipo inválido → error de scan.
 		mock.ExpectQuery("FROM notifications").WithArgs(tid.String(), 50).
 			WillReturnRows(pgxmock.NewRows(notifCols).AddRow(
 				"id", tid.String(), "e", "email", "u@x.com", "s", "sent", "", (*time.Time)(nil), "not-a-time"))
+		mock.ExpectRollback()
 		if _, err := repo.ListByTenant(context.Background(), tid, 50); err == nil {
 			t.Fatal("expected scan error")
 		}
@@ -119,9 +136,28 @@ func TestNotificationRepository_ListByTenant(t *testing.T) {
 
 // ── PreferenceRepository ──────────────────────────────────────────────────────
 
+func TestNotificationRepository_ListByTenant_rejectsCorruptRows(t *testing.T) {
+	tid := domain.TenantID(uuid.NewString())
+	for name, row := range map[string][]any{
+		"unknown status":  {"id-1", tid.String(), "payment.captured", "email", "u@x.com", "s", "delivered", "", (*time.Time)(nil), testTime},
+		"unknown channel": {"id-1", tid.String(), "payment.captured", "sms", "u@x.com", "s", "sent", "", (*time.Time)(nil), testTime},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mock := newMock(t)
+			expectSession(mock)
+			mock.ExpectQuery("FROM notifications").WithArgs(tid.String(), 50).
+				WillReturnRows(pgxmock.NewRows(notifCols).AddRow(row...))
+			mock.ExpectRollback()
+			if _, err := NewNotificationRepository(mock).ListByTenant(context.Background(), tid, 50); err == nil {
+				t.Fatal("expected error for a corrupt row")
+			}
+		})
+	}
+}
+
 func TestPreferenceRepository_Upsert(t *testing.T) {
 	p := domain.NewNotificationPreference(domain.TenantID(uuid.NewString()),
-		"payment.captured", domain.ChannelEmail, true, "ops@x.com")
+		"payment.captured", domain.ChannelEmail, true, "ops@x.com", time.Now())
 
 	t.Run("upserts preference", func(t *testing.T) {
 		mock := newMock(t)
@@ -163,10 +199,12 @@ func TestPreferenceRepository_FindByTenantAndEvent(t *testing.T) {
 
 	t.Run("found returns preference", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewPreferenceRepository(mock)
 		mock.ExpectQuery("FROM notification_preferences").WithArgs(tid.String(), "payment.captured").
 			WillReturnRows(pgxmock.NewRows(findCols).AddRow("email", true, "ops@x.com", testTime))
 
+		mock.ExpectCommit()
 		p, err := repo.FindByTenantAndEvent(context.Background(), tid, "payment.captured")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -178,10 +216,12 @@ func TestPreferenceRepository_FindByTenantAndEvent(t *testing.T) {
 
 	t.Run("no rows maps to ErrPreferenceNotFound", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewPreferenceRepository(mock)
 		mock.ExpectQuery("FROM notification_preferences").WithArgs(tid.String(), "payment.captured").
 			WillReturnError(pgx.ErrNoRows)
 
+		mock.ExpectRollback()
 		_, err := repo.FindByTenantAndEvent(context.Background(), tid, "payment.captured")
 		if !errors.Is(err, domain.ErrPreferenceNotFound) {
 			t.Fatalf("expected ErrPreferenceNotFound, got %v", err)
@@ -190,10 +230,12 @@ func TestPreferenceRepository_FindByTenantAndEvent(t *testing.T) {
 
 	t.Run("other error propagated", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewPreferenceRepository(mock)
 		mock.ExpectQuery("FROM notification_preferences").WithArgs(tid.String(), "payment.captured").
 			WillReturnError(errors.New("boom"))
 
+		mock.ExpectRollback()
 		_, err := repo.FindByTenantAndEvent(context.Background(), tid, "payment.captured")
 		if err == nil || errors.Is(err, domain.ErrPreferenceNotFound) {
 			t.Fatalf("expected generic error, got %v", err)
@@ -206,12 +248,14 @@ func TestPreferenceRepository_ListByTenant(t *testing.T) {
 
 	t.Run("returns preferences", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewPreferenceRepository(mock)
 		mock.ExpectQuery("FROM notification_preferences").WithArgs(tid.String()).
 			WillReturnRows(pgxmock.NewRows(prefCols).
 				AddRow("payment.captured", "email", true, "a@x.com", testTime).
 				AddRow("payment.failed", "email", false, "", testTime))
 
+		mock.ExpectCommit()
 		out, err := repo.ListByTenant(context.Background(), tid)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -223,8 +267,10 @@ func TestPreferenceRepository_ListByTenant(t *testing.T) {
 
 	t.Run("query error propagated", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewPreferenceRepository(mock)
 		mock.ExpectQuery("FROM notification_preferences").WillReturnError(errors.New("boom"))
+		mock.ExpectRollback()
 		if _, err := repo.ListByTenant(context.Background(), tid); err == nil {
 			t.Fatal("expected error")
 		}
@@ -232,9 +278,11 @@ func TestPreferenceRepository_ListByTenant(t *testing.T) {
 
 	t.Run("scan error surfaces", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		repo := NewPreferenceRepository(mock)
 		mock.ExpectQuery("FROM notification_preferences").WithArgs(tid.String()).
 			WillReturnRows(pgxmock.NewRows(prefCols).AddRow("e", "email", "not-a-bool", "", testTime))
+		mock.ExpectRollback()
 		if _, err := repo.ListByTenant(context.Background(), tid); err == nil {
 			t.Fatal("expected scan error")
 		}
@@ -248,10 +296,12 @@ func TestContactReader_GetTenantAdminEmail(t *testing.T) {
 
 	t.Run("returns admin email", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		reader := NewContactReader(mock)
 		mock.ExpectQuery("FROM users").WithArgs(tid).
 			WillReturnRows(pgxmock.NewRows([]string{"email"}).AddRow("admin@x.com"))
 
+		mock.ExpectCommit()
 		email, err := reader.GetTenantAdminEmail(context.Background(), tid)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -263,9 +313,11 @@ func TestContactReader_GetTenantAdminEmail(t *testing.T) {
 
 	t.Run("no rows maps to ErrNoRecipientEmail", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		reader := NewContactReader(mock)
 		mock.ExpectQuery("FROM users").WithArgs(tid).WillReturnError(pgx.ErrNoRows)
 
+		mock.ExpectRollback()
 		_, err := reader.GetTenantAdminEmail(context.Background(), tid)
 		if !errors.Is(err, domain.ErrNoRecipientEmail) {
 			t.Fatalf("expected ErrNoRecipientEmail, got %v", err)
@@ -274,9 +326,11 @@ func TestContactReader_GetTenantAdminEmail(t *testing.T) {
 
 	t.Run("other error propagated", func(t *testing.T) {
 		mock := newMock(t)
+		expectSession(mock)
 		reader := NewContactReader(mock)
 		mock.ExpectQuery("FROM users").WithArgs(tid).WillReturnError(errors.New("boom"))
 
+		mock.ExpectRollback()
 		_, err := reader.GetTenantAdminEmail(context.Background(), tid)
 		if err == nil || errors.Is(err, domain.ErrNoRecipientEmail) {
 			t.Fatalf("expected generic error, got %v", err)

@@ -286,7 +286,7 @@ func main() {
 	}
 
 	sendNotif := notificationapp.NewSendNotificationUseCase(
-		notifRepo, notifPrefRepo, notifEmailSender, contactReader,
+		notifRepo, notifPrefRepo, notifEmailSender, contactReader, realClock{},
 		logger.With("component", "notification"),
 	)
 	notifConsumer := notificationnats.NewEventConsumer(

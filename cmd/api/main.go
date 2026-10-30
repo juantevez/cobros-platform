@@ -338,7 +338,7 @@ func main() {
 	// consume los eventos; la API solo expone historial y preferencias.
 	listNotifs := notificationapp.NewListNotificationsUseCase(notifRepo)
 	getPrefs := notificationapp.NewGetPreferencesUseCase(prefRepo)
-	updatePref := notificationapp.NewUpdatePreferenceUseCase(prefRepo)
+	updatePref := notificationapp.NewUpdatePreferenceUseCase(prefRepo, clock)
 
 	notificationhttp.RegisterRoutes(protected, notificationhttp.NewNotificationHandler(
 		listNotifs, getPrefs, updatePref,

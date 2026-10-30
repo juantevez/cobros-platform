@@ -2,7 +2,9 @@ package application
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -12,7 +14,7 @@ import (
 func validTenant() string { return uuid.NewString() }
 
 func newSendUC(nr *fakeNotifRepo, pr *fakePrefRepo, es *fakeEmailSender, cr fakeContactReader) *SendNotificationUseCase {
-	return NewSendNotificationUseCase(nr, pr, es, cr, discardLogger())
+	return NewSendNotificationUseCase(nr, pr, es, cr, fixedClock{}, discardLogger())
 }
 
 func TestSendNotificationUseCase_Execute(t *testing.T) {
@@ -57,7 +59,7 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 		nr := &fakeNotifRepo{}
 		pr := newPrefRepo()
 		pr.byEvent["payment.captured"] = domain.NewNotificationPreference(
-			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "override@x.com")
+			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "override@x.com", time.Now())
 		es := &fakeEmailSender{}
 		uc := newSendUC(nr, pr, es, fakeContactReader{email: "admin@x.com"})
 
@@ -73,7 +75,7 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 		nr := &fakeNotifRepo{}
 		pr := newPrefRepo()
 		pr.byEvent["payment.captured"] = domain.NewNotificationPreference(
-			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "")
+			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, true, "", time.Now())
 		es := &fakeEmailSender{}
 		uc := newSendUC(nr, pr, es, fakeContactReader{email: "admin@x.com"})
 
@@ -89,7 +91,7 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 		nr := &fakeNotifRepo{}
 		pr := newPrefRepo()
 		pr.byEvent["payment.captured"] = domain.NewNotificationPreference(
-			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, false, "x@x.com")
+			domain.TenantID("t"), "payment.captured", domain.ChannelEmail, false, "x@x.com", time.Now())
 		es := &fakeEmailSender{}
 		uc := newSendUC(nr, pr, es, fakeContactReader{email: "admin@x.com"})
 
@@ -185,8 +187,8 @@ func TestSendNotificationUseCase_Execute(t *testing.T) {
 func TestListNotificationsUseCase_Execute(t *testing.T) {
 	seed := func() []*domain.Notification {
 		n := domain.NewNotification(domain.NewNotificationID(), domain.TenantID("t"),
-			"payment.captured", domain.ChannelEmail, "u@x.com", "Pago")
-		n.MarkSent()
+			"payment.captured", domain.ChannelEmail, "u@x.com", "Pago", time.Now())
+		n.MarkSent(time.Now())
 		return []*domain.Notification{n}
 	}
 
@@ -221,6 +223,16 @@ func TestListNotificationsUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	t.Run("limit capped at 200", func(t *testing.T) {
+		nr := &fakeNotifRepo{}
+		if _, err := NewListNotificationsUseCase(nr).Execute(context.Background(), validTenant(), 1_000_000); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if nr.gotLimit != 200 {
+			t.Errorf("limit = %d, want 200", nr.gotLimit)
+		}
+	})
+
 	t.Run("invalid tenant id returns error", func(t *testing.T) {
 		uc := NewListNotificationsUseCase(&fakeNotifRepo{})
 		if _, err := uc.Execute(context.Background(), "bad", 10); err == nil {
@@ -234,4 +246,64 @@ func TestListNotificationsUseCase_Execute(t *testing.T) {
 			t.Fatal("expected error from repo")
 		}
 	})
+}
+
+func TestSendNotification_KYCEventsAreDelivered(t *testing.T) {
+	// Regresión: los templates de KYC se registraban como kyc.approved /
+	// kyc.rejected, pero el evento llega como onboarding.application.*.v1 y
+	// se normaliza a onboarding.application.*: el lookup fallaba y el email
+	// se descartaba en silencio.
+	for _, tc := range []struct {
+		subject, wantInBody string
+		data                map[string]string
+	}{
+		{"onboarding.application.approved.v1", "aprobada", map[string]string{}},
+		{"onboarding.application.rejected.v1", "docs_invalid", map[string]string{"rejection_reason": "docs_invalid"}},
+	} {
+		t.Run(tc.subject, func(t *testing.T) {
+			nr, es := &fakeNotifRepo{}, &fakeEmailSender{}
+			uc := newSendUC(nr, newPrefRepo(), es, fakeContactReader{email: "admin@x.com"})
+			err := uc.Execute(context.Background(), SendNotificationCmd{
+				TenantID: validTenant(), EventType: tc.subject, TemplateData: tc.data, NatsMsgID: "msg-1",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(es.sent) != 1 || !strings.Contains(es.sent[0].body, tc.wantInBody) {
+				t.Fatalf("expected the KYC email to be sent, got %+v", es.sent)
+			}
+			if len(nr.saved) != 1 || nr.saved[0].EventType() != domain.NormalizeEventType(tc.subject) {
+				t.Errorf("saved = %+v", nr.saved)
+			}
+		})
+	}
+}
+
+func TestTimestampsComeFromTheInjectedClock(t *testing.T) {
+	nr, es := &fakeNotifRepo{}, &fakeEmailSender{}
+	uc := newSendUC(nr, newPrefRepo(), es, fakeContactReader{email: "admin@x.com"})
+	if err := uc.Execute(context.Background(), SendNotificationCmd{
+		TenantID: validTenant(), EventType: "payment.captured.v1", TemplateData: map[string]string{},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	n := nr.saved[0]
+	if !n.CreatedAt().Equal(testNow) || n.SentAt() == nil || !n.SentAt().Equal(testNow) {
+		t.Errorf("created_at=%v sent_at=%v, want %v", n.CreatedAt(), n.SentAt(), testNow)
+	}
+
+	pr := newPrefRepo()
+	if err := NewUpdatePreferenceUseCase(pr, fixedClock{}).Execute(context.Background(), UpdatePreferenceCmd{
+		TenantID: validTenant(), EventType: "payment.captured", Enabled: false,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range pr.upserted {
+		if !p.UpdatedAt().Equal(testNow) {
+			t.Errorf("updated_at = %v, want %v", p.UpdatedAt(), testNow)
+		}
+	}
+	if len(pr.upserted) != 1 {
+		t.Fatalf("expected 1 upsert, got %d", len(pr.upserted))
+	}
 }

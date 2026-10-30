@@ -27,7 +27,7 @@ type eventPayload struct {
 
 // EventConsumer traduce eventos NATS en comandos de notificación.
 type EventConsumer struct {
-	consumer eventbus.Consumer
+	consumer  eventbus.Consumer
 	sendNotif *application.SendNotificationUseCase
 	logger    *slog.Logger
 }
@@ -110,6 +110,16 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 	return nil
 }
 
+// handledSubjects son los subjects para los que buildTemplateData arma datos
+// (y que por lo tanto deben tener template). Lo usa el test de consistencia
+// del catálogo.
+var handledSubjects = []string{
+	"payment.captured.v1", "payment.failed.v1", "payment.refunded.v1",
+	"payout.confirmed.v1", "payout.failed.v1",
+	"onboarding.application.approved.v1", "onboarding.application.rejected.v1",
+	"auth.tenant.suspended.v1",
+}
+
 // buildTemplateData construye el mapa de datos para el template según el evento.
 func buildTemplateData(subject string, p eventPayload) map[string]string {
 	amountStr := fmt.Sprintf("%.2f", float64(p.Amount)/100)
@@ -122,7 +132,7 @@ func buildTemplateData(subject string, p eventPayload) map[string]string {
 			"currency":       p.Currency,
 			"payment_method": p.PaymentMethod,
 		}
-	case "payment.failed.v1", "payment.risk_rejected.v1":
+	case "payment.failed.v1": // también cubre el rechazo por riesgo (Payment publica payment.failed)
 		return map[string]string{
 			"payment_id":     p.PaymentID,
 			"amount":         amountStr,
