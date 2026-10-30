@@ -1,7 +1,8 @@
 // Package nats contiene el consumer de eventos de dominio para el contexto Audit.
 //
-// El Audit no produce eventos; solo los consume. Suscribe a los streams AUTH y
-// LEDGER y registra cada evento relevante en el log de auditoría.
+// El Audit no produce eventos; solo los consume. Suscribe a los streams de los
+// contextos con acciones sensibles y registra cada evento mapeado en el log
+// de auditoría.
 package nats
 
 import (
@@ -9,17 +10,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 
 	"github.com/juantevez/cobros-platform/context/audit/application"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
-	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
+
+// Subscription es un consumer durable de Audit sobre un stream.
+type Subscription struct {
+	Stream string
+	Filter string
+	Name   string
+}
+
+// Subscriptions son los streams que audita la plataforma. Los filtros dejan
+// afuera los eventos de alto volumen que no son acciones sensibles
+// (payment.captured/failed: el movimiento de dinero ya queda auditado por
+// ledger.entry.posted; webhook.delivery.*: operación interna).
+var Subscriptions = []Subscription{
+	{Stream: "AUTH", Filter: "auth.>", Name: "audit-auth-consumer"},
+	{Stream: "LEDGER", Filter: "ledger.>", Name: "audit-ledger-consumer"},
+	{Stream: "ONBOARDING", Filter: "onboarding.>", Name: "audit-onboarding-consumer"},
+	{Stream: "PAYMENT", Filter: "payment.refunded.>", Name: "audit-payment-consumer"},
+	{Stream: "PAYOUT", Filter: "payout.>", Name: "audit-payout-consumer"},
+	{Stream: "BILLING", Filter: "billing.>", Name: "audit-billing-consumer"},
+	{Stream: "DISPUTE", Filter: "dispute.>", Name: "audit-dispute-consumer"},
+	{Stream: "WEBHOOK", Filter: "webhook.endpoint.>", Name: "audit-webhook-consumer"},
+	{Stream: "COMPLIANCE", Filter: "compliance.>", Name: "audit-compliance-consumer"},
+	{Stream: "RECONCILIATION", Filter: "reconciliation.>", Name: "audit-reconciliation-consumer"},
+}
 
 // EventConsumer suscribe al bus de eventos y registra cada hecho en el audit log.
 type EventConsumer struct {
-	consumer       eventbus.Consumer
-	recordAction   *application.RecordActionUseCase
-	logger         *slog.Logger
+	consumer     eventbus.Consumer
+	recordAction *application.RecordActionUseCase
+	logger       *slog.Logger
 }
 
 func NewEventConsumer(
@@ -34,24 +59,13 @@ func NewEventConsumer(
 	}
 }
 
-// StartAuthConsumer arranca el consumer del stream AUTH.
-// Bloquea hasta que ctx sea cancelado. Llamar en una goroutine.
-func (c *EventConsumer) StartAuthConsumer(ctx context.Context) error {
+// Start arranca el consumer de una suscripción. Bloquea hasta que ctx sea
+// cancelado. Llamar en una goroutine por suscripción.
+func (c *EventConsumer) Start(ctx context.Context, sub Subscription) error {
 	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
-		Stream:        "AUTH",
-		Name:          "audit-auth-consumer",
-		FilterSubject: "auth.>",
-		MaxDeliver:    5,
-	}, c.handle)
-}
-
-// StartLedgerConsumer arranca el consumer del stream LEDGER.
-// Bloquea hasta que ctx sea cancelado. Llamar en una goroutine.
-func (c *EventConsumer) StartLedgerConsumer(ctx context.Context) error {
-	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
-		Stream:        "LEDGER",
-		Name:          "audit-ledger-consumer",
-		FilterSubject: "ledger.>",
+		Stream:        sub.Stream,
+		Name:          sub.Name,
+		FilterSubject: sub.Filter,
 		MaxDeliver:    5,
 	}, c.handle)
 }
@@ -69,15 +83,14 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 
 	// Quién originó el hecho y el correlation ID de la request: los propaga
 	// el outbox en los headers. Sin header (mensajes viejos), queda el actor
-	// que haya resuelto mapEvent.
-	if actor := msg.Headers[eventbus.HeaderActor]; actor != "" {
+	// que haya resuelto mapEvent. Un actor declarado en el payload (login,
+	// logout, asignación de rol) tiene prioridad: es el sujeto del hecho.
+	if actor := msg.Headers[eventbus.HeaderActor]; actor != "" && !mapped.actorFromPayload {
 		mapped.Actor = actor
 	}
 	mapped.CorrelationID = msg.Headers[eventbus.HeaderCorrelationID]
 
-	// El TenantID del contexto puede no estar (el evento viene de JetStream,
-	// no de un request HTTP). Lo tomamos del payload del evento.
-	if err := c.recordAction.Execute(ctx, *mapped); err != nil {
+	if err := c.recordAction.Execute(ctx, mapped.RecordActionCmd); err != nil {
 		c.logger.Error("audit consumer: record action failed",
 			"subject", msg.Subject, "error", err)
 		return fmt.Errorf("record action: %w", err) // Nak → reintento
@@ -88,65 +101,121 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 
 // ── Mapeo de eventos a acciones de auditoría ──────────────────────────────────
 
-// eventPayload es el mínimo común de todos los eventos de dominio.
-type eventPayload struct {
-	TenantID   string `json:"tenant_id"`
-	UserID     string `json:"user_id"`
-	ApiKeyID   string `json:"api_key_id"`
-	EntryID    string `json:"entry_id"`
-	AccountID  string `json:"account_id"`
-	AssignedBy string `json:"assigned_by"`
+// eventMapping describe cómo auditar un subject: el tipo de recurso, el campo
+// del payload con su ID y, si el payload declara quién actuó, ese campo.
+type eventMapping struct {
+	resourceType string
+	idField      string
+	actorField   string   // opcional
+	metaFields   []string // campos del payload que se copian a metadata
+}
+
+// mappings es el catálogo de eventos auditados. La acción se deriva del
+// subject sin el sufijo de versión (auth.tenant.created.v1 → auth.tenant.created).
+var mappings = map[string]eventMapping{
+	// ── Auth ──
+	"auth.tenant.created.v1":   {"tenant", "tenant_id", "", nil},
+	"auth.tenant.activated.v1": {"tenant", "tenant_id", "", nil},
+	"auth.tenant.suspended.v1": {"tenant", "tenant_id", "", nil},
+	"auth.user.registered.v1":  {"user", "user_id", "", nil},
+	"auth.user.suspended.v1":   {"user", "user_id", "", nil},
+	"auth.user.login.v1":       {"user", "user_id", "user_id", nil},
+	"auth.user.logout.v1":      {"user", "user_id", "user_id", nil},
+	"auth.apikey.issued.v1":    {"api_key", "api_key_id", "", nil},
+	"auth.apikey.revoked.v1":   {"api_key", "api_key_id", "", nil},
+	"auth.role.assigned.v1":    {"user", "user_id", "assigned_by", nil},
+
+	// ── Ledger ──
+	"ledger.account.created.v1": {"ledger_account", "account_id", "", nil},
+	"ledger.entry.posted.v1":    {"journal_entry", "entry_id", "", nil},
+	"ledger.entry.reversed.v1":  {"journal_entry", "reverse_entry_id", "", []string{"original_entry_id"}},
+
+	// ── Onboarding (KYC) ──
+	"onboarding.application.submitted.v1":       {"application", "application_id", "", nil},
+	"onboarding.application.sent_for_review.v1": {"application", "application_id", "", nil},
+	"onboarding.application.approved.v1":        {"application", "application_id", "", nil},
+	"onboarding.application.rejected.v1":        {"application", "application_id", "", nil},
+	"onboarding.application.more_info.v1":       {"application", "application_id", "", nil},
+	"onboarding.application.reopened.v1":        {"application", "application_id", "", nil},
+
+	// ── Payment (solo acciones sensibles) ──
+	"payment.refunded.v1": {"payment", "payment_id", "", nil},
+
+	// ── Payout ──
+	"payout.initiated.v1": {"payout", "payout_id", "", nil},
+	"payout.confirmed.v1": {"payout", "payout_id", "", nil},
+	"payout.failed.v1":    {"payout", "payout_id", "", nil},
+	"payout.unknown.v1":   {"payout", "payout_id", "", nil},
+
+	// ── Billing ──
+	"billing.plan.created.v1":     {"billing_plan", "plan_id", "", nil},
+	"billing.plan.updated.v1":     {"billing_plan", "plan_id", "", nil},
+	"billing.plan.deactivated.v1": {"billing_plan", "plan_id", "", nil},
+	"billing.plan.assigned.v1":    {"tenant_plan", "tenant_plan_id", "", nil},
+
+	// ── Dispute ──
+	"dispute.opened.v1":   {"dispute", "dispute_id", "", nil},
+	"dispute.resolved.v1": {"dispute", "dispute_id", "", nil},
+
+	// ── Webhook (configuración) ──
+	"webhook.endpoint.registered.v1":  {"webhook_endpoint", "endpoint_id", "", nil},
+	"webhook.endpoint.deactivated.v1": {"webhook_endpoint", "endpoint_id", "", nil},
+
+	// ── Compliance & AML ──
+	"compliance.alert.raised.v1":            {"aml_alert", "alert_id", "", nil},
+	"compliance.alert.review_proposed.v1":   {"aml_alert", "alert_id", "", nil},
+	"compliance.alert.proposal_rejected.v1": {"aml_alert", "alert_id", "", nil},
+	"compliance.alert.resolved.v1":          {"aml_alert", "alert_id", "", nil},
+	"compliance.sanction.matched.v1":        {"aml_alert", "alert_id", "", nil},
+	"compliance.sanction.cleared.v1":        {"aml_alert", "alert_id", "", nil},
+	"compliance.sanction.confirmed.v1":      {"aml_alert", "alert_id", "", nil},
+
+	// ── Reconciliation ──
+	"reconciliation.run.completed.v1": {"reconciliation_run", "run_id", "", nil},
+}
+
+// versionSuffix es el sufijo de versión del subject (".v1", ".v2", ...).
+var versionSuffix = regexp.MustCompile(`\.v[0-9]+$`)
+
+// mappedEvent es el comando a registrar más si el actor salió del payload.
+type mappedEvent struct {
+	application.RecordActionCmd
+	actorFromPayload bool
 }
 
 // mapEvent traduce un mensaje NATS a un RecordActionCmd.
-func mapEvent(msg *eventbus.Message) (*application.RecordActionCmd, error) {
-	var p eventPayload
-	if err := json.Unmarshal(msg.Payload, &p); err != nil {
-		return nil, fmt.Errorf("unmarshal payload: %w", err)
-	}
-
-	cmd := &application.RecordActionCmd{
-		TenantID: p.TenantID,
-		Actor:    "system", // los eventos son disparados por el sistema
-		Metadata: map[string]string{"event_subject": msg.Subject},
-	}
-
-	switch msg.Subject {
-	// ── Auth ──
-	case "auth.tenant.created.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.tenant.created", "tenant", p.TenantID
-	case "auth.tenant.activated.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.tenant.activated", "tenant", p.TenantID
-	case "auth.tenant.suspended.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.tenant.suspended", "tenant", p.TenantID
-	case "auth.user.registered.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.user.registered", "user", p.UserID
-	case "auth.user.suspended.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.user.suspended", "user", p.UserID
-	case "auth.apikey.issued.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.apikey.issued", "api_key", p.ApiKeyID
-	case "auth.apikey.revoked.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.apikey.revoked", "api_key", p.ApiKeyID
-	case "auth.role.assigned.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "auth.role.assigned", "user", p.UserID
-		cmd.Actor = p.AssignedBy
-
-	// ── Ledger ──
-	case "ledger.account.created.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "ledger.account.created", "ledger_account", p.AccountID
-	case "ledger.entry.posted.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "ledger.entry.posted", "journal_entry", p.EntryID
-	case "ledger.entry.reversed.v1":
-		cmd.Action, cmd.ResourceType, cmd.ResourceID = "ledger.entry.reversed", "journal_entry", p.EntryID
-
-	default:
+func mapEvent(msg *eventbus.Message) (*mappedEvent, error) {
+	m, ok := mappings[msg.Subject]
+	if !ok {
 		return nil, fmt.Errorf("no mapping for subject %q", msg.Subject)
 	}
 
-	// Inyectar el tenantID en el contexto para que FindLast funcione sin RLS.
-	// El audit_log no tiene RLS, pero si otras tablas la tienen en el mismo ctx,
-	// aseguramos que el tenant esté disponible.
-	_ = postgres.WithTenantID // referencia al helper; se usa en el caller si necesario
+	var payload map[string]any
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("unmarshal payload: %w", err)
+	}
+	str := func(field string) string {
+		s, _ := payload[field].(string)
+		return s
+	}
 
-	return cmd, nil
+	ev := &mappedEvent{RecordActionCmd: application.RecordActionCmd{
+		TenantID:     str("tenant_id"),
+		Actor:        "system",
+		Action:       versionSuffix.ReplaceAllString(msg.Subject, ""),
+		ResourceType: m.resourceType,
+		ResourceID:   str(m.idField),
+		Metadata:     map[string]string{"event_subject": msg.Subject},
+	}}
+	for _, f := range m.metaFields {
+		if v := str(f); v != "" {
+			ev.Metadata[f] = v
+		}
+	}
+	if m.actorField != "" {
+		if actor := str(m.actorField); actor != "" {
+			ev.Actor, ev.actorFromPayload = actor, true
+		}
+	}
+	return ev, nil
 }

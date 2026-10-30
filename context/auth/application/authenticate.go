@@ -34,6 +34,8 @@ type AuthenticateUseCase struct {
 	userRepo       UserRepository
 	membershipRepo MembershipRepository
 	refreshRepo    RefreshTokenRepository
+	txManager      TxManager
+	publisher      EventPublisher
 	hasher         PasswordHasher
 	tokenIssuer    TokenIssuer
 	clock          Clock
@@ -47,8 +49,12 @@ func NewAuthenticateUseCase(
 	hasher PasswordHasher,
 	tokenIssuer TokenIssuer,
 	clock Clock,
+	txManager TxManager,
+	publisher EventPublisher,
 ) *AuthenticateUseCase {
 	return &AuthenticateUseCase{
+		txManager:      txManager,
+		publisher:      publisher,
 		tenantRepo:     tenantRepo,
 		userRepo:       userRepo,
 		membershipRepo: membershipRepo,
@@ -149,8 +155,14 @@ func (uc *AuthenticateUseCase) Execute(ctx context.Context, cmd AuthenticateCmd)
 		ExpiresAt: now.Add(refreshTokenDuration),
 	}
 
-	if err := uc.refreshRepo.Save(ctx, rt); err != nil {
-		return TokenPair{}, fmt.Errorf("save refresh token: %w", err)
+	// El refresh token y el evento de login (auditoría) se guardan juntos.
+	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.refreshRepo.Save(ctx, rt); err != nil {
+			return fmt.Errorf("save refresh token: %w", err)
+		}
+		return uc.publisher.Publish(ctx, domain.NewUserLoggedInEvent(tenantID, user.ID()))
+	}); err != nil {
+		return TokenPair{}, err
 	}
 
 	return TokenPair{

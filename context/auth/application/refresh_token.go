@@ -146,10 +146,12 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 // LogoutUseCase revoca el refresh token activo del usuario, cerrando la sesión.
 type LogoutUseCase struct {
 	refreshRepo RefreshTokenRepository
+	txManager   TxManager
+	publisher   EventPublisher
 }
 
-func NewLogoutUseCase(refreshRepo RefreshTokenRepository) *LogoutUseCase {
-	return &LogoutUseCase{refreshRepo: refreshRepo}
+func NewLogoutUseCase(refreshRepo RefreshTokenRepository, txManager TxManager, publisher EventPublisher) *LogoutUseCase {
+	return &LogoutUseCase{refreshRepo: refreshRepo, txManager: txManager, publisher: publisher}
 }
 
 func (uc *LogoutUseCase) Execute(ctx context.Context, cmd LogoutCmd) error {
@@ -166,5 +168,11 @@ func (uc *LogoutUseCase) Execute(ctx context.Context, cmd LogoutCmd) error {
 		return nil // ya estaba revocado
 	}
 
-	return uc.refreshRepo.Revoke(ctx, stored.ID, "")
+	// La revocación y el evento de logout (auditoría) se guardan juntos.
+	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.refreshRepo.Revoke(ctx, stored.ID, ""); err != nil {
+			return err
+		}
+		return uc.publisher.Publish(ctx, domain.NewUserLoggedOutEvent(stored.TenantID, stored.UserID))
+	})
 }

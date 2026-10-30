@@ -4,33 +4,34 @@
 > **Migraciones:** [`000004_audit_init`](../../migrations/000004_audit_init.up.sql),
 > [`000024_audit_chain_integrity`](../../migrations/000024_audit_chain_integrity.up.sql),
 > [`000025_audit_hash_payload`](../../migrations/000025_audit_hash_payload.up.sql)
-> **Streams NATS consumidos:** `AUTH` (`auth.>`), `LEDGER` (`ledger.>`) — no publica eventos
+> **Streams NATS consumidos:** `AUTH`, `LEDGER`, `ONBOARDING`, `PAYMENT`, `PAYOUT`, `BILLING`, `DISPUTE`, `WEBHOOK`, `COMPLIANCE`, `RECONCILIATION` (§7.1) — no publica eventos
 
 ---
 
 ## 1. Propósito
 
 Audit mantiene una **bitácora de acciones sensibles** de la plataforma:
-altas y suspensiones de comercios, usuarios, API keys, cambios de rol y
-movimientos contables. Cada registro queda encadenado al anterior con un
+comercios, usuarios, sesiones, API keys y roles; movimientos contables;
+decisiones de KYC; reembolsos, desembolsos y disputas; planes de billing;
+configuración de webhooks; alertas y decisiones de cumplimiento; y
+conciliaciones. Cada registro queda encadenado al anterior con un
 **hash chain** (SHA-256): si alguien modifica una fila, la verificación de la
 cadena lo detecta.
 
 El contexto es **escritura reactiva + consulta**:
 
-- La *escritura* ocurre en `cmd/worker`: consumers de `AUTH` y `LEDGER`
-  traducen cada evento de dominio a una entrada del log. No hay endpoint HTTP
+- La *escritura* ocurre en `cmd/worker`: un consumer por stream (§7.1)
+  traduce cada evento de dominio del catálogo (§5.1) a una entrada del log. No hay endpoint HTTP
   que escriba en la bitácora.
 - La *consulta* (listar entradas) y la *verificación de integridad* de la
   cadena ocurren en `cmd/api`.
 
 ### Fuera de alcance (hoy)
 
-- Auditoría de los demás contextos: Onboarding, Payment, Payout, Billing,
-  Dispute, Webhook y Compliance (incluidas las decisiones four-eyes) **no** se
-  registran (§10).
-- Acciones que no pasan por un evento: `auth.user.login` / `auth.user.logout`
-  están definidas en el dominio pero nadie las registra.
+- Eventos de alto volumen que no son acciones sensibles: `payment.captured` /
+  `payment.failed` (el movimiento de dinero ya queda auditado por
+  `ledger.entry.posted`) y `webhook.delivery.*` (operación interna).
+- Intentos de login fallidos: solo se audita el login exitoso.
 - Anclaje externo de la cadena (publicar periódicamente el último hash fuera
   de la base): sin él, quien controla la base puede reescribir la cadena
   completa de forma consistente.
@@ -57,14 +58,14 @@ El contexto es **escritura reactiva + consulta**:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant SRC as Auth / Ledger (Outbox → NATS)
+    participant SRC as Contextos (Outbox → NATS)
     participant W as cmd/worker · EventConsumer
     participant UC as RecordActionUseCase
     participant DB as PostgreSQL (audit_log)
     actor U as Admin del tenant / platform_support (JWT)
     participant API as cmd/api · AuditHandler
 
-    SRC->>W: auth.* / ledger.* (JetStream)
+    SRC->>W: evento del catálogo (JetStream)
     W->>W: mapEvent(subject) → RecordActionCmd
     alt subject sin mapeo o payload inválido
         W-->>SRC: ack (se descarta, con warning)
@@ -161,8 +162,8 @@ Archivos: [domain/vo.go](../../context/audit/domain/vo.go),
 
 | Elemento | Regla |
 |---|---|
-| `Action` | String no vacío (`ParseAction` solo rechaza vacío: **no** valida contra el catálogo). Catálogo: 8 de Auth, 3 de Ledger, `auth.user.login`/`logout` (sin uso). |
-| `ResourceType` | `tenant`, `user`, `api_key`, `journal_entry`, `ledger_account` (`ParseResourceType` valida). |
+| `Action` | String no vacío (`ParseAction` solo rechaza vacío: **no** valida contra el catálogo). Se deriva del subject sin el sufijo de versión. |
+| `ResourceType` | `tenant`, `user`, `api_key`, `journal_entry`, `ledger_account`, `application`, `payment`, `payout`, `billing_plan`, `tenant_plan`, `dispute`, `webhook_endpoint`, `aml_alert`, `reconciliation_run` (`ParseResourceType` valida). |
 | `ErrInvalidAction` | Acción vacía. |
 | `ErrInvalidResourceType` | Recurso fuera del catálogo. |
 | `ErrLogEntryNotFound`, `ErrChainBroken` | Definidos, **sin uso**. |
@@ -202,23 +203,39 @@ alcanza**, ni siquiera dentro de la transacción: en READ COMMITTED el segundo
 lector, al obtener el lock, revalida la misma fila vieja en lugar de ver la
 recién insertada.
 
-Mapeo evento → entrada ([inbound/nats/event_consumer.go](../../context/audit/infrastructure/adapters/inbound/nats/event_consumer.go)):
+Catálogo evento → entrada ([inbound/nats/event_consumer.go](../../context/audit/infrastructure/adapters/inbound/nats/event_consumer.go),
+mapa `mappings`). `action` = subject sin el sufijo de versión
+(`auth.tenant.created.v1` → `auth.tenant.created`); cada subject declara el
+tipo de recurso y el campo del payload con su ID:
 
-| Subject | `action` | `resource_type` | `resource_id` |
+| Subjects | `resource_type` | `resource_id` | Notas |
 |---|---|---|---|
-| `auth.tenant.created.v1` | `auth.tenant.created` | `tenant` | `tenant_id` |
-| `auth.tenant.activated.v1` | `auth.tenant.activated` | `tenant` | `tenant_id` |
-| `auth.tenant.suspended.v1` | `auth.tenant.suspended` | `tenant` | `tenant_id` |
-| `auth.user.registered.v1` | `auth.user.registered` | `user` | `user_id` |
-| `auth.user.suspended.v1` | `auth.user.suspended` | `user` | `user_id` |
-| `auth.apikey.issued.v1` | `auth.apikey.issued` | `api_key` | `api_key_id` |
-| `auth.apikey.revoked.v1` | `auth.apikey.revoked` | `api_key` | `api_key_id` |
-| `auth.role.assigned.v1` | `auth.role.assigned` | `user` | `user_id` |
-| `ledger.account.created.v1` | `ledger.account.created` | `ledger_account` | `account_id` |
-| `ledger.entry.posted.v1` | `ledger.entry.posted` | `journal_entry` | `entry_id` |
-| `ledger.entry.reversed.v1` | `ledger.entry.reversed` | `journal_entry` | `entry_id` |
+| `auth.tenant.{created,activated,suspended}.v1` | `tenant` | `tenant_id` | |
+| `auth.user.{registered,suspended}.v1` | `user` | `user_id` | |
+| `auth.user.{login,logout}.v1` | `user` | `user_id` | actor = `user_id` del payload |
+| `auth.apikey.{issued,revoked}.v1` | `api_key` | `api_key_id` | |
+| `auth.role.assigned.v1` | `user` | `user_id` | actor = `assigned_by` del payload |
+| `ledger.account.created.v1` | `ledger_account` | `account_id` | |
+| `ledger.entry.posted.v1` | `journal_entry` | `entry_id` | |
+| `ledger.entry.reversed.v1` | `journal_entry` | `reverse_entry_id` | `metadata.original_entry_id` |
+| `onboarding.application.{submitted,sent_for_review,approved,rejected,more_info,reopened}.v1` | `application` | `application_id` | |
+| `payment.refunded.v1` | `payment` | `payment_id` | |
+| `payout.{initiated,confirmed,failed,unknown}.v1` | `payout` | `payout_id` | |
+| `billing.plan.{created,updated,deactivated}.v1` | `billing_plan` | `plan_id` | sin tenant (plataforma) |
+| `billing.plan.assigned.v1` | `tenant_plan` | `tenant_plan_id` | |
+| `dispute.{opened,resolved}.v1` | `dispute` | `dispute_id` | |
+| `webhook.endpoint.{registered,deactivated}.v1` | `webhook_endpoint` | `endpoint_id` | |
+| `compliance.alert.{raised,review_proposed,proposal_rejected,resolved}.v1` | `aml_alert` | `alert_id` | |
+| `compliance.sanction.{matched,cleared,confirmed}.v1` | `aml_alert` | `alert_id` | |
+| `reconciliation.run.completed.v1` | `reconciliation_run` | `run_id` | |
 
-`tenant_id` sale del payload del evento; `metadata = {event_subject}`.
+Agregar un evento auditado = una línea en `mappings` (y, si es de un stream
+nuevo, una entrada en `Subscriptions`). `TestCatalogConsistency` falla si un
+subject mapeado no lo entrega ninguna suscripción, si una suscripción no tiene
+subjects mapeados o si un tipo de recurso no existe en el dominio.
+
+`tenant_id` sale del payload del evento; `metadata = {event_subject}` (más los
+campos extra que declare el mapeo).
 
 **Actor y correlation ID**: el `EventPublisher` del outbox
 ([pkg/outbox/outbox.go](../../pkg/outbox/outbox.go)) agrega a **todo** evento
@@ -226,8 +243,9 @@ los headers `actor` (`postgres.ActorFromContext`: userID del JWT,
 `apikey:<id>`, o `system` si el evento nace en el worker) y `correlation-id`
 (el de `CorrelationIDMiddleware`, si lo hay). El relay los conserva y Audit
 los usa como `actor` y `correlation_id` de la entrada. Sin header `actor`
-(mensajes anteriores al cambio) queda `system`, salvo `auth.role.assigned`,
-que usa `assigned_by` del payload. Los webhooks reenvían solo el payload: los
+queda `system`. Si el mapeo declara un campo de actor en el payload (login,
+logout, asignación de rol), ese tiene prioridad: es el sujeto del hecho (en un
+login todavía no hay JWT). Los webhooks reenvían solo el payload: los
 headers no le llegan al comercio.
 
 Manejo de errores del consumer: subject sin mapeo o payload que no es JSON →
@@ -314,17 +332,25 @@ Audit **no publica** eventos de dominio.
 
 ### 7.1 Consumidores (este BC consume)
 
-Se arrancan en [cmd/worker/main.go](../../cmd/worker/main.go) como dos
-goroutines durables **concurrentes** (serializadas al escribir por
-`LockChain`, §5.1):
+Se arrancan en [cmd/worker/main.go](../../cmd/worker/main.go), una goroutine
+durable por suscripción (`auditnats.Subscriptions`), **concurrentes** entre sí
+y serializadas al escribir por `LockChain` (§5.1). `MaxDeliver: 5`.
 
-| Consumer | Stream | Filtro | MaxDeliver |
-|---|---|---|---|
-| `audit-auth-consumer` | `AUTH` | `auth.>` | 5 |
-| `audit-ledger-consumer` | `LEDGER` | `ledger.>` | 5 |
+| Consumer | Stream | Filtro |
+|---|---|---|
+| `audit-auth-consumer` | `AUTH` | `auth.>` |
+| `audit-ledger-consumer` | `LEDGER` | `ledger.>` |
+| `audit-onboarding-consumer` | `ONBOARDING` | `onboarding.>` |
+| `audit-payment-consumer` | `PAYMENT` | `payment.refunded.>` |
+| `audit-payout-consumer` | `PAYOUT` | `payout.>` |
+| `audit-billing-consumer` | `BILLING` | `billing.>` |
+| `audit-dispute-consumer` | `DISPUTE` | `dispute.>` |
+| `audit-webhook-consumer` | `WEBHOOK` | `webhook.endpoint.>` |
+| `audit-compliance-consumer` | `COMPLIANCE` | `compliance.>` |
+| `audit-reconciliation-consumer` | `RECONCILIATION` | `reconciliation.>` |
 
-Eventos de Auth sin mapeo (se descartan con ack): ninguno a la fecha. Eventos
-de otros streams: no se consumen.
+Los filtros de `PAYMENT` y `WEBHOOK` dejan afuera los eventos de alto volumen
+(capturas y fallos de pago, entregas de webhooks).
 
 ---
 
@@ -395,12 +421,11 @@ catálogo se reconstituye como vacío.
 
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
-| 1 | Cobertura parcial | Solo `AUTH` y `LEDGER`. No se auditan Onboarding (decisiones KYC), Payment, Payout, Billing, Dispute, Webhook ni Compliance (holds, four-eyes, cambios de watchlist). `login`/`logout` definidos y sin uso. | Medio |
-| 2 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
-| 3 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
-| 4 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
-| 5 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
-| 6 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
+| 1 | Append-only no reforzado | Sin trigger ni permisos revocados; el borrado de la cola de la cadena no es detectable y no hay anclaje externo del último hash. | Medio |
+| 2 | Verificación por lotes incompleta | Con `from_id > 0` no se verifica el enlace con la fila previa; límite sin máximo (un `limit` enorme carga todo en memoria). `VerifyChainResult` sin tags JSON. | Bajo |
+| 3 | Duplicados ante re-entrega | No hay idempotencia por ID de evento: si el ack se pierde tras el INSERT, la re-entrega crea una segunda entrada. | Bajo |
+| 4 | Pérdidas silenciosas | Subject sin mapeo o payload inválido → ack con warning: la entrada se pierde sin alerta. `ParseAction` acepta cualquier string; errores `ErrLogEntryNotFound`/`ErrChainBroken` sin uso; código muerto en `mapEvent` (`_ = postgres.WithTenantID`). | Bajo |
+| 5 | Hora de procesamiento | `created_at` es la hora del worker, no el header `occurred-at` del evento. | Bajo |
 
 ---
 
@@ -411,7 +436,7 @@ catálogo se reconstituye como vacío.
 | Dominio | `domain/log_entry_test.go`, `vo_test.go` | Unitarios: hash determinista, todos los campos cubiertos (incl. `metadata`/`correlation_id`), orden de claves y `nil` vs `{}`, sin colisiones por separador, `VerifyHash` con manipulación, `ChainLinksTo`, parseo de VOs. |
 | Aplicación | `application/record_action_test.go`, `verify_chain_test.go`, `list_logs_test.go` (+ `mocks_test.go`) | Unitarios con repo en memoria: encadenamiento, cadena rota, límites. |
 | HTTP | `inbound/http/audit_handler_test.go` | Handlers Gin con `httptest`: tenant por defecto del JWT, 200/409/500, rutas. |
-| NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject, actor y correlation ID desde headers, ack de desconocidos, nak ante error, configs de consumers. |
+| NATS | `inbound/nats/event_consumer_test.go` | `mapEvent` por subject del catálogo, actor (header vs payload) y correlation ID, ack de desconocidos, nak ante error, consistencia catálogo ↔ suscripciones ↔ dominio, nombres de durables. |
 | Outbox | `pkg/outbox/publisher_test.go` | Headers `actor` y `correlation-id` desde el contexto (request y worker). |
 | Crypto | `outbound/crypto/sha256_hasher_test.go` | SHA-256 real. |
 | Postgres | `outbound/postgres/audit_log_repo_test.go`, `audit_log_repo_pgxmock_test.go` | `scanEntry` con filas falsas y SQL esperado con pgxmock. |
@@ -445,7 +470,7 @@ context/audit/
 └── infrastructure/adapters/
     ├── inbound/
     │   ├── http/audit_handler.go     # AuditHandler + RouteGuards + RegisterRoutes (3 rutas)
-    │   └── nats/event_consumer.go    # consumers AUTH + LEDGER, mapEvent
+    │   └── nats/event_consumer.go    # Subscriptions (10 streams), catálogo mappings, mapEvent
     └── outbound/
         ├── crypto/sha256_hasher.go
         └── postgres/audit_log_repo.go
@@ -453,4 +478,4 @@ context/audit/
 
 Cableado: [cmd/api/main.go](../../cmd/api/main.go) (`ListLogs`, `VerifyChain`,
 `RouteGuards`) y [cmd/worker/main.go](../../cmd/worker/main.go)
-(`RecordAction` con `TxManager` + los dos consumers).
+(`RecordAction` con `TxManager` + un consumer por suscripción).

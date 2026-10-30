@@ -188,9 +188,9 @@ Directorio: [application/](../../context/auth/application/)
 | `SuspendTenant` | Motivo no vacío; tenant no suspendido | `suspended` | `auth.tenant.suspended.v1` |
 | `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password no vacío; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
 | `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol asignable por el tenant (no `platform_support` ni `compliance_officer`) | Crea o actualiza la Membership | `auth.role.assigned.v1` |
-| `Authenticate` | Tenant no suspendido; usuario activo; password correcto; membership existente | Access + refresh token | — |
+| `Authenticate` | Tenant no suspendido; usuario activo; password correcto; membership existente | Access + refresh token (el refresh token y el evento se guardan en la misma tx) | `auth.user.login.v1` |
 | `RefreshToken` | Token vigente y no revocado; usuario y tenant OK | Nuevo par; revoca el anterior (`replaced_by`) | — |
-| `Logout` | — (idempotente) | Revoca el refresh token | — |
+| `Logout` | — (idempotente) | Revoca el refresh token (en tx con el evento) | `auth.user.logout.v1` |
 | `IssueApiKey` | Tenant **activo**; para `production`, el tenant debe estar en `production`; ≥1 scope válido | API key nueva | `auth.apikey.issued.v1` |
 | `RevokeApiKey` | La key pertenece al tenant del caller | Revocada | `auth.apikey.revoked.v1` |
 | `ProvisionPlatformUser` | Solo CLI ([cmd/provision](../../cmd/provision/main.go)); rol de **plataforma** (`compliance_officer`/`platform_support`), el inverso de `RegisterUser`; mismas validaciones de tenant, email y password | User `active` + Membership | `auth.user.registered.v1` |
@@ -200,7 +200,7 @@ Directorio: [application/](../../context/auth/application/)
 
 Detalles relevantes:
 
-- **Transacciones:** los comandos que mutan agregados usan `RunInTx { repo.Save/Update; publisher.Publish }` (Outbox). `Authenticate`, `RefreshToken` y `Logout` **no** usan transacción: escriben directo al pool.
+- **Transacciones:** los comandos que mutan agregados usan `RunInTx { repo.Save/Update; publisher.Publish }` (Outbox). `Authenticate` y `Logout` guardan/revocan el refresh token y publican el evento de sesión (auditoría) en la misma tx; `RefreshToken` escribe directo al pool.
 - **Hash fuera de la tx:** `RegisterUser` e `IssueApiKey` calculan Argon2 (~80 ms) antes de abrir la transacción.
 - **Anti-enumeración en login:** email inexistente o tenant inexistente → `ErrInvalidCredentials`. Pero un tenant suspendido (403) o un usuario suspendido (403) se informan **antes** de verificar la contraseña.
 - **`RegisterUser` no publica `RoleAssigned`:** el rol inicial queda registrado solo en `user.registered.v1`, que no incluye el rol.
@@ -317,7 +317,7 @@ Errores particulares:
 
 ## 7. Eventos de dominio
 
-Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican por Outbox en el stream `AUTH` con los headers estándar (`Nats-Msg-Id`, `event-type`, `content-type` y `occurred-at`; ver ONBOARDING.MD §7).
+Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican por Outbox en el stream `AUTH` con los headers estándar (`Nats-Msg-Id`, `event-type`, `content-type`, `occurred-at`, `actor` y `correlation-id`; ver ONBOARDING.MD §7 y AUDIT.MD §5.1).
 
 | Subject | Payload | Emitido por |
 |---|---|---|
@@ -326,6 +326,8 @@ Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican po
 | `auth.tenant.suspended.v1` | `tenant_id`, `reason` | `SuspendTenant` |
 | `auth.user.registered.v1` | `tenant_id`, `user_id`, `email` | `RegisterUser` |
 | `auth.user.suspended.v1` | `tenant_id`, `user_id` | **Nunca** (no hay caso de uso) |
+| `auth.user.login.v1` | `tenant_id`, `user_id` | `Authenticate` (login exitoso) |
+| `auth.user.logout.v1` | `tenant_id`, `user_id` | `Logout` (sesión revocada) |
 | `auth.apikey.issued.v1` | `tenant_id`, `api_key_id`, `prefix`, `environment` | `IssueApiKey` |
 | `auth.apikey.revoked.v1` | `tenant_id`, `api_key_id` | `RevokeApiKey` |
 | `auth.role.assigned.v1` | `tenant_id`, `user_id`, `role`, `assigned_by` | `AssignRole` |
@@ -336,7 +338,7 @@ Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican po
 |---|---|---|
 | **Audit** | `auth.>` | Registra cada evento en la bitácora encadenada. |
 | **Notification** | `auth.tenant.suspended.>` | Email de suspensión al comercio. |
-| **Webhook** | `auth.tenant.>` | Entrega a los endpoints del comercio. |
+| **Webhook** | `auth.tenant.>` | Entrega a los endpoints del comercio (los eventos de sesión `auth.user.*` no se reenvían). |
 
 > Ningún BC de negocio (Payment, Payout, Ledger, etc.) reacciona a `auth.tenant.suspended.v1` ni consulta `tenants.status`. Un tenant suspendido sigue operando con los tokens y API keys vigentes.
 
@@ -486,7 +488,7 @@ context/auth/
 │   ├── membership.go      # Membership + matriz de permisos (sin uso)
 │   ├── apikey.go          # Agregado ApiKey + ParseRawApiKey
 │   ├── vo.go              # IDs, Email, Role, Environment, Scope
-│   ├── events.go          # 8 eventos
+│   ├── events.go          # 10 eventos
 │   └── errors.go
 ├── application/
 │   ├── ports.go           # Repos, PasswordHasher, TokenIssuer, EventPublisher, Clock

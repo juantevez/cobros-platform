@@ -171,16 +171,13 @@ func main() {
 			logger.Error("relay stopped", "error", err); cancel()
 		}
 	}()
-	go func() {
-		if err := auditConsumer.StartAuthConsumer(ctx); err != nil {
-			logger.Error("audit auth consumer stopped", "error", err)
-		}
-	}()
-	go func() {
-		if err := auditConsumer.StartLedgerConsumer(ctx); err != nil {
-			logger.Error("audit ledger consumer stopped", "error", err)
-		}
-	}()
+	for _, sub := range auditnats.Subscriptions {
+		go func(sub auditnats.Subscription) {
+			if err := auditConsumer.Start(ctx, sub); err != nil {
+				logger.Error("audit consumer stopped", "consumer", sub.Name, "error", err)
+			}
+		}(sub)
+	}
 	go func() {
 		if err := authOnboardingConsumer.Start(ctx); err != nil {
 			logger.Error("auth onboarding consumer stopped", "error", err)

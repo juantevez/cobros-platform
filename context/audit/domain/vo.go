@@ -18,13 +18,13 @@ const (
 	ActionRoleAssigned    Action = "auth.role.assigned"
 
 	// Ledger
-	ActionAccountCreated  Action = "ledger.account.created"
-	ActionEntryPosted     Action = "ledger.entry.posted"
-	ActionEntryReversed   Action = "ledger.entry.reversed"
+	ActionAccountCreated Action = "ledger.account.created"
+	ActionEntryPosted    Action = "ledger.entry.posted"
+	ActionEntryReversed  Action = "ledger.entry.reversed"
 
 	// Sistema (acciones directas, no via evento)
-	ActionLogin           Action = "auth.user.login"
-	ActionLogout          Action = "auth.user.logout"
+	ActionLogin  Action = "auth.user.login"
+	ActionLogout Action = "auth.user.logout"
 )
 
 func (a Action) String() string { return string(a) }
@@ -40,17 +40,29 @@ func ParseAction(s string) (Action, error) {
 type ResourceType string
 
 const (
-	ResourceTenant  ResourceType = "tenant"
-	ResourceUser    ResourceType = "user"
-	ResourceApiKey  ResourceType = "api_key"
-	ResourceEntry   ResourceType = "journal_entry"
-	ResourceAccount ResourceType = "ledger_account"
+	ResourceTenant            ResourceType = "tenant"
+	ResourceUser              ResourceType = "user"
+	ResourceApiKey            ResourceType = "api_key"
+	ResourceEntry             ResourceType = "journal_entry"
+	ResourceAccount           ResourceType = "ledger_account"
+	ResourceApplication       ResourceType = "application" // solicitud de onboarding (KYC)
+	ResourcePayment           ResourceType = "payment"
+	ResourcePayout            ResourceType = "payout"
+	ResourceBillingPlan       ResourceType = "billing_plan"
+	ResourceTenantPlan        ResourceType = "tenant_plan"
+	ResourceDispute           ResourceType = "dispute"
+	ResourceWebhookEndpoint   ResourceType = "webhook_endpoint"
+	ResourceAMLAlert          ResourceType = "aml_alert"
+	ResourceReconciliationRun ResourceType = "reconciliation_run"
 )
 
 func ParseResourceType(s string) (ResourceType, error) {
 	rt := ResourceType(s)
 	switch rt {
-	case ResourceTenant, ResourceUser, ResourceApiKey, ResourceEntry, ResourceAccount:
+	case ResourceTenant, ResourceUser, ResourceApiKey, ResourceEntry, ResourceAccount,
+		ResourceApplication, ResourcePayment, ResourcePayout, ResourceBillingPlan,
+		ResourceTenantPlan, ResourceDispute, ResourceWebhookEndpoint, ResourceAMLAlert,
+		ResourceReconciliationRun:
 		return rt, nil
 	}
 	return "", fmt.Errorf("%w: %q", ErrInvalidResourceType, s)
