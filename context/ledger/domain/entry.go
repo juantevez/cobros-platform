@@ -130,24 +130,13 @@ func NewJournalEntry(
 		createdAt:      now,
 	}
 
-	// Construir el evento con los postings serializables.
-	postingEvents := make([]PostingEvent, len(postings))
-	for i, p := range postings {
-		postingEvents[i] = PostingEvent{
-			AccountID: p.AccountID().String(),
-			Direction: p.Direction().String(),
-			Amount:    p.Money().Amount(),
-			Currency:  p.Money().Currency(),
-		}
-	}
-
 	e.record(EntryPostedEvent{
 		baseEvent:      newBase(tenantID.String()),
 		EntryID:        id.String(),
 		TenantID:       tenantID.String(),
 		IdempotencyKey: idempotencyKey,
 		Description:    description,
-		Postings:       postingEvents,
+		Postings:       toPostingEvents(postings),
 	})
 
 	return e, nil
@@ -208,6 +197,7 @@ func (e *JournalEntry) BuildReverse(reverseID EntryID, reverseIdempotencyKey str
 		ReverseEntryID:  reverseID.String(),
 		OriginalEntryID: e.id.String(),
 		TenantID:        e.tenantID.String(),
+		Postings:        toPostingEvents(reverse.postings),
 	})
 
 	return reverse, nil
@@ -228,6 +218,20 @@ func (e *JournalEntry) PullEvents() []Event {
 	evs := e.events
 	e.events = nil
 	return evs
+}
+
+// toPostingEvents serializa los postings para los eventos de asiento.
+func toPostingEvents(postings []Posting) []PostingEvent {
+	out := make([]PostingEvent, len(postings))
+	for i, p := range postings {
+		out[i] = PostingEvent{
+			AccountID: p.AccountID().String(),
+			Direction: p.Direction().String(),
+			Amount:    p.Money().Amount(),
+			Currency:  p.Money().Currency(),
+		}
+	}
+	return out
 }
 
 func (e *JournalEntry) record(ev Event) { e.events = append(e.events, ev) }

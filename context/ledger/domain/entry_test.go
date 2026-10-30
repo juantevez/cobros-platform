@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -194,6 +195,15 @@ func TestBuildReverse(t *testing.T) {
 	}
 	if reversed.OriginalEntryID != original.ID().String() || reversed.ReverseEntryID != reverseID.String() {
 		t.Errorf("reversed event payload mismatch: %+v", reversed)
+	}
+	// El evento lleva los postings de la reversa: es la única fuente de los
+	// movimientos para quien proyecta (no hay ledger.entry.posted.v1).
+	wantPostings := []PostingEvent{
+		{AccountID: accA.String(), Direction: "credit", Amount: 100, Currency: "ARS"},
+		{AccountID: accB.String(), Direction: "debit", Amount: 100, Currency: "ARS"},
+	}
+	if !reflect.DeepEqual(reversed.Postings, wantPostings) {
+		t.Errorf("reversed postings = %+v\nwant %+v", reversed.Postings, wantPostings)
 	}
 }
 

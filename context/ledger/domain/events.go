@@ -69,6 +69,10 @@ type EntryReversedEvent struct {
 	ReverseEntryID  string `json:"reverse_entry_id"`
 	OriginalEntryID string `json:"original_entry_id"`
 	TenantID        string `json:"tenant_id"`
+	// Postings del asiento de reversa (los del original con la dirección
+	// invertida): los consumidores que proyectan movimientos (Reporting) los
+	// necesitan, porque la reversa no emite ledger.entry.posted.v1.
+	Postings []PostingEvent `json:"postings"`
 }
 
 func (e EntryReversedEvent) EventType() string { return "ledger.entry.reversed.v1" }

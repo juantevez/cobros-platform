@@ -90,7 +90,7 @@ func TestStartConsumers(t *testing.T) {
 			Stream: "PAYMENT", Name: "reporting-payment-consumer", FilterSubject: "payment.captured.>", MaxDeliver: 5,
 		}},
 		{"ledger", (*EventConsumer).StartLedgerConsumer, eventbus.ConsumerConfig{
-			Stream: "LEDGER", Name: "reporting-ledger-consumer", FilterSubject: "ledger.entry.posted.>", MaxDeliver: 5,
+			Stream: "LEDGER", Name: "reporting-ledger-consumer", FilterSubject: "ledger.entry.>", MaxDeliver: 5,
 		}},
 	}
 	for _, tc := range cases {
@@ -261,9 +261,66 @@ func TestHandle_EntryPosted(t *testing.T) {
 	})
 }
 
+func TestHandle_EntryReversed(t *testing.T) {
+	ctx := context.Background()
+	reversal := `{"reverse_entry_id":"r-1","original_entry_id":"e-1","tenant_id":"t-1","postings":[` +
+		`{"account_id":"acc-1","direction":"debit","amount":500,"currency":"ARS"},` +
+		`{"account_id":"acc-2","direction":"credit","amount":500,"currency":"ARS"}]}`
+
+	t.Run("projects the reversal postings under the reverse entry", func(t *testing.T) {
+		w := &fakeWriter{}
+		m := withOccurredAt(msg("ledger.entry.reversed.v1", reversal), "2026-09-20T10:00:00Z")
+		if err := newConsumer(&fakeBus{}, w).handle(ctx, m); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		at := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+		want := []domain.LedgerMovement{
+			{EntryID: "r-1", AccountID: "acc-1", Direction: "debit", TenantID: "t-1", AccountType: "merchant_balance", Currency: "ARS", Amount: 500, PostedAt: at},
+			{EntryID: "r-1", AccountID: "acc-2", Direction: "credit", TenantID: "t-1", AccountType: "", Currency: "ARS", Amount: 500, PostedAt: at},
+		}
+		if !reflect.DeepEqual(w.movements, want) {
+			t.Errorf("movements = %+v\nwant %+v", w.movements, want)
+		}
+	})
+
+	t.Run("reversal without postings is acked without projecting", func(t *testing.T) {
+		w := &fakeWriter{err: errBoom}
+		err := newConsumer(&fakeBus{}, w).handle(ctx, msg("ledger.entry.reversed.v1",
+			`{"reverse_entry_id":"r-1","original_entry_id":"e-1","tenant_id":"t-1"}`))
+		if err != nil {
+			t.Fatalf("expected ack, got %v", err)
+		}
+	})
+
+	for _, payload := range []string{`[]`, `{"reverse_entry_id":"r-1","postings":[]}`} {
+		t.Run("acks malformed payload: "+payload, func(t *testing.T) {
+			w := &fakeWriter{err: errBoom}
+			if err := newConsumer(&fakeBus{}, w).handle(ctx, msg("ledger.entry.reversed.v1", payload)); err != nil {
+				t.Fatalf("expected ack, got %v", err)
+			}
+		})
+	}
+
+	t.Run("reversal without reverse id is acked as invalid fact", func(t *testing.T) {
+		w := &fakeWriter{}
+		err := newConsumer(&fakeBus{}, w).handle(ctx, msg("ledger.entry.reversed.v1",
+			`{"tenant_id":"t-1","postings":[{"account_id":"acc-1","direction":"debit","amount":1,"currency":"ARS"}]}`))
+		if err != nil || len(w.movements) != 0 {
+			t.Fatalf("expected ack without projection, got %v (%d)", err, len(w.movements))
+		}
+	})
+
+	t.Run("projection error naks for retry", func(t *testing.T) {
+		w := &fakeWriter{err: errBoom}
+		if err := newConsumer(&fakeBus{}, w).handle(ctx, msg("ledger.entry.reversed.v1", reversal)); !errors.Is(err, errBoom) {
+			t.Fatalf("expected errBoom, got %v", err)
+		}
+	})
+}
+
 func TestHandle_IgnoresOtherSubjects(t *testing.T) {
 	w := &fakeWriter{err: errBoom} // si se proyectara algo, fallaría
-	for _, subject := range []string{"payment.failed.v1", "payment.captured.v2", "ledger.entry.reversed.v1", ""} {
+	for _, subject := range []string{"payment.failed.v1", "payment.captured.v2", "ledger.entry.reversed.v2", "ledger.account.created.v1", ""} {
 		if err := newConsumer(&fakeBus{}, w).handle(context.Background(), msg(subject, `{"tenant_id":"t-1"}`)); err != nil {
 			t.Errorf("subject %q should be acked silently, got %v", subject, err)
 		}

@@ -16,7 +16,9 @@ import (
 //
 // Consume dos fuentes:
 //   - PAYMENT (payment.captured.v1)  → volumen y revenue
-//   - LEDGER  (ledger.entry.posted.v1) → balances por comercio
+//   - LEDGER  (ledger.entry.posted.v1 y ledger.entry.reversed.v1) → balances
+//     por comercio. La reversa no emite entry.posted: sus movimientos vienen
+//     en el propio evento de reversa.
 type EventConsumer struct {
 	consumer eventbus.Consumer
 	project  *application.ProjectEventsUseCase
@@ -41,7 +43,7 @@ func (c *EventConsumer) StartPaymentConsumer(ctx context.Context) error {
 func (c *EventConsumer) StartLedgerConsumer(ctx context.Context) error {
 	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
 		Stream: "LEDGER", Name: "reporting-ledger-consumer",
-		FilterSubject: "ledger.entry.posted.>", MaxDeliver: 5,
+		FilterSubject: "ledger.entry.>", MaxDeliver: 5,
 	}, c.handle)
 }
 
@@ -56,16 +58,27 @@ type paymentCaptured struct {
 	PaymentMethod string `json:"payment_method"`
 }
 
+// posting refleja un posting de los eventos de asiento del ledger.
+type posting struct {
+	AccountID string `json:"account_id"`
+	Direction string `json:"direction"`
+	Amount    int64  `json:"amount"`
+	Currency  string `json:"currency"`
+}
+
 // entryPosted refleja el payload de ledger.entry.posted.v1.
 type entryPosted struct {
-	EntryID  string `json:"entry_id"`
-	TenantID string `json:"tenant_id"`
-	Postings []struct {
-		AccountID string `json:"account_id"`
-		Direction string `json:"direction"`
-		Amount    int64  `json:"amount"`
-		Currency  string `json:"currency"`
-	} `json:"postings"`
+	EntryID  string    `json:"entry_id"`
+	TenantID string    `json:"tenant_id"`
+	Postings []posting `json:"postings"`
+}
+
+// entryReversed refleja el payload de ledger.entry.reversed.v1.
+type entryReversed struct {
+	ReverseEntryID  string    `json:"reverse_entry_id"`
+	OriginalEntryID string    `json:"original_entry_id"`
+	TenantID        string    `json:"tenant_id"`
+	Postings        []posting `json:"postings"`
 }
 
 func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error {
@@ -74,6 +87,8 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 		return c.handlePaymentCaptured(ctx, msg)
 	case "ledger.entry.posted.v1":
 		return c.handleEntryPosted(ctx, msg)
+	case "ledger.entry.reversed.v1":
+		return c.handleEntryReversed(ctx, msg)
 	default:
 		return nil // evento no relevante para reporting → ack silencioso
 	}
@@ -104,24 +119,54 @@ func (c *EventConsumer) handleEntryPosted(ctx context.Context, msg *eventbus.Mes
 	if err := json.Unmarshal(msg.Payload, &e); err != nil || e.TenantID == "" {
 		return nil
 	}
-	postings := make([]application.PostingCmd, 0, len(e.Postings))
-	for _, p := range e.Postings {
-		postings = append(postings, application.PostingCmd{
+	if err := c.project.ProjectEntryPosted(ctx, application.EntryPostedCmd{
+		EntryID:    e.EntryID,
+		TenantID:   e.TenantID,
+		Postings:   toPostingCmds(e.Postings),
+		OccurredAt: occurredAt(msg),
+	}); err != nil {
+		return c.projectionFailed(err, "entry_id", e.EntryID)
+	}
+	return nil
+}
+
+// handleEntryReversed proyecta el asiento de reversa como cualquier asiento:
+// sus postings (los del original con la dirección invertida) restan lo que
+// el original sumó en los saldos.
+func (c *EventConsumer) handleEntryReversed(ctx context.Context, msg *eventbus.Message) error {
+	var e entryReversed
+	if err := json.Unmarshal(msg.Payload, &e); err != nil || e.TenantID == "" {
+		return nil
+	}
+	if len(e.Postings) == 0 {
+		// Eventos publicados antes de que la reversa llevara sus postings: no
+		// hay con qué proyectarla.
+		c.logger.Warn("reporting: reversal without postings, balances will not reflect it",
+			"reverse_entry_id", e.ReverseEntryID, "original_entry_id", e.OriginalEntryID)
+		return nil
+	}
+	if err := c.project.ProjectEntryPosted(ctx, application.EntryPostedCmd{
+		EntryID:    e.ReverseEntryID,
+		TenantID:   e.TenantID,
+		Postings:   toPostingCmds(e.Postings),
+		OccurredAt: occurredAt(msg),
+	}); err != nil {
+		return c.projectionFailed(err, "entry_id", e.ReverseEntryID)
+	}
+	return nil
+}
+
+func toPostingCmds(postings []posting) []application.PostingCmd {
+	out := make([]application.PostingCmd, 0, len(postings))
+	for _, p := range postings {
+		out = append(out, application.PostingCmd{
 			AccountID: p.AccountID,
 			Direction: p.Direction,
 			Amount:    p.Amount,
 			Currency:  p.Currency,
 		})
 	}
-	if err := c.project.ProjectEntryPosted(ctx, application.EntryPostedCmd{
-		EntryID:    e.EntryID,
-		TenantID:   e.TenantID,
-		Postings:   postings,
-		OccurredAt: occurredAt(msg),
-	}); err != nil {
-		return c.projectionFailed(err, "entry_id", e.EntryID)
-	}
-	return nil
+	return out
 }
 
 // projectionFailed decide entre ack y nak ante un error de proyección.
