@@ -1,7 +1,10 @@
 # Notification — Documentación técnico-funcional
 
 > **Bounded Context:** `context/notification`
-> **Migración:** [`000011_notification_init`](../../migrations/000011_notification_init.up.sql)
+> **Migraciones:** [`000011_notification_init`](../../migrations/000011_notification_init.up.sql),
+> [`000016_notification_dedupe`](../../migrations/000016_notification_dedupe.up.sql),
+> [`000028_notification_kyc_template_keys`](../../migrations/000028_notification_kyc_template_keys.up.sql),
+> [`000029_notification_rls_nullif`](../../migrations/000029_notification_rls_nullif.up.sql)
 > **Streams NATS consumidos:** `PAYMENT` (`payment.>`), `PAYOUT` (`payout.>`), `ONBOARDING` (`onboarding.application.>`), `AUTH` (`auth.tenant.suspended.>`)
 
 ---
@@ -9,8 +12,9 @@
 ## 1. Propósito
 
 Notification es el contexto que **avisa al comercio por email** cuando ocurre algo relevante
-en la plataforma (pago capturado, payout confirmado, KYC aprobado/rechazado, suspensión de
-cuenta). No publica eventos propios: es un **consumidor puro** del bus.
+en la plataforma (pago capturado o rechazado, reembolso, payout confirmado o fallido, KYC
+aprobado o rechazado, suspensión de cuenta). No publica eventos propios: es un **consumidor
+puro** del bus.
 
 Responsabilidades:
 
@@ -21,26 +25,27 @@ Responsabilidades:
 5. Enviar el email (SMTP o simulado) y **persistir el intento** como log en `notifications`.
 6. Exponer API HTTP de historial y preferencias.
 
-Diseño deliberadamente **no crítico**: cualquier fallo de envío se loguea y se ackea; nunca
-bloquea ni reintenta (a diferencia de Webhooks, que sí tiene retry poller).
+Diseño **no crítico pero sin pérdidas silenciosas**: un fallo de envío se registra como
+`failed` y no se reintenta (a diferencia de Webhooks). Un fallo transitorio de base de datos
+sí hace nak para que JetStream reentregue, y el dedupe evita el doble envío.
 
 ### Estado actual de las integraciones
 
 | Puerto | Implementación cableada | Comentario |
 |---|---|---|
-| `EmailSender` (worker) | `SMTPSender` si `cfg.SMTPHost != ""`, else `LogSender` | `cmd/worker/main.go` es el único que envía: consume los eventos y ejecuta `SendNotification`. Sin `SMTP_HOST` (dev) los emails se loguean. |
-| API | — | `cmd/api/main.go` solo expone historial y preferencias; no instancia sender ni `SendNotification`. |
-| `UserContactReader` | `postgres.ContactReader` | Lee `users ⨝ memberships` (tablas del contexto Auth, misma BD): primer admin `status='active'` ordenado por `memberships.created_at ASC`. |
-| `NotificationRepository` / `PreferenceRepository` | `postgres.*` (pgx pool) | Ver §8. |
-| Consumers NATS | 4, `MaxDeliver: 3` | Pero el handler siempre retorna `nil` → **nunca hay redelivery efectivo** (§7.3). |
+| `EmailSender` (worker) | `SMTPSender` si `cfg.SMTPHost != ""`, si no `LogSender` | `cmd/worker/main.go` es el único que envía. Sin `SMTP_HOST` (dev) los emails se loguean. |
+| API | — | `cmd/api/main.go` solo expone historial y preferencias; no envía. |
+| `UserContactReader` | `postgres.ContactReader` | Lee `users ⨝ memberships` (tablas de Auth, misma BD): primer admin `status='active'` por `memberships.created_at ASC`, con sesión RLS del tenant. |
+| `NotificationRepository` / `PreferenceRepository` | `postgres.*` | Toda operación fija `app.current_tenant` (§8). |
+| `Clock` | reloj real (`cmd`) / fijo (tests) | Fechas de creación, envío y actualización. |
+| Consumers NATS | 4, `MaxDeliver: 3` | Nak ante error transitorio; ack en errores permanentes (§7.3). |
 
 ### Fuera de alcance (hoy)
 
-- SMS y push (`ChannelSMS`/`ChannelPush` comentados en `vo.go`, Fase 4).
-- Templates en BD editables por operador (hardcodeados en `domain/template.go`, Fase 4).
-- Reintentos de envío, dedupe anti-doble-email, digest/agregación.
+- SMS y push (`ChannelSMS`/`ChannelPush` comentados en `vo.go`).
+- Reintentos de **envío** (un email `failed` queda registrado y no se reenvía), digest/agregación.
 - Publicar eventos propios (ningún outbox de `notification.*`).
-- Notificaciones in-app / panel de campanita.
+- Notificaciones in-app.
 
 ---
 
@@ -48,12 +53,13 @@ bloquea ni reintenta (a diferencia de Webhooks, que sí tiene retry poller).
 
 | Término | Significado |
 |---|---|
-| **Notificación** (`Notification`) | Registro (log) de un intento de envío a un destinatario. Una fila por intento. |
+| **Notificación** (`Notification`) | Registro (log) de un intento de envío a un destinatario. Una fila por evento procesado. |
 | **Preferencia** (`NotificationPreference`) | Configuración por `(tenant, event_type, channel)`: activa/desactivada + email override. Sin fila = default habilitado. |
-| **Template** | Par subject+body HTML con placeholders `{{.key}}`, indexado por event type normalizado (sin versión). |
-| **Event type normalizado** | Subject sin sufijo de versión: `payment.captured.v1` → `payment.captured`. |
+| **Event type normalizado** | Subject sin sufijo de versión: `payment.captured.v1` → `payment.captured`. Es la **única clave** del pipeline: templates, preferencias (PUT, GET y consumo) y registros. |
+| **Template** | Par subject+body HTML con placeholders `{{.key}}`, indexado por event type normalizado. |
 | **Destinatario (recipient)** | Email de la preferencia si existe; si no, email del admin del tenant. |
-| **Skip silencioso** | Resultado "no se envió y no se registró nada": evento sin template, sin destinatario, o preferencia deshabilitada. |
+| **Skip silencioso** | No se envía ni se registra: evento sin template, preferencia deshabilitada o sin destinatario. |
+| **Dedupe** | Una sola notificación por `(tenant, event_type, nats_msg_id)`: una reentrega del mismo evento no reenvía el email. |
 
 ---
 
@@ -109,90 +115,94 @@ sequenceDiagram
 
 ### 4.1 Agregado `Notification`
 
-Log append-only de intentos. Invariante de estado:
+Log de intentos. Invariante de estado:
 
 ```
-pending ──MarkSent()──▶ sent            (setea sent_at = now UTC)
-        ──MarkFailed(reason)──▶ failed  (guarda error_msg; sent_at queda nil)
+pending ──MarkSent(now)──▶ sent            (sent_at = now)
+        ──MarkFailed(reason)──▶ failed     (error_msg = reason; sent_at nil)
 ```
 
-No hay transiciones desde `sent`/`failed` (los métodos no validan el estado previo, pero el
-use case los llama exactamente una vez sobre agregados recién creados). Campos: id (UUID),
-tenant_id, event_type (crudo, con `.v1`), channel, recipient_email, subject (ya renderizado),
-status, error_msg, sent_at, created_at.
+El caso de uso llama a una sola transición sobre un agregado recién creado; el estado final
+se decide en memoria antes de persistir (INSERT único, sin UPDATE). Campos: id (UUID),
+tenant_id, event_type (**normalizado**), channel, recipient_email, subject (renderizado),
+status, error_msg, sent_at, created_at, nats_msg_id (clave de dedupe; vacío si no viene de
+un evento). Las fechas las provee la aplicación (`Clock`).
 
 ### 4.2 Entidad `NotificationPreference`
 
 Compuesta por `(tenant_id, event_type, channel)`; `enabled bool` + `recipient_email` opcional
 (vacío = usar admin del tenant). Sin máquina de estados: upsert directo.
 
-### 4.3 Value Objects (`vo.go`)
+### 4.3 Value Objects y validaciones
 
-| VO | Validación | Notas |
-|---|---|---|
-| `NotificationID` | ninguno | `NewNotificationID()` genera UUID v4. No existe `ParseNotificationID`. |
-| `TenantID` | `ParseTenantID` exige UUID válido | Se valida en cada entrypoint de aplicación. |
-| `Channel` | solo `"email"` | `sms`/`push` devuelven `ErrInvalidChannel`. |
-| `NotificationStatus` | **sin parseo defensivo** | Reconstruido desde BD con cast directo (`NotificationStatus(statusStr)`); la CHECK de la migración es la única garantía. |
+| Elemento | Regla |
+|---|---|
+| `NotificationID` | UUID v4 (`NewNotificationID`). |
+| `TenantID` | `ParseTenantID` exige UUID (`ErrInvalidTenantID`). |
+| `Channel` | Solo `"email"`; otro valor → `ErrInvalidChannel` (también al leer de la base). |
+| `NotificationStatus` | `pending`/`sent`/`failed`; `ParseStatus` valida al leer de la base (`ErrInvalidStatus`). |
+| `NormalizeEventType` | Quita el sufijo `.vN`. |
+| `ValidateRecipientEmail` | Trim + minúsculas; formato RFC 5322 (`net/mail`) y longitud máxima. Vacío = sin override. |
 
 ### 4.4 Errores (`errors.go`)
 
-| Error | Usado realmente | Dónde |
-|---|---|---|
-| `ErrPreferenceNotFound` | ✅ | Retornado por el repo pg; el use case lo interpreta como "sin preferencia". |
-| `ErrNoRecipientEmail` | ✅ | Retornado por `ContactReader` cuando no hay admin activo. |
-| `ErrNotificationNotFound` | ❌ muerta | No hay operación de búsqueda por ID. |
-| `ErrTemplateNotFound` | ❌ muerta | `FindTemplate` devuelve `(tmpl, bool)`, nunca el error. |
-| `ErrSendFailed` | ❌ muerta | El fallo de SMTP se propaga como error crudo del sender. |
-| `ErrInvalidChannel` | ✅ | `ParseChannel`. |
+| Error | Dónde |
+|---|---|
+| `ErrInvalidTenantID` | Parseo del tenant. En el consumer es permanente → ack con warning. |
+| `ErrPreferenceNotFound` | Repo; el caso de uso lo interpreta como "sin preferencia". |
+| `ErrNoRecipientEmail` | `ContactReader` sin admin activo → skip con warning. |
+| `ErrNotificationDuplicate` | `Save` ante la UNIQUE de dedupe → skip (reentrega). |
+| `ErrInvalidChannel`, `ErrInvalidStatus` | Parseo de VOs (incluida la lectura de la base). |
+
+Errores de aplicación de preferencias (`application/preferences.go`):
+`ErrInvalidPreferenceRequest` (400), `ErrEventTypeUnknown` (404), `ErrPreferenceStore` (500).
 
 ---
 
 ## 5. Casos de uso
 
-### 5.1 `SendNotificationUseCase` (interno, invocado por el consumer)
+### 5.1 `SendNotificationUseCase` (invocado por el consumer)
 
-Firma: `Execute(ctx, SendNotificationCmd{TenantID, EventType, TemplateData}) error`.
+Firma: `Execute(ctx, SendNotificationCmd{TenantID, EventType, TemplateData, NatsMsgID}) error`.
 
-Reglas:
-1. `ParseTenantID` inválido → **único error propagado** (el consumer lo loguea y ackea igual).
-2. Sin template → `nil`, sin registro ("el evento no es notificable").
-3. Preferencia explícitamente deshabilitada → skip silencioso, **sin fila en `notifications`**.
-4. Fallo buscando preferencia o email del admin → skip + `Warn`, sin registro.
-5. Siempre que llega a intentar el envío se persiste una fila (`sent` o `failed`).
-6. Fallo persistiendo el log → solo `Error` en log; `Execute` devuelve `nil`.
+1. `ParseTenantID` inválido → error (el consumer lo trata como permanente: ack).
+2. Normaliza el event type. Sin template → `nil`, sin registro.
+3. Preferencia deshabilitada → skip silencioso. Sin admin activo → skip + `Warn`.
+4. **Dedupe**: si `NatsMsgID` ya está registrado para `(tenant, event_type)` → skip. Si la
+   verificación falla → **error** (nak): se prefiere reintentar antes que arriesgar un doble
+   envío.
+5. Render, envío, `MarkSent`/`MarkFailed` y `Save`. La UNIQUE de dedupe cierra la carrera
+   entre dos entregas concurrentes (`ErrNotificationDuplicate` → skip). Otro fallo de `Save`
+   se loguea y no se propaga (el email ya salió).
 
 ### 5.2 `ListNotificationsUseCase`
 
-`limit <= 0 → 50` (sin tope máximo, ver §10.7). Proyecta a `NotificationView` con fechas RFC3339.
+`limit ≤ 0 → 50`, máximo **200**. Proyecta a `NotificationView` con fechas RFC3339.
 
 ### 5.3 `UpdatePreferenceUseCase`
 
-Rechaza event types sin template registrado (`FindTemplate`). **Siempre fuerza `channel=email`**
-y hace `Upsert` con `enabled` y `recipient_email` tal cual vienen del comando (ver bugs §10.5–10.6).
+- Normaliza el event type; sin template → `ErrEventTypeUnknown` (404).
+- `recipient_email` presente → se valida y canonicaliza; inválido → 400.
+- **Merge**: `recipient_email` omitido conserva el override existente; `""` explícito lo limpia.
+- `channel` siempre `email`; `Upsert` con la sesión RLS del tenant.
 
 ### 5.4 `GetPreferencesUseCase`
 
-Devuelve la unión: cada event type del catálogo con su preferencia guardada o el default
-(`enabled=true`, sin override). Nota: itera claves del mapa `Templates`, por lo que puede
-listar tanto `kyc.approved` como `payout.confirmed`… y también inconsistencias de formato (§10.4).
+Une el catálogo de templates con lo guardado: cada event type normalizado con su preferencia
+o el default (`enabled=true`, sin override). Tolera filas legacy con sufijo de versión.
 
 ---
 
 ## 6. API HTTP
 
-Montadas bajo el grupo `protected` (JWT/middleware de tenant) → `/api/v1/notifications`:
+Grupo `protected` (JWT) → `/api/v1/notifications`. El tenant sale del token; sin tenant en el
+contexto → **403**.
 
-| Método | Ruta | Descripción | Errores |
+| Método | Ruta | Descripción | Respuestas |
 |---|---|---|---|
-| `GET` | `/api/v1/notifications?limit=50` | Historial del tenant, `created_at DESC`. Respuesta: `{notifications:[…], count:n}` | 500 genérico |
-| `GET` | `/api/v1/notifications/preferences` | Preferencias completas (defaults incluidos) | 500 genérico |
-| `PUT` | `/api/v1/notifications/preferences/:eventType` | Body `{"enabled":bool,"recipient_email":string}` → 204 | 400 body inválido; 400 con `err.Error()` filtrado |
-
-Observaciones:
-- El `tenant_id` sale de `postgres.TenantIDFromContext` y **el error se descarta** (`tenantID, _ :=`).
-- `Save`/`Upsert` usan `ConnFromContext(ctx, pool)`: dentro de una tx con tenant setiado aplica
-  RLS; fuera de tx (todos los casos de este contexto) operan con el pool directo (§8).
+| `GET` | `/notifications?limit=50` | Historial del tenant, `created_at DESC` (máx. 200). `{notifications:[…], count}` | 200 · 403 · 500 |
+| `GET` | `/notifications/preferences` | Preferencias completas (defaults incluidos) | 200 · 403 · 500 |
+| `PUT` | `/notifications/preferences/:eventType` | Body `{"enabled":bool,"recipient_email":string?}` | 204 · 400 (body o email inválido) · 403 · 404 (event type sin template) · 500 (sin detalle interno) |
 
 ---
 
@@ -209,129 +219,95 @@ Observaciones:
 
 ### 7.2 Matriz evento → template → datos
 
-`eventPayload` extrae: `tenant_id, payment_id, amount, currency, failure_reason, payment_method, bank_reference, rejection_reason`.
+`eventPayload` extrae: `tenant_id, payment_id, amount, refund_amount, currency,
+failure_reason, payment_method, bank_reference, rejection_reason`.
 
-| Subject recibido | ¿Notifica? | Placeholders construidos | Observaciones |
-|---|---|---|---|
-| `payment.captured.v1` | ✅ | payment_id, amount, currency, payment_method | — |
-| `payment.failed.v1` | ✅ | payment_id, amount, currency, failure_reason | — |
-| `payment.refunded.v1` | 🔴 | payment_id, **amount=`"0.00"`**, currency | El evento real publica `refund_amount`, no `amount` → el email dice *"Reembolso procesado: 0.00"* (bug §10.2) |
-| `payout.confirmed.v1` | ✅ | amount, currency, bank_reference | — |
-| `payout.failed.v1` | ✅ | amount, currency, failure_reason | — |
-| `onboarding.application.approved.v1` | ⚠️ | `{}` | El template resuelto es `kyc.approved` (normalización); funciona porque el body no usa placeholders (§10.4) |
-| `onboarding.application.rejected.v1` | ✅ | rejection_reason | Template `kyc.rejected` |
-| `auth.tenant.suspended.v1` | ✅ | `{}` | — |
-| `payment.risk_rejected.v1` | ❌ | código muerto: Payment **no publica** ese subject (riesgo rechaza vía `payment.failed.v1`) | — |
-| `payout.initiated.v1`, `payout.unknown.v1`, `onboarding.application.submitted.v1`, `onboarding.application.more_info.v1` | ❌ | `buildTemplateData` → `nil` → ack sin acción | — |
+| Subject recibido | Template | Placeholders |
+|---|---|---|
+| `payment.captured.v1` | `payment.captured` | payment_id, amount, currency, payment_method |
+| `payment.failed.v1` (incluye rechazo por riesgo) | `payment.failed` | payment_id, amount, currency, failure_reason |
+| `payment.refunded.v1` | `payment.refunded` | payment_id, amount (`refund_amount`), currency |
+| `payout.confirmed.v1` | `payout.confirmed` | amount, currency, bank_reference |
+| `payout.failed.v1` | `payout.failed` | amount, currency, failure_reason |
+| `onboarding.application.approved.v1` | `onboarding.application.approved` | — |
+| `onboarding.application.rejected.v1` | `onboarding.application.rejected` | rejection_reason |
+| `auth.tenant.suspended.v1` | `auth.tenant.suspended` | — (motivo genérico, anti tipping-off) |
+| Otros subjects de los streams (`payout.initiated`, `payout.unknown`, `onboarding.application.submitted`, …) | — | ack sin acción |
 
-Formato de monto: `fmt.Sprintf("%.2f", float64(amount)/100)` — división fija por 100, sin
-considerar monedas sin decimales subunidad (COP/CLP mostrarían `1000.00`).
+`TestTemplateCatalogConsistency` exige que cada template sea alcanzable desde su subject
+`.v1` y que cada subject manejado tenga template: un renombre de clave no puede volver a
+descartar emails en silencio.
+
+Monto: `amount / 100` con dos decimales (§10).
 
 ### 7.3 Semántica de ack
 
-El handler **retorna `nil` en todos los caminos** (payload malformado, sin tenant, sin template,
-incluso si `Execute` devuelve error → solo log). Por tanto `MaxDeliver: 3` es decorativo:
-ningún mensaje es nackeado ni reentregado. Idempotencia de consumo: **inexistente** — dos
-deliveries del mismo evento generarían dos emails y dos filas (posible ante restarts con
-mensajes aún sin ack, o si JetStream reentrega por ack-outstanding).
+| Situación | Resultado |
+|---|---|
+| Payload malformado o sin `tenant_id` | ack (no se puede procesar nunca) |
+| Subject sin template / preferencia deshabilitada / sin destinatario | ack |
+| `tenant_id` no UUID (`ErrInvalidTenantID`) | ack + warning (poison message) |
+| Fallo verificando el dedupe (BD) | **nak** → reentrega hasta `MaxDeliver: 3` |
+| Envío SMTP fallido | ack; registro `failed` |
+| Reentrega de un evento ya notificado | ack sin reenviar (dedupe) |
 
 ---
 
 ## 8. Persistencia
 
-Dos tablas (migración `000011`), ambas con `ENABLE ROW LEVEL SECURITY`:
-
 - **`notifications`**: PK `id UUID`; CHECK `status IN ('pending','sent','failed')`; índice
-  `(tenant_id, created_at DESC)`. `error_msg`/`sent_at` nullable (`nullStr` mapea `""→NULL`).
-- **`notification_preferences`**: PK compuesta `(tenant_id, event_type, channel)`;
-  `recipient_email NULL = usar admin`.
+  `(tenant_id, created_at DESC)`; `nats_msg_id` con índice único parcial
+  `uq_notifications_tenant_event_msg (tenant_id, event_type, nats_msg_id) WHERE nats_msg_id <> ''`
+  (000016).
+- **`notification_preferences`**: PK `(tenant_id, event_type, channel)`;
+  `recipient_email NULL` = usar admin. Claves normalizadas (000016 migró las filas con `.v1`;
+  000028, las de KYC `kyc.*` a `onboarding.application.*`).
 
-**RLS es inaplicable en la práctica** para este contexto: las políticas dependen de
-`current_setting('app.current_tenant')`, que solo se setea como `SET LOCAL` dentro de
-transacciones (`pkg/postgres/txmanager.go`). Ningún método de estos repos usa la tx manager,
-así que leen/escriben por el pool sin variable de sesión. Además `ListByTenant` (ambos repos)
-usa `r.pool` directamente incluso si existiera contexto de tx. La aislación real recae en el
-filtro `WHERE tenant_id=$1` del código de aplicación.
-
-Escrituras: `INSERT` simple en `notifications` (nunca UPDATE posterior; el estado final ya se
-determina en memoria antes de persistir) y `UPSERT … ON CONFLICT` en preferencias.
+**RLS efectivo**: ambas tablas tienen política por tenant con
+`NULLIF(current_setting('app.current_tenant', true), '')::uuid` (000029; sin `NULLIF`, una
+conexión del pool con la variable vacía fallaba con `22P02`). Todos los métodos de los repos y
+el `ContactReader` corren con `withTenant` (`RunWithAppTenant`), que fija la variable en una
+tx efímera: el aislamiento no depende solo del `WHERE tenant_id = $1`. Verificado con un rol
+sin `BYPASSRLS`.
 
 ---
 
 ## 9. Seguridad y cumplimiento
 
-- Endpoints detrás de JWT + middleware de tenant; no hay API de escritura de `notifications` (solo lectura del propio tenant).
-- **PII**: `recipient_email` y `subject` quedan persistidos en claro en `notifications` sin política de retención ni anonimización.
-- `recipient_email` del `PUT` **no se valida como email** (§10.5): cabe cualquier string, que además se inyecta crudo en headers SMTP (§10.11).
-- Errores internos del `PUT` se devuelven al cliente vía `err.Error()` (§10.8).
-- Credenciales SMTP vía env vars (`SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/USE_TLS`); `tlsConfig` inyectable solo en tests.
+- Endpoints detrás de JWT; cada tenant ve y configura solo lo suyo (403 sin tenant).
+- `recipient_email` validado (RFC 5322, longitud) y canonicalizado.
+- **SMTP**: `buildMessage` rechaza saltos de línea en `From`/`To`/`Subject`
+  (`ErrHeaderInjection`); el `Subject` va codificado RFC 2047 y el body en quoted-printable;
+  incluye `Date`. En TLS, un rechazo del servidor al cerrar el `DATA` marca el envío como
+  `failed` (no como `sent`).
+- **PII**: `recipient_email` y `subject` quedan persistidos en claro, sin política de retención.
+- La suspensión notifica con un motivo genérico (no revela causas de cumplimiento).
+- Credenciales SMTP por env vars (`SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/USE_TLS`).
 
 ---
 
 ## 10. Limitaciones conocidas y deuda técnica
 
-Ordenadas por severidad. 🔴 bug funcional · 🟡 comportamiento cuestionable · ⚪ deuda/fase 4.
-
-1. ✅ **Resuelto — emails en producción.** El worker usa `SMTPSender` cuando `SMTP_HOST`
-   está configurado (§1).
-2. 🔴 **`payment.refunded.v1` renderiza `0.00`**: `buildTemplateData` lee `p.Amount` (JSON
-   `amount`), pero `PaymentRefundedEvent` publica `refund_amount`. Corregir mapeando
-   `refund_amount` (el test actual fija el comportamiento incorrecto, §11).
-3. 🔴 **Sin dedupe/idempotencia de consumo**: reentrega del mismo evento ⇒ doble email y
-   doble fila. No existe clave natural UNIQUE (p. ej. `(tenant_id, event_subject, nats_msg_id)`).
-4. 🔴 **Claves de preferencia inconsistentes entre endpoints**: `UpdatePreferenceUseCase`
-   guarda la preferencia bajo el event type **tal cual lo manda el cliente** (acepta
-   `payment.captured.v1` porque `FindTemplate` lo resuelve), pero `resolveRecipient` busca
-   por el subject crudo del evento y `GetPreferencesUseCase` lista claves del catálogo
-   **normalizadas** (`payment.captured`). Apagar `payment.captured.v1` vía PUT puede no tener
-   efecto y la GET muestra otra clave que la PUT aceptó. Unificar a event type normalizado
-   de extremo a extremo.
-5. 🟡 **`PUT preferences` no valida `recipient_email`** (formato, longitud) ni canonicaliza;
-   `enabled=false` + email sigue aceptado (inofensivo pero ruidoso).
-6. 🟡 **La PUT écrasa sin merge**: siempre upsertea con el `recipient_email` del body; omitir
-   el campo deja el override vacío aunque hubiera uno previo.
-7. 🟡 **`limit` sin tope máximo** en `GET /notifications` (`limit=1000000` pasa; el error de
-   `strconv.Atoi` se descarta → cae a 50 solo si falta o no es numérico).
-8. 🟡 **Manejo plano de errores HTTP**: fallos de BD → 500 genérico sin distinguir causa;
-   errores de dominio del `PUT` → 400 con `err.Error()` expuesto al cliente.
-9. 🟡 **RLS declarada pero inaplicada** (§8): aislamiento depende exclusivamente del
-   `WHERE tenant_id=$1` en código.
-10. 🟡 **`MaxDeliver: 3` engañoso** (§7.3): handler siempre ackea; no hay reintento ni DLQ propia.
-11. 🟡 **Header injection menor en SMTP**: `buildMessage` interpola `to`/`subject` crudos en
-    `To:`/`Subject:`; el subject proviene de un template controlado, pero el
-    `recipient_email` viene de input del tenant (§10.5).
-12. ⚪ **Templates hardcodeados** en el binario: cambiar copy implica redeploy (Fase 4: tabla
-    + edición por operador).
-13. ⚪ **Cobertura de eventos incompleta**: `payout.initiated`, `payout.unknown`,
-    `onboarding.application.submitted/more_info`, `dispute.*`, `webhook.*`,
-    `reconciliation.*` no notifican. Los templates `kyc.approved`/`kyc.rejected` responden a
-    subjects que ningún producer publica hoy (llegan solo vía onboarding, §7.2).
-14. ⚪ **Código muerto**: `payment.risk_rejected.v1` en `buildTemplateData` (nunca publicado);
-    centinelas `ErrNotificationNotFound`, `ErrTemplateNotFound`, `ErrSendFailed` (§4.4);
-    `ParseChannel` descartado (`ch, _ :=`) al reconstruir desde BD.
-15. ⚪ **`time.Now()` interno en el dominio** (`NewNotification`, `MarkSent`,
-    `NewNotificationPreference`): reloj no inyectable → tests de fecha dependientes de tiempo
-    relativo; conviene pasar clock desde aplicación.
-16. ⚪ **Moneda/formato**: división fija /100, HTML plano embebido, sin i18n ni plantillas por tenant.
+| # | Tema | Detalle | Tipo |
+|---|---|---|---|
+| 1 | Cobertura de eventos | `payout.initiated`, `payout.unknown`, `onboarding.application.submitted`/`more_info`, `dispute.*`, `webhook.*`, `reconciliation.*` no notifican. Qué recibe el comercio por email es una decisión de producto. | Producto |
+| 2 | Templates en el binario | Cambiar un texto requiere redeploy; sin edición por operador ni plantillas por tenant. | Fase 4 |
+| 3 | Moneda e idioma | Monto siempre `/100` con dos decimales (monedas sin subunidad, como CLP, se verían `1000.00`); HTML embebido sin i18n. | Fase 4 |
 
 ---
 
 ## 11. Testing
 
-Paquete completo verde con Go 1.25.0 (`go test ./context/notification/...`), 6 paquetes:
+`go test ./context/notification/...`
 
 | Paquete | Enfoque |
 |---|---|
-| `domain` | Máquina de estados de `Notification`, VOs, `ParseChannel`, `stripVersion`/`FindTemplate`, render de placeholders, preferencias. |
-| `application` | `mocks_test.go` (repos/sender/contact fake) + casos de `SendNotification` (skip silencioso, pref deshabilitada, fallo de envío persiste `failed`, fallo de save no propaga), preferences y list. |
-| `http` | Handler con gin test mode: rutas, binding, códigos de respuesta. |
-| `nats` | `buildTemplateData` por subject —incluye el caso muerto `risk_rejected` y el refund con `amount=0` **como comportamiento actual fijado por test**— y ack silencioso. |
-| `email` | `fake_smtp_test.go`: servidor SMTP TLS local self-signed (cert inyectado vía `tlsConfig`), STARTTLS y `buildMessage`. |
-| `postgres` | `pgxmock/v4`: SQL exacto de Save/List/Upsert/Find incl. `COALESCE`, `nullStr`, contacto admin. |
-
-Brechas de cobertura relevantes: no se testea el wiring de `cmd/worker` (de allí que el bug
-§10.1 pase inadvertido); el test de `payment.refunded.v1` fija el valor hoy incorrecto
-(documentado, no corregido); no hay prueba de doble delivery/dedupe (la funcionalidad no existe).
+| `domain` | Estados de `Notification` con tiempo inyectado, VOs (`ParseChannel`, `ParseStatus`), normalización y `FindTemplate`, render, validación de email, preferencias. |
+| `application` | Fakes de repos/sender/contact/clock: skip silencioso, preferencia deshabilitada, override, dedupe (incl. fallo → error), fallo de envío → `failed`, envío de KYC de punta a punta, merge/validación del PUT, defaults del GET, tope de `limit`, fechas desde el `Clock`. |
+| `http` | Rutas, binding, 403 sin tenant, mapeo 400/404/500. |
+| `nats` | `buildTemplateData` por subject (refund con `refund_amount`), ack/nak, **consistencia catálogo ↔ consumer**. |
+| `email` | Servidor SMTP TLS local: STARTTLS/TLS, rechazos (AUTH/MAIL/RCPT/fin de DATA), `Subject` RFC 2047 y body quoted-printable con ida y vuelta, inyección de headers. |
+| `postgres` | pgxmock: SQL de cada método dentro de la sesión RLS, dedupe (`23505`), filas corruptas rechazadas. |
 
 ---
 
@@ -340,23 +316,24 @@ Brechas de cobertura relevantes: no se testea el wiring de `cmd/worker` (de all�
 ```
 context/notification/
 ├── domain/
-│   ├── notification.go     # agregado log: pending→sent/failed
+│   ├── notification.go     # agregado log: pending→sent/failed (tiempo inyectado)
 │   ├── preference.go       # entidad preferencia (default: habilitado)
-│   ├── template.go         # catálogo Templates{} + FindTemplate/stripVersion + Render
-│   ├── vo.go               # IDs, Channel (solo email), Status
-│   └── errors.go           # 6 centinelas (3 muertos, ver §4.4)
+│   ├── template.go         # catálogo Templates (claves = event type normalizado) + Render
+│   ├── email.go            # NormalizeEmail / ValidateRecipientEmail
+│   ├── vo.go               # IDs, Channel, Status (+ ParseStatus)
+│   └── errors.go
 ├── application/
-│   ├── ports.go            # NotificationRepository, PreferenceRepository, EmailSender, UserContactReader
+│   ├── ports.go            # NotificationRepository, PreferenceRepository, EmailSender, UserContactReader, Clock
 │   ├── commands.go         # SendNotificationCmd, UpdatePreferenceCmd, Views
 │   ├── send_notification.go# SendNotificationUseCase + ListNotificationsUseCase
 │   └── preferences.go      # Update/GetPreferencesUseCase
 └── infrastructure/adapters/
     ├── inbound/http/handler.go          # 3 endpoints + RegisterRoutes
-    ├── inbound/nats/event_consumer.go   # 4 consumers + eventPayload + buildTemplateData
+    ├── inbound/nats/event_consumer.go   # 4 consumers, eventPayload, buildTemplateData, handledSubjects
     └── outbound/
         ├── email/smtp_sender.go         # SMTPSender (TLS/STARTTLS), LogSender, buildMessage
-        └── postgres/repos.go            # pgNotificationRepository, pgPreferenceRepository, ContactReader
+        └── postgres/repos.go            # repos + ContactReader con sesión RLS (withTenant)
 ```
 
-Wiring: `cmd/api/main.go` (solo API de lectura/preferencias) y
-`cmd/worker/main.go` (consumidores NATS + `SendNotification` + sender SMTP condicional).
+Wiring: `cmd/api/main.go` (historial y preferencias) y `cmd/worker/main.go` (consumers NATS,
+`SendNotification`, sender SMTP condicional).
