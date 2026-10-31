@@ -154,7 +154,7 @@ func seedPayment(r *fakeRepo, tenantID string, status domain.PaymentStatus) *dom
 		domain.NewPaymentID(), domain.TenantID(tenantID), "seed-"+uuid.NewString(), "",
 		domain.ReconstituteMoney(10_000, "ARS"), domain.ReconstituteMoney(300, "ARS"), domain.ReconstituteMoney(150, "ARS"),
 		domain.PayerInfo{}, domain.MethodCard, "fake", "PSP-1", status, "", nil,
-		nil, &now, nil, now, now,
+		nil, &now, nil, now, now, "", nil,
 	)
 	r.byID[p.ID()] = p
 	r.byKey[p.IdempotencyKey()] = p

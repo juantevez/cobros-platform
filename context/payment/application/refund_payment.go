@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -76,18 +77,32 @@ func (uc *RefundPaymentUseCase) Execute(ctx context.Context, cmd RefundPaymentCm
 		return RefundPaymentResult{}, err
 	}
 
+	// Update condicional a captured: de dos reembolsos concurrentes solo uno
+	// escribe y publica payment.refunded.v1. Los dos llamaron al PSP con la
+	// misma clave (refund_<clave>), así que el PSP reembolsa una sola vez.
 	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		if err := uc.repo.Update(ctx, payment, domain.StatusCaptured); err != nil {
 			return fmt.Errorf("update refunded: %w", err)
 		}
 		return uc.publisher.Publish(ctx, payment.PullEvents()...)
 	}); err != nil {
-		return RefundPaymentResult{}, err
+		if !errors.Is(err, domain.ErrPaymentChanged) {
+			return RefundPaymentResult{}, err
+		}
+		// Otro reembolso ganó: se informa cómo quedó el pago.
+		current, findErr := uc.repo.FindByID(ctx, paymentID)
+		if findErr != nil {
+			return RefundPaymentResult{}, fmt.Errorf("reload refunded payment: %w", findErr)
+		}
+		if current.Status() != domain.StatusRefunded {
+			return RefundPaymentResult{}, err
+		}
+		payment = current
 	}
 
 	return RefundPaymentResult{
 		PaymentID:    payment.ID().String(),
-		PSPReference: refundResult.PSPReference,
+		PSPReference: payment.RefundPSPReference(),
 		Status:       payment.Status().String(),
 	}, nil
 }
@@ -124,21 +139,23 @@ func (uc *GetPaymentUseCase) Execute(ctx context.Context, q GetPaymentQuery) (Pa
 	}
 
 	return PaymentView{
-		ID:             p.ID().String(),
-		TenantID:       p.TenantID().String(),
-		Status:         p.Status().String(),
-		Amount:         p.Amount().Amount(),
-		Currency:       p.Amount().Currency(),
-		PlatformFee:    p.PlatformFee().Amount(),
-		PSPFee:         p.PSPFee().Amount(),
-		NetAmount:      p.NetAmount(),
-		PaymentMethod:  p.Method().String(),
-		PSPName:        p.PSPName(),
-		PSPReference:   p.PSPReference(),
-		FailureReason:  p.FailureReason(),
-		IdempotencyKey: p.IdempotencyKey(),
-		CapturedAt:     p.CapturedAt(),
-		FailedAt:       p.FailedAt(),
-		CreatedAt:      p.CreatedAt().Format(time.RFC3339),
+		ID:                 p.ID().String(),
+		TenantID:           p.TenantID().String(),
+		Status:             p.Status().String(),
+		Amount:             p.Amount().Amount(),
+		Currency:           p.Amount().Currency(),
+		PlatformFee:        p.PlatformFee().Amount(),
+		PSPFee:             p.PSPFee().Amount(),
+		NetAmount:          p.NetAmount(),
+		PaymentMethod:      p.Method().String(),
+		PSPName:            p.PSPName(),
+		PSPReference:       p.PSPReference(),
+		FailureReason:      p.FailureReason(),
+		IdempotencyKey:     p.IdempotencyKey(),
+		CapturedAt:         p.CapturedAt(),
+		FailedAt:           p.FailedAt(),
+		RefundPSPReference: p.RefundPSPReference(),
+		RefundedAt:         p.RefundedAt(),
+		CreatedAt:          p.CreatedAt().Format(time.RFC3339),
 	}, nil
 }

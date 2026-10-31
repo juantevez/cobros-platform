@@ -77,7 +77,7 @@ func (r *pgPaymentRepository) Update(ctx context.Context, p *domain.Payment, fro
 			platform_fee=$5, psp_fee=$6,
 			failure_reason=$7,
 			authorized_at=$8, captured_at=$9, failed_at=$10,
-			updated_at=$11
+			updated_at=$11, refund_psp_reference=$13, refunded_at=$14
 		WHERE id=$1 AND status=$12`,
 		p.ID().String(),
 		p.Status().String(), nullStr(p.PSPName()), nullStr(p.PSPReference()),
@@ -86,6 +86,7 @@ func (r *pgPaymentRepository) Update(ctx context.Context, p *domain.Payment, fro
 		p.AuthorizedAt(), p.CapturedAt(), p.FailedAt(),
 		p.UpdatedAt(),
 		from.String(),
+		nullStr(p.RefundPSPReference()), p.RefundedAt(),
 	)
 	if err != nil {
 		return fmt.Errorf("payment repo: update: %w", err)
@@ -154,7 +155,8 @@ const baseSelect = `
 	       payment_method, psp_name, psp_reference,
 	       status, failure_reason, metadata,
 	       authorized_at, captured_at, failed_at,
-	       created_at, updated_at
+	       created_at, updated_at,
+	       refund_psp_reference, refunded_at
 	FROM payments`
 
 func scanPayment(row pgx.Row) (*domain.Payment, error) {
@@ -167,6 +169,8 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		metaJSON                                     []byte
 		authorizedAt, capturedAt, failedAt           *time.Time
 		createdAt, updatedAt                         time.Time
+		refundRef                                    *string
+		refundedAt                                   *time.Time
 	)
 
 	if err := row.Scan(
@@ -177,6 +181,7 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		&status, &failReason, &metaJSON,
 		&authorizedAt, &capturedAt, &failedAt,
 		&createdAt, &updatedAt,
+		&refundRef, &refundedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrPaymentNotFound
@@ -211,7 +216,7 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		deref(failReason),
 		metadata,
 		authorizedAt, capturedAt, failedAt,
-		createdAt.UTC(), updatedAt.UTC(),
+		createdAt.UTC(), updatedAt.UTC(), deref(refundRef), refundedAt,
 	), nil
 }
 

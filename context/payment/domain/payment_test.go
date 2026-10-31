@@ -55,7 +55,7 @@ func reconstituteWithStatus(st PaymentStatus) *Payment {
 		testPayer(), MethodCard,
 		"", "", st, "", nil,
 		nil, nil, nil,
-		now, now,
+		now, now, "", nil,
 	)
 }
 
@@ -386,7 +386,7 @@ func TestReconstitutePayment(t *testing.T) {
 		testPayer(), MethodQR,
 		"mercadopago", "MP-1", StatusCaptured, "", meta,
 		&authorized, &captured, nil,
-		created, captured,
+		created, captured, "", nil,
 	)
 
 	if p.ID() != id || p.TenantID() != testTenant || p.IdempotencyKey() != "idem-9" || p.CheckoutID() != "chk-1" {

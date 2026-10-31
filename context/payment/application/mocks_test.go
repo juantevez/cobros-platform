@@ -281,6 +281,6 @@ func buildPayment(tenantID string, status domain.PaymentStatus) *domain.Payment 
 		"fakepsp", "PSP-REF-1",
 		status, "", nil,
 		nil, &captured, nil,
-		testTime, captured,
+		testTime, captured, "", nil,
 	)
 }

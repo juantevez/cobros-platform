@@ -125,3 +125,31 @@ func TestPaymentRepository_Save_DuplicateKeyAgainstConstraint(t *testing.T) {
 		t.Fatalf("second save = %v, want ErrPaymentAlreadyExists", err)
 	}
 }
+
+// Dos reembolsos concurrentes: el Update condicional a captured deja escribir
+// a uno solo, y la referencia del reembolso queda persistida.
+func TestPaymentRepository_ConcurrentRefund(t *testing.T) {
+	pool := requireDB(t)
+	ctx := context.Background()
+	repo := NewPaymentRepository(pool)
+	p := savedPayment(t)
+	_ = p.MarkProcessing(domain.ReconstituteMoney(300, "ARS"))
+	_, _ = repo.ClaimProcessing(ctx, p)
+	_ = p.Capture("mock", "PSP-1", p.PlatformFee(), domain.ReconstituteMoney(150, "ARS"))
+	if err := repo.Update(ctx, p, domain.StatusProcessing); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+
+	a, _ := repo.FindByID(ctx, p.ID())
+	b, _ := repo.FindByID(ctx, p.ID())
+	_ = a.Refund("REF-A")
+	_ = b.Refund("REF-B")
+	errA, errB := repo.Update(ctx, a, domain.StatusCaptured), repo.Update(ctx, b, domain.StatusCaptured)
+	if errA != nil || !errors.Is(errB, domain.ErrPaymentChanged) {
+		t.Fatalf("errA = %v errB = %v, want nil and ErrPaymentChanged", errA, errB)
+	}
+	got, _ := repo.FindByID(ctx, p.ID())
+	if got.Status() != domain.StatusRefunded || got.RefundPSPReference() != "REF-A" || got.RefundedAt() == nil {
+		t.Errorf("status = %q ref = %q at = %v", got.Status(), got.RefundPSPReference(), got.RefundedAt())
+	}
+}

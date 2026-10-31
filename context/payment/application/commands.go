@@ -55,20 +55,22 @@ type GetPaymentQuery struct {
 }
 
 type PaymentView struct {
-	ID             string     `json:"id"`
-	TenantID       string     `json:"tenant_id"`
-	Status         string     `json:"status"`
-	Amount         int64      `json:"amount"`
-	Currency       string     `json:"currency"`
-	PlatformFee    int64      `json:"platform_fee"`
-	PSPFee         int64      `json:"psp_fee"`
-	NetAmount      int64      `json:"net_amount"`
-	PaymentMethod  string     `json:"payment_method"`
-	PSPName        string     `json:"psp_name,omitempty"`
-	PSPReference   string     `json:"psp_reference,omitempty"`
-	FailureReason  string     `json:"failure_reason,omitempty"`
-	IdempotencyKey string     `json:"idempotency_key"`
-	CapturedAt     *time.Time `json:"captured_at,omitempty"`
-	FailedAt       *time.Time `json:"failed_at,omitempty"`
-	CreatedAt      string     `json:"created_at"`
+	ID                 string     `json:"id"`
+	TenantID           string     `json:"tenant_id"`
+	Status             string     `json:"status"`
+	Amount             int64      `json:"amount"`
+	Currency           string     `json:"currency"`
+	PlatformFee        int64      `json:"platform_fee"`
+	PSPFee             int64      `json:"psp_fee"`
+	NetAmount          int64      `json:"net_amount"`
+	PaymentMethod      string     `json:"payment_method"`
+	PSPName            string     `json:"psp_name,omitempty"`
+	PSPReference       string     `json:"psp_reference,omitempty"`
+	FailureReason      string     `json:"failure_reason,omitempty"`
+	IdempotencyKey     string     `json:"idempotency_key"`
+	CapturedAt         *time.Time `json:"captured_at,omitempty"`
+	FailedAt           *time.Time `json:"failed_at,omitempty"`
+	RefundPSPReference string     `json:"refund_psp_reference,omitempty"`
+	RefundedAt         *time.Time `json:"refunded_at,omitempty"`
+	CreatedAt          string     `json:"created_at"`
 }

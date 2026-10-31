@@ -26,8 +26,8 @@ type Payment struct {
 	idempotencyKey string
 	checkoutID     string // referencia al Checkout (Fase 3); vacío en Fase 2
 	amount         Money
-	platformFee    Money  // calculado al capturar
-	pspFee         Money  // informado por el PSP
+	platformFee    Money // calculado al capturar
+	pspFee         Money // informado por el PSP
 	payerInfo      PayerInfo
 	method         PaymentMethod
 	pspName        string // "mock", "mercadopago", "paypal"
@@ -38,8 +38,11 @@ type Payment struct {
 	authorizedAt   *time.Time
 	capturedAt     *time.Time
 	failedAt       *time.Time
-	createdAt      time.Time
-	updatedAt      time.Time
+	// refundPSPReference y refundedAt: el reembolso en el PSP (vacío/nil si no hubo).
+	refundPSPReference string
+	refundedAt         *time.Time
+	createdAt          time.Time
+	updatedAt          time.Time
 
 	events []Event
 }
@@ -90,6 +93,7 @@ func ReconstitutePayment(
 	metadata map[string]string,
 	authorizedAt, capturedAt, failedAt *time.Time,
 	createdAt, updatedAt time.Time,
+	refundPSPReference string, refundedAt *time.Time,
 ) *Payment {
 	return &Payment{
 		id: id, tenantID: tenantID,
@@ -98,9 +102,10 @@ func ReconstitutePayment(
 		payerInfo: payerInfo, method: method,
 		pspName: pspName, pspReference: pspReference,
 		status: status, failureReason: failureReason,
-		metadata: metadata,
+		metadata:     metadata,
 		authorizedAt: authorizedAt, capturedAt: capturedAt, failedAt: failedAt,
 		createdAt: createdAt, updatedAt: updatedAt,
+		refundPSPReference: refundPSPReference, refundedAt: refundedAt,
 	}
 }
 
@@ -208,8 +213,11 @@ func (p *Payment) Refund(pspReference string) error {
 		return ErrNotCaptured
 	}
 
+	now := time.Now().UTC()
 	p.status = StatusRefunded
-	p.updatedAt = time.Now().UTC()
+	p.refundPSPReference = pspReference
+	p.refundedAt = &now
+	p.updatedAt = now
 
 	p.record(PaymentRefundedEvent{
 		baseEvent:    newBase(p.tenantID.String()),
@@ -230,25 +238,27 @@ func (p *Payment) NetAmount() int64 {
 
 // ── Getters ───────────────────────────────────────────────────────────────────
 
-func (p *Payment) ID() PaymentID            { return p.id }
-func (p *Payment) TenantID() TenantID       { return p.tenantID }
-func (p *Payment) IdempotencyKey() string   { return p.idempotencyKey }
-func (p *Payment) CheckoutID() string       { return p.checkoutID }
-func (p *Payment) Amount() Money            { return p.amount }
-func (p *Payment) PlatformFee() Money       { return p.platformFee }
-func (p *Payment) PSPFee() Money            { return p.pspFee }
-func (p *Payment) PayerInfo() PayerInfo     { return p.payerInfo }
-func (p *Payment) Method() PaymentMethod    { return p.method }
-func (p *Payment) PSPName() string          { return p.pspName }
-func (p *Payment) PSPReference() string     { return p.pspReference }
-func (p *Payment) Status() PaymentStatus    { return p.status }
-func (p *Payment) FailureReason() string    { return p.failureReason }
+func (p *Payment) ID() PaymentID               { return p.id }
+func (p *Payment) TenantID() TenantID          { return p.tenantID }
+func (p *Payment) IdempotencyKey() string      { return p.idempotencyKey }
+func (p *Payment) CheckoutID() string          { return p.checkoutID }
+func (p *Payment) Amount() Money               { return p.amount }
+func (p *Payment) PlatformFee() Money          { return p.platformFee }
+func (p *Payment) PSPFee() Money               { return p.pspFee }
+func (p *Payment) PayerInfo() PayerInfo        { return p.payerInfo }
+func (p *Payment) Method() PaymentMethod       { return p.method }
+func (p *Payment) PSPName() string             { return p.pspName }
+func (p *Payment) PSPReference() string        { return p.pspReference }
+func (p *Payment) Status() PaymentStatus       { return p.status }
+func (p *Payment) FailureReason() string       { return p.failureReason }
 func (p *Payment) Metadata() map[string]string { return p.metadata }
-func (p *Payment) AuthorizedAt() *time.Time { return p.authorizedAt }
-func (p *Payment) CapturedAt() *time.Time   { return p.capturedAt }
-func (p *Payment) FailedAt() *time.Time     { return p.failedAt }
-func (p *Payment) CreatedAt() time.Time     { return p.createdAt }
-func (p *Payment) UpdatedAt() time.Time     { return p.updatedAt }
+func (p *Payment) AuthorizedAt() *time.Time    { return p.authorizedAt }
+func (p *Payment) CapturedAt() *time.Time      { return p.capturedAt }
+func (p *Payment) FailedAt() *time.Time        { return p.failedAt }
+func (p *Payment) CreatedAt() time.Time        { return p.createdAt }
+func (p *Payment) RefundPSPReference() string  { return p.refundPSPReference }
+func (p *Payment) RefundedAt() *time.Time      { return p.refundedAt }
+func (p *Payment) UpdatedAt() time.Time        { return p.updatedAt }
 
 func (p *Payment) PullEvents() []Event {
 	evs := p.events

@@ -25,6 +25,7 @@ var paymentCols = []string{
 	"status", "failure_reason", "metadata",
 	"authorized_at", "captured_at", "failed_at",
 	"created_at", "updated_at",
+	"refund_psp_reference", "refunded_at",
 }
 
 var testTime = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -72,6 +73,7 @@ func capturedRow(id, tenantID string) []any {
 		"captured", (*string)(nil), []byte(`{"order":"1"}`),
 		(*time.Time)(nil), &captured, (*time.Time)(nil),
 		testTime, captured,
+		(*string)(nil), (*time.Time)(nil),
 	}
 }
 
@@ -144,6 +146,7 @@ func TestPaymentRepository_Update(t *testing.T) {
 			(*time.Time)(nil), p.CapturedAt(), (*time.Time)(nil),
 			p.UpdatedAt(),
 			"processing",
+			(*string)(nil), (*time.Time)(nil),
 		).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		if err := repo.Update(context.Background(), p, domain.StatusProcessing); err != nil {
@@ -158,7 +161,7 @@ func TestPaymentRepository_Update(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPaymentRepository(mock)
 
-		mock.ExpectExec("UPDATE payments SET").WithArgs(anyArgs(12)...).WillReturnError(errBoom)
+		mock.ExpectExec("UPDATE payments SET").WithArgs(anyArgs(14)...).WillReturnError(errBoom)
 
 		err := repo.Update(context.Background(), newPayment(t, nil), domain.StatusInitiated)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "payment repo: update") {
@@ -170,7 +173,7 @@ func TestPaymentRepository_Update(t *testing.T) {
 	// el UPDATE exige el estado de partida y el que llega tarde no escribe.
 	t.Run("payment no longer in the from status returns ErrPaymentChanged", func(t *testing.T) {
 		mock := newMock(t)
-		mock.ExpectExec(`UPDATE payments SET[\s\S]*WHERE id=\$1 AND status=\$12`).WithArgs(anyArgs(12)...).
+		mock.ExpectExec(`UPDATE payments SET[\s\S]*WHERE id=\$1 AND status=\$12`).WithArgs(anyArgs(14)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 		err := NewPaymentRepository(mock).Update(context.Background(), newPayment(t, nil), domain.StatusProcessing)
 		if !errors.Is(err, domain.ErrPaymentChanged) {
