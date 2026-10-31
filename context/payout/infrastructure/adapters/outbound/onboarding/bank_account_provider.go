@@ -33,7 +33,12 @@ func (p *BankAccountProvider) GetBankAccount(
 ) (domain.BankAccountInfo, error) {
 	var accountType, accountNum, bankName, holderName, accountCurrency string
 
-	err := p.pool.QueryRow(ctx, `
+	// Las tablas de Onboarding aíslan por tenant con RLS: la consulta corre en
+	// la sesión del tenant del payout (sin ella, un rol sin BYPASSRLS no ve
+	// la cuenta y ningún payout sale).
+	ctx = pkgpostgres.WithAppTenant(ctx, "app.current_tenant", tenantID.String())
+	err := pkgpostgres.RunWithAppTenant(ctx, p.pool, func(ctx context.Context) error {
+		return pkgpostgres.ConnFromContext(ctx, p.pool).QueryRow(ctx, `
 		SELECT oba.account_type, oba.account_number,
 		       COALESCE(oba.bank_name, ''), oba.holder_name, oba.currency
 		FROM onboarding_bank_accounts oba
@@ -43,8 +48,9 @@ func (p *BankAccountProvider) GetBankAccount(
 		  AND oba.verified
 		  AND oba.currency = $2
 		LIMIT 1`,
-		tenantID.String(), strings.ToUpper(strings.TrimSpace(currency)),
-	).Scan(&accountType, &accountNum, &bankName, &holderName, &accountCurrency)
+			tenantID.String(), strings.ToUpper(strings.TrimSpace(currency)),
+		).Scan(&accountType, &accountNum, &bankName, &holderName, &accountCurrency)
+	})
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
