@@ -370,11 +370,45 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d.pub.errAt = 2
 
 		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
-		if !errors.Is(err, d.transfer.err) {
-			t.Fatalf("expected transfer error, got %v", err)
+		// Antes el error de persistencia se descartaba y el payout quedaba
+		// processing sin aviso; ahora se propaga (junto al rechazo) y el
+		// recuperador lo resuelve consultando al banco.
+		if !errors.Is(err, d.transfer.err) || !errors.Is(err, errBoom) {
+			t.Fatalf("expected both the transfer and the persistence error, got %v", err)
 		}
-		if errors.Is(err, errBoom) {
-			t.Error("persistence error of the failure path should be swallowed")
+	})
+
+	t.Run("transitions are conditional on their starting status", func(t *testing.T) {
+		d := newInitiateDeps()
+		if _, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []domain.PayoutStatus{domain.StatusInitiated, domain.StatusProcessing}
+		if !reflect.DeepEqual(d.repo.froms, want) {
+			t.Errorf("update froms = %v, want %v", d.repo.froms, want)
+		}
+	})
+
+	// El recuperador lo confirmó mientras el banco respondía: el Update
+	// condicional falla y se informa el estado que quedó, sin error.
+	t.Run("confirm resolved meanwhile by the recoverer returns the current state", func(t *testing.T) {
+		d := newInitiateDeps()
+		d.repo.updateErr = domain.ErrPayoutChanged
+		d.repo.updateErrAt = 2
+
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
+		if err != nil || res.PayoutID == "" {
+			t.Fatalf("res = %+v err = %v, want the current payout without error", res, err)
+		}
+	})
+
+	t.Run("unknown persistence error is returned (the recoverer resolves it)", func(t *testing.T) {
+		d := newInitiateDeps()
+		d.transfer.err = errors.New("dial tcp: i/o timeout")
+		d.repo.updateErr = errBoom
+		d.repo.updateErrAt = 2
+		if _, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"}); !errors.Is(err, errBoom) {
+			t.Fatalf("expected the persistence error, got %v", err)
 		}
 	})
 

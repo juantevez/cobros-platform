@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -45,7 +46,12 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payout) error {
 	r.byKey[p.IdempotencyKey()] = p
 	return nil
 }
-func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout) error { return nil }
+func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout, from domain.PayoutStatus) error {
+	return nil
+}
+func (r *fakeRepo) ListUnresolved(context.Context, time.Time, int) ([]*domain.Payout, error) {
+	return nil, nil
+}
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.PayoutID) (*domain.Payout, error) {
 	p, ok := r.byID[id]
 	if !ok {
@@ -84,6 +90,9 @@ func (f fakeTransfer) Transfer(ctx context.Context, req application.TransferRequ
 		return application.TransferResult{}, f.err
 	}
 	return application.TransferResult{BankReference: "BANK-1", Status: "confirmed"}, nil
+}
+func (fakeTransfer) GetTransfer(context.Context, application.TransferLookupRequest) (application.TransferLookup, error) {
+	return application.TransferLookup{}, nil
 }
 func (fakeTransfer) Name() string { return "fake" }
 

@@ -125,9 +125,10 @@ func TestPayoutRepository_Update(t *testing.T) {
 			p.ID().String(),
 			"confirmed", strPtr("BANK-9"), (*string)(nil),
 			p.InitiatedAt(), p.ConfirmedAt(), (*time.Time)(nil), p.UpdatedAt(),
+			"processing",
 		).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := repo.Update(context.Background(), p); err != nil {
+		if err := repo.Update(context.Background(), p, domain.StatusProcessing); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -139,9 +140,9 @@ func TestPayoutRepository_Update(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPayoutRepository(mock)
 
-		mock.ExpectExec("UPDATE payouts SET").WithArgs(anyArgs(8)...).WillReturnError(errBoom)
+		mock.ExpectExec("UPDATE payouts SET").WithArgs(anyArgs(9)...).WillReturnError(errBoom)
 
-		err := repo.Update(context.Background(), newPayout(t))
+		err := repo.Update(context.Background(), newPayout(t), domain.StatusInitiated)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "payout repo: update") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -300,5 +301,29 @@ func TestNullStr(t *testing.T) {
 	}
 	if got := nullStr("x"); got == nil || *got != "x" {
 		t.Errorf("nullStr(\"x\") = %v", got)
+	}
+}
+
+// El request original y el recuperador pueden resolver el mismo payout: el
+// UPDATE exige el estado de partida y el que llega tarde no escribe.
+func TestPayoutRepository_Update_Changed(t *testing.T) {
+	mock := newMock(t)
+	mock.ExpectExec(`UPDATE payouts SET[\s\S]*WHERE id=\$1 AND status=\$9`).WithArgs(anyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	if err := NewPayoutRepository(mock).Update(context.Background(), newPayout(t), domain.StatusProcessing); !errors.Is(err, domain.ErrPayoutChanged) {
+		t.Fatalf("expected ErrPayoutChanged, got %v", err)
+	}
+}
+
+func TestPayoutRepository_ListUnresolved(t *testing.T) {
+	mock := newMock(t)
+	cut := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`FROM payouts WHERE status IN \('processing','unknown'\) AND updated_at < \$1 ORDER BY updated_at LIMIT \$2`).
+		WithArgs(cut, 50).WillReturnRows(pgxmock.NewRows(payoutCols))
+	if _, err := NewPayoutRepository(mock).ListUnresolved(context.Background(), cut, 50); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
 	}
 }

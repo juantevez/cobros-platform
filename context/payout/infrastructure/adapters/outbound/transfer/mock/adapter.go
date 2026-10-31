@@ -32,3 +32,9 @@ func (a *Adapter) Transfer(_ context.Context, req application.TransferRequest) (
 		Status:        "confirmed",
 	}, nil
 }
+
+// GetTransfer: el mock no guarda estado. Su único resultado desconocido es
+// TIMEOUT, que simula un timeout antes de llegar al banco: no hay registro.
+func (a *Adapter) GetTransfer(_ context.Context, _ application.TransferLookupRequest) (application.TransferLookup, error) {
+	return application.TransferLookup{Found: false}, nil
+}

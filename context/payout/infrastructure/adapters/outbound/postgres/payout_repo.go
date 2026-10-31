@@ -55,18 +55,47 @@ func (r *pgPayoutRepository) Save(ctx context.Context, p *domain.Payout) error {
 	return nil
 }
 
-func (r *pgPayoutRepository) Update(ctx context.Context, p *domain.Payout) error {
+func (r *pgPayoutRepository) Update(ctx context.Context, p *domain.Payout, from domain.PayoutStatus) error {
 	conn := postgres.ConnFromContext(ctx, r.pool)
-	_, err := conn.Exec(ctx, `
+	// Condicional al estado de partida: el request original y el recuperador
+	// pueden resolver el mismo payout; solo uno escribe.
+	tag, err := conn.Exec(ctx, `
 		UPDATE payouts SET
 			status=$2, bank_reference=$3, failure_reason=$4,
 			initiated_at=$5, confirmed_at=$6, failed_at=$7, updated_at=$8
-		WHERE id=$1`,
+		WHERE id=$1 AND status=$9`,
 		p.ID().String(),
 		p.Status().String(), nullStr(p.BankReference()), nullStr(p.FailureReason()),
 		p.InitiatedAt(), p.ConfirmedAt(), p.FailedAt(), p.UpdatedAt(),
+		from.String(),
 	)
-	return wrapErr("update", err)
+	if err != nil {
+		return wrapErr("update", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("payout repo: update %s from %s: %w", p.ID(), from, domain.ErrPayoutChanged)
+	}
+	return nil
+}
+
+// ListUnresolved es cross-tenant (lo usa el recuperador del worker).
+func (r *pgPayoutRepository) ListUnresolved(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payout, error) {
+	rows, err := r.pool.Query(ctx,
+		baseSelect+" WHERE status IN ('processing','unknown') AND updated_at < $1 ORDER BY updated_at LIMIT $2",
+		olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("payout repo: list unresolved: %w", err)
+	}
+	defer rows.Close()
+	var out []*domain.Payout
+	for rows.Next() {
+		p, err := scanPayout(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func (r *pgPayoutRepository) FindByID(ctx context.Context, id domain.PayoutID) (*domain.Payout, error) {

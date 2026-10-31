@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/juantevez/cobros-platform/context/payout/domain"
 )
@@ -185,13 +184,13 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 	if err := payout.MarkProcessing(); err != nil {
 		return InitiatePayoutResult{}, err
 	}
-	if err := uc.repo.Update(ctx, payout); err != nil {
+	if err := uc.repo.Update(ctx, payout, domain.StatusInitiated); err != nil {
 		return InitiatePayoutResult{}, fmt.Errorf("update to processing: %w", err)
 	}
 
 	transferResult, transferErr := uc.transferAdapter.Transfer(ctx, TransferRequest{
 		PayoutID:       payout.ID().String(),
-		IdempotencyKey: "transfer_" + payout.ID().String(),
+		IdempotencyKey: transferIdempotencyKey(payout),
 		Amount:         payout.Amount().Amount(),
 		Currency:       payout.Amount().Currency(),
 		AccountType:    bankAccount.AccountType,
@@ -211,23 +210,26 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 		// efectivamente recibió. Se marca unknown y se delega a reconciliación.
 		if !errors.Is(transferErr, ErrBankRejected) {
 			if err := payout.MarkUnknown(transferErr.Error()); err != nil {
-				log.Printf("payout %s: mark unknown: %v", payout.ID(), err)
+				return InitiatePayoutResult{}, err
 			}
-			_ = uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-				_ = uc.repo.Update(ctx, payout)
-				return uc.publisher.Publish(ctx, payout.PullEvents()...)
-			})
+			if err := uc.persistFrom(ctx, payout, domain.StatusProcessing); err != nil {
+				// Queda processing en la base: lo resuelve el recuperador.
+				return InitiatePayoutResult{}, fmt.Errorf("persist unknown transfer: %w", err)
+			}
 			return resultOf(payout, false),
 				fmt.Errorf("transfer result unknown, awaiting reconciliation: %w", errors.Join(domain.ErrBankTransferUnknown, transferErr))
 		}
 
 		// Rechazo conocido del banco (cuenta inválida, titular distinto, etc.):
 		// fallo definitivo → el Ledger revierte el asiento.
-		_ = payout.Fail(transferErr.Error())
-		_ = uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-			_ = uc.repo.Update(ctx, payout)
-			return uc.publisher.Publish(ctx, payout.PullEvents()...)
-		})
+		if err := payout.Fail(transferErr.Error()); err != nil {
+			return InitiatePayoutResult{}, err
+		}
+		if err := uc.persistFrom(ctx, payout, domain.StatusProcessing); err != nil {
+			// Antes se descartaba: el payout quedaba processing sin aviso.
+			// Ahora lo resuelve el recuperador consultando al banco.
+			return InitiatePayoutResult{}, fmt.Errorf("persist transfer failure: %w (transfer failed: %w)", err, transferErr)
+		}
 		return InitiatePayoutResult{}, fmt.Errorf("transfer failed: %w", transferErr)
 	}
 
@@ -235,16 +237,30 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 		return InitiatePayoutResult{}, err
 	}
 
-	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-		if err := uc.repo.Update(ctx, payout); err != nil {
-			return fmt.Errorf("update confirmed: %w", err)
+	if err := uc.persistFrom(ctx, payout, domain.StatusProcessing); err != nil {
+		if errors.Is(err, domain.ErrPayoutChanged) {
+			// El recuperador lo resolvió mientras el banco respondía.
+			current, findErr := uc.repo.FindByID(ctx, payout.ID())
+			if findErr != nil {
+				return InitiatePayoutResult{}, fmt.Errorf("reload resolved payout: %w", findErr)
+			}
+			return resultOf(current, false), nil
 		}
-		return uc.publisher.Publish(ctx, payout.PullEvents()...)
-	}); err != nil {
-		return InitiatePayoutResult{}, err
+		return InitiatePayoutResult{}, fmt.Errorf("update confirmed: %w", err)
 	}
 
 	return resultOf(payout, false), nil
+}
+
+// persistFrom guarda la transición y sus eventos en una tx, condicional a que
+// el payout siga en from.
+func (uc *InitiatePayoutUseCase) persistFrom(ctx context.Context, p *domain.Payout, from domain.PayoutStatus) error {
+	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.repo.Update(ctx, p, from); err != nil {
+			return err
+		}
+		return uc.publisher.Publish(ctx, p.PullEvents()...)
+	})
 }
 
 func resultOf(p *domain.Payout, replayed bool) InitiatePayoutResult {
@@ -256,4 +272,10 @@ func resultOf(p *domain.Payout, replayed bool) InitiatePayoutResult {
 		BankReference: p.BankReference(),
 		Replayed:      replayed,
 	}
+}
+
+// transferIdempotencyKey es la clave de la transferencia en el banco: la usan
+// la transferencia y la consulta del recuperador.
+func transferIdempotencyKey(p *domain.Payout) string {
+	return "transfer_" + p.ID().String()
 }

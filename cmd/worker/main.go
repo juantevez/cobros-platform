@@ -33,6 +33,10 @@ import (
 	paymentdomain "github.com/juantevez/cobros-platform/context/payment/domain"
 	paymentpg "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/postgres"
 	paymentpsp "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/psp"
+	payoutapp "github.com/juantevez/cobros-platform/context/payout/application"
+	payoutdomain "github.com/juantevez/cobros-platform/context/payout/domain"
+	payoutpg "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/postgres"
+	payouttransfer "github.com/juantevez/cobros-platform/context/payout/infrastructure/adapters/outbound/transfer/mock"
 	disputedomain "github.com/juantevez/cobros-platform/context/dispute/domain"
 	disputepg "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/outbound/postgres"
 	reportingapp "github.com/juantevez/cobros-platform/context/reporting/application"
@@ -103,6 +107,7 @@ func main() {
 	webhookPub  := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
 	disputePub  := outbox.NewEventPublisher[disputedomain.Event](outboxStore)
 	paymentPub  := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
+	payoutPub   := outbox.NewEventPublisher[payoutdomain.Event](outboxStore)
 
 	// ── Audit consumers ───────────────────────────────────────────────────────
 
@@ -343,6 +348,21 @@ func main() {
 	go func() {
 		if err := paymentRecoverer.Start(ctx); err != nil {
 			logger.Error("payment recoverer stopped", "error", err)
+		}
+	}()
+
+	// ── Payout: recuperador de payouts unknown o trabados en processing ──────
+	// Resuelve los desembolsos cuyo resultado del banco quedó desconocido o
+	// cuya transición no se pudo persistir, consultando al banco.
+
+	payoutRecoverer := payoutapp.NewPayoutRecoverer(
+		payoutpg.NewPayoutRepository(pool), payouttransfer.New(),
+		postgres.NewTxManager(pool), payoutPub, realClock{},
+		logger.With("component", "payout_recoverer"),
+	)
+	go func() {
+		if err := payoutRecoverer.Start(ctx); err != nil {
+			logger.Error("payout recoverer stopped", "error", err)
 		}
 	}()
 

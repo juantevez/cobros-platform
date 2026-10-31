@@ -34,4 +34,7 @@ var (
 	// suspendido o en hold preventivo). El mensaje es genérico a propósito:
 	// no debe revelar un hold de cumplimiento (tipping-off).
 	ErrPayoutsNotAllowed = errors.New("payouts are not available for this account")
+	// ErrPayoutChanged: el payout ya no estaba en el estado del que partía la
+	// transición (otra ejecución lo resolvió antes).
+	ErrPayoutChanged = errors.New("payout was modified concurrently")
 )

@@ -31,6 +31,14 @@ type fakeRepo struct {
 	findErr     error
 	findKeyErr  error // error inyectado en FindByIdempotencyKey (distinto de NotFound)
 	listErr     error
+	// froms registra el estado de partida de cada Update; changed hace que
+	// Update devuelva ErrPayoutChanged (otra ejecución lo resolvió antes).
+	froms   []domain.PayoutStatus
+	changed bool
+	// unresolved es lo que devuelve ListUnresolved; unresolvedBefore, el corte.
+	unresolved       []*domain.Payout
+	unresolvedErr    error
+	unresolvedBefore time.Time
 
 	// capturados para aserciones
 	lastTenantID domain.TenantID
@@ -55,10 +63,14 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payout) error {
 	return nil
 }
 
-func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout) error {
+func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout, from domain.PayoutStatus) error {
 	r.updates = append(r.updates, p.Status())
+	r.froms = append(r.froms, from)
 	if r.updateErr != nil && (r.updateErrAt == 0 || r.updateErrAt == len(r.updates)) {
 		return r.updateErr
+	}
+	if r.changed {
+		return domain.ErrPayoutChanged
 	}
 	// El update persiste la transición sobre la copia canónica del repo, de
 	// modo que un replay posterior observe el estado final (confirmed/failed).
@@ -66,6 +78,11 @@ func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout) error {
 		r.byID[p.ID()] = p
 	}
 	return nil
+}
+
+func (r *fakeRepo) ListUnresolved(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payout, error) {
+	r.unresolvedBefore = olderThan
+	return r.unresolved, r.unresolvedErr
 }
 
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.PayoutID) (*domain.Payout, error) {
@@ -131,9 +148,17 @@ func (b *fakeBankProvider) GetBankAccount(ctx context.Context, tenantID domain.T
 
 // fakeTransfer captura la request y devuelve un resultado o error configurado.
 type fakeTransfer struct {
-	result TransferResult
-	err    error
-	reqs   []TransferRequest
+	result    TransferResult
+	err       error
+	reqs      []TransferRequest
+	lookup    TransferLookup
+	lookupErr error
+	lookups   []TransferLookupRequest
+}
+
+func (t *fakeTransfer) GetTransfer(ctx context.Context, req TransferLookupRequest) (TransferLookup, error) {
+	t.lookups = append(t.lookups, req)
+	return t.lookup, t.lookupErr
 }
 
 func (t *fakeTransfer) Transfer(ctx context.Context, req TransferRequest) (TransferResult, error) {
