@@ -129,7 +129,7 @@ func TestRetryDeliveryUseCase_Execute(t *testing.T) {
 		if err := d.uc().Execute(ctx, RetryDeliveryCmd{TenantID: tenantA, DeliveryID: del.ID().String()}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := []claimCall{{id: del.ID(), attemptCount: 2, now: testNow, until: testNow.Add(claimLease)}}
+		want := []claimCall{{tenant: tenantA, id: del.ID(), attemptCount: 2, now: testNow, until: testNow.Add(claimLease)}}
 		if !reflect.DeepEqual(d.deliveries.claims, want) {
 			t.Errorf("claims = %+v, want %+v", d.deliveries.claims, want)
 		}
@@ -342,6 +342,27 @@ func TestRetryPoller_RunCycle(t *testing.T) {
 		}
 		if strings.Contains(logs.String(), "level=ERROR") {
 			t.Errorf("unexpected error log: %s", logs.String())
+		}
+	})
+
+	// El poller arranca sin tenant (lista como operador); cada despacho debe
+	// correr con el tenant de su delivery para pasar RLS.
+	t.Run("each dispatch runs with the tenant of its delivery", func(t *testing.T) {
+		d := newRetryDeps()
+		otherEndpoint := newEndpoint(tenantB)
+		d.endpoints.byID[otherEndpoint.ID()] = otherEndpoint
+		a := deliveryWith(d.endpoint, domain.StatusPending, 0)
+		b := deliveryWith(otherEndpoint, domain.StatusPending, 0)
+		d.deliveries.due = []*domain.WebhookDelivery{a, b}
+
+		NewRetryPoller(d.uc(), d.deliveries, time.Second, discardLogger()).runCycle(ctx)
+
+		got := map[domain.DeliveryID]string{}
+		for _, c := range d.deliveries.claims {
+			got[c.id] = c.tenant
+		}
+		if got[a.ID()] != tenantA || got[b.ID()] != tenantB {
+			t.Errorf("claim tenants = %v, want %s→%s and %s→%s", got, a.ID(), tenantA, b.ID(), tenantB)
 		}
 	})
 

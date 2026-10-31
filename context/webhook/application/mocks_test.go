@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 var errBoom = errors.New("boom")
@@ -94,6 +95,7 @@ type idempotencyKey struct {
 }
 
 type claimCall struct {
+	tenant       string // tenant del contexto (RLS)
 	id           domain.DeliveryID
 	attemptCount int
 	now, until   time.Time
@@ -153,7 +155,8 @@ func (r *fakeDeliveryRepo) Save(ctx context.Context, d *domain.WebhookDelivery) 
 func (r *fakeDeliveryRepo) Claim(ctx context.Context, id domain.DeliveryID, attemptCount int, now, until time.Time) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.claims = append(r.claims, claimCall{id: id, attemptCount: attemptCount, now: now, until: until})
+	tenant, _ := pkgpostgres.TenantIDFromContext(ctx)
+	r.claims = append(r.claims, claimCall{tenant: tenant, id: id, attemptCount: attemptCount, now: now, until: until})
 	if r.claimErr != nil {
 		return false, r.claimErr
 	}

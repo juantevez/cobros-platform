@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 const (
@@ -79,6 +80,11 @@ func (uc *RetryDeliveryUseCase) Execute(ctx context.Context, cmd RetryDeliveryCm
 
 // dispatch ejecuta el HTTP call y actualiza el estado de la delivery.
 func (uc *RetryDeliveryUseCase) dispatch(ctx context.Context, delivery *domain.WebhookDelivery) error {
+	// RLS: todo el despacho (endpoint, reclamo, tx del resultado) corre con
+	// el tenant de la delivery. El poller llega sin tenant: lista como
+	// operador de plataforma, cross-tenant.
+	ctx = pkgpostgres.WithTenantID(ctx, delivery.TenantID().String())
+
 	endpoint, err := uc.endpointRepo.FindByID(ctx, delivery.EndpointID())
 	if err != nil {
 		return fmt.Errorf("load endpoint %s: %w", delivery.EndpointID(), err)

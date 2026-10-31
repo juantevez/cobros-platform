@@ -1,7 +1,7 @@
 # Webhook (Webhooks salientes) — Documentación técnico-funcional
 
 > **Bounded Context:** `context/webhook`
-> **Migraciones:** [`000009_webhook_init`](../../migrations/000009_webhook_init.up.sql), reclamo de deliveries en [`000040_webhook_delivery_claim`](../../migrations/000040_webhook_delivery_claim.up.sql)
+> **Migraciones:** [`000009_webhook_init`](../../migrations/000009_webhook_init.up.sql), reclamo de deliveries en [`000040_webhook_delivery_claim`](../../migrations/000040_webhook_delivery_claim.up.sql), RLS en [`000041_webhook_rls`](../../migrations/000041_webhook_rls.up.sql)
 > **Stream NATS:** `WEBHOOK` (`webhook.>`)
 
 ---
@@ -235,10 +235,16 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 |---|---|---|
 | `webhook_endpoints` | PK `id`; índices `(tenant_id, active)` y GIN sobre `events` | `secret` en texto claro. |
 | `webhook_deliveries` | PK `id`; FK `endpoint_id`; `UNIQUE (endpoint_id, event_id)`; `CHECK status` | `payload JSONB` (el envelope). `claimed_until`: reclamo vigente de un despachador (§9). Índice parcial `next_retry_at WHERE status IN ('pending','failed')` para el poller. |
-| `webhook_delivery_attempts` | PK `id`; FK `delivery_id`; `UNIQUE (delivery_id, attempt_num)` | Sin `tenant_id`. `response_body` son los primeros 500 bytes. |
+| `webhook_delivery_attempts` | PK `id`; FK compuesta `(delivery_id, tenant_id)` → `webhook_deliveries (id, tenant_id)`; `UNIQUE (delivery_id, attempt_num)` | `tenant_id` del intento = el de su delivery. `response_body` son los primeros 500 bytes. |
 
-- **RLS:** `webhook_endpoints` y `webhook_deliveries` tienen una política `tenant_id = current_setting('app.current_tenant', true)::uuid`, sin `NULLIF` ni política de operador. `webhook_delivery_attempts` no tiene RLS.
-- El consumer y el poller corren sin tenant en la sesión, y las lecturas del API van al pool fuera de la sesión RLS: hoy funcionan porque el rol de la app tiene `BYPASSRLS` (§10).
+- **RLS** (migración 000041): las tres tablas tienen dos políticas.
+  - **Aislamiento por tenant:** `NULLIF(current_setting('app.current_tenant', true), '')::uuid`.
+  - **Operador de plataforma:** `app.platform_operator = 'on'`, **solo lectura** (`FOR SELECT`).
+- **Quién fija la sesión:** cada método de repositorio corre en la sesión del tenant (`withTenant`, [rls.go](../../context/webhook/infrastructure/adapters/outbound/postgres/rls.go)). Usa el tenant de la entidad, o el del contexto en las búsquedas por ID.
+  - El consumer pone en el contexto el `tenant_id` del evento.
+  - El poller lista como operador (cross-tenant) y despacha cada delivery con su propio tenant: endpoint, reclamo y tx del resultado.
+  - El API usa el tenant del JWT.
+- El aislamiento no depende del rol de DB: `rls_test.go` corre con un rol sin `BYPASSRLS` (`webhook_rls_probe`).
 - `FindActiveByTenantAndEvent` busca `events @> ARRAY[tipo]` con y sin versión.
 - `ListDueForRetry` hace `JOIN` con los endpoints activos, así que las deliveries de un endpoint desactivado no ocupan el batch, pero quedan `pending`/`failed` para siempre. Tampoco lista las que tienen un reclamo vigente.
 
@@ -258,13 +264,12 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | RLS no efectiva | Las políticas no tienen `NULLIF` ni operador, y `webhook_delivery_attempts` no tiene RLS ni `tenant_id`. El consumer no pone el tenant en el contexto, el poller es cross-tenant y las lecturas del API van al pool fuera de la sesión RLS. Con un rol sin `BYPASSRLS`, el consumer no encontraría endpoints y descartaría los eventos en silencio. |
-| 2 | Media | Firma sin timestamp | `X-Cobros-Timestamp` viaja pero no se firma: un request capturado se puede reenviar al comercio indefinidamente con firma válida, y el comercio no tiene cómo rechazar los viejos. |
-| 3 | Baja | IDs inválidos → 500 | `DELETE /endpoints/abc`, `GET`/`POST /deliveries/abc[/retry]`: el error de parseo cae en el `default` de `respondError`. |
-| 4 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
-| 5 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
-| 6 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
-| 7 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
+| 1 | Media | Firma sin timestamp | `X-Cobros-Timestamp` viaja pero no se firma: un request capturado se puede reenviar al comercio indefinidamente con firma válida, y el comercio no tiene cómo rechazar los viejos. |
+| 2 | Baja | IDs inválidos → 500 | `DELETE /endpoints/abc`, `GET`/`POST /deliveries/abc[/retry]`: el error de parseo cae en el `default` de `respondError`. |
+| 3 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
+| 4 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
+| 5 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
+| 6 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
 
 ---
 
@@ -273,11 +278,11 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/*_test.go` | Validación de URL y eventos, firma (vector RFC 4231), FSM de la delivery, schedule y `MaxAttempts`, truncado y saneado del body (sin partir caracteres, UTF-8 inválido, `NUL`). |
-| Aplicación | `application/*_test.go` | Alta (incluido el destino rechazado sin guardar nada) y baja con publicación en tx, `DispatchEvent` (idempotencia, fallo parcial), `RetryDelivery` (tenant ajeno, final, endpoint inactivo, exhausted, estado + evento en la misma tx y error de publish que la descarta, reclamo con su vencimiento y `attempt_count`, delivery reclamada por otro sin POST), poller con concurrencia (saltea en silencio las reclamadas), listados. |
+| Aplicación | `application/*_test.go` | Alta (incluido el destino rechazado sin guardar nada) y baja con publicación en tx, `DispatchEvent` (idempotencia, fallo parcial), `RetryDelivery` (tenant ajeno, final, endpoint inactivo, exhausted, estado + evento en la misma tx y error de publish que la descarta, reclamo con su vencimiento y `attempt_count`, delivery reclamada por otro sin POST), poller con concurrencia (saltea en silencio las reclamadas y despacha cada delivery con su tenant), listados. |
 | HTTP | `inbound/http/webhook_handler_test.go` | Handlers, mapeo de errores y guard en cada ruta (403; `RegisterRoutes` exige el guard). |
-| NATS | `inbound/nats/event_consumer_test.go` | Extracción de tenant, `event_id` y `occurred_at`; casos que hacen *ack* sin reintentar. |
+| NATS | `inbound/nats/event_consumer_test.go` | Extracción de tenant (y su paso al contexto, para RLS), `event_id` y `occurred_at`; casos que hacen *ack* sin reintentar. |
 | Dispatcher | `outbound/http/dispatcher_test.go`, `destination_guard_test.go` | Headers, firma, errores de red, redirects no seguidos (301/302/303/307/308) y destino interno bloqueado en el dial (sin tocar el servidor) contra `httptest`. Rangos internos, chequeo del alta con resolver falso (incluido un host con una IP pública y otra interna), control del dialer y modo desarrollo. |
-| Postgres | `outbound/postgres/repo_test.go`, `integration_test.go` | `pgxmock` para el SQL de cada método. Integración contra PostgreSQL (`DATABASE_URL`, se saltan si no hay DB): intento con body multibyte cortado y `NUL`; 8 reclamos simultáneos de la misma delivery (gana uno), reclamo vigente fuera del poller, reclamo vencido retomado, `UPDATE` que libera el reclamo y rechaza una escritura con `attempt_count` viejo. |
+| Postgres | `outbound/postgres/repo_test.go`, `integration_test.go`, `rls_test.go` | `pgxmock` para el SQL de cada método (dentro de una tx simulada) y para la sesión RLS: tenant de la entidad, tenant del llamador, operador en el listado del poller. Integración contra PostgreSQL (`DATABASE_URL`, se saltan si no hay DB): intento con body multibyte cortado y `NUL`; 8 reclamos simultáneos de la misma delivery (gana uno), reclamo vigente fuera del poller, reclamo vencido retomado, `UPDATE` que libera el reclamo y rechaza una escritura con `attempt_count` viejo. RLS con un rol sin `BYPASSRLS`: aislamiento de endpoints, deliveries e intentos entre tenants, sin tenant no se ve nada, el operador lista cross-tenant pero no escribe, y el flujo consumer → poller entrega bajo RLS. |
 
 ```bash
 go test ./context/webhook/...
@@ -308,7 +313,7 @@ context/webhook/
         ├── http/dispatcher.go              # POST firmado, timeout 30s, sin redirects ni proxy
         ├── http/destination_guard.go       # SSRF: alta + control del dialer
         ├── crypto/secret_generator.go      # whsec_<64 hex>
-        └── postgres/{endpoint,delivery}_repo.go
+        └── postgres/{endpoint,delivery}_repo.go, rls.go   # cada método en la sesión RLS
 ```
 
 Wiring: `cmd/api/main.go` (rutas; el `DispatchEvent` se construye pero no se usa) y `cmd/worker/main.go` (4 consumers + `RetryPoller` cada 5 s).

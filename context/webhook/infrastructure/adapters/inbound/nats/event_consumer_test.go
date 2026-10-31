@@ -12,6 +12,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/webhook/application"
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 var errBoom = errors.New("boom")
@@ -24,6 +25,8 @@ type fakeEndpoints struct {
 	active        []*domain.WebhookEndpoint
 	err           error
 	lastEventType string
+	// ctxTenant: tenant del contexto con el que se buscaron endpoints (RLS).
+	ctxTenant string
 }
 
 func (f *fakeEndpoints) Save(context.Context, *domain.WebhookEndpoint) error   { return nil }
@@ -36,6 +39,7 @@ func (f *fakeEndpoints) FindByTenant(context.Context, domain.TenantID) ([]*domai
 }
 func (f *fakeEndpoints) FindActiveByTenantAndEvent(ctx context.Context, t domain.TenantID, eventType string) ([]*domain.WebhookEndpoint, error) {
 	f.lastEventType = eventType
+	f.ctxTenant, _ = pkgpostgres.TenantIDFromContext(ctx)
 	return f.active, f.err
 }
 
@@ -153,6 +157,11 @@ func TestHandle(t *testing.T) {
 		}
 		if e.endpoints.lastEventType != "payment.captured.v1" {
 			t.Errorf("event type = %q", e.endpoints.lastEventType)
+		}
+		// Sin el tenant en el contexto, con un rol sin BYPASSRLS los repos no
+		// verían endpoints y el evento se descartaría en silencio.
+		if e.endpoints.ctxTenant != tenantA {
+			t.Errorf("tenant in context = %q, want %q", e.endpoints.ctxTenant, tenantA)
 		}
 		env := e.envelope(t)
 		if env.EventType != "payment.captured.v1" || env.EventID != "evt-1" || string(env.Data) != payload {
