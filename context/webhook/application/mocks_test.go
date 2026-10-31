@@ -225,6 +225,16 @@ func (f *fakeDispatcher) calls() int {
 	return len(f.delivered)
 }
 
+type fakeGuard struct {
+	err  error
+	urls []string
+}
+
+func (g *fakeGuard) Check(_ context.Context, rawURL string) error {
+	g.urls = append(g.urls, rawURL)
+	return g.err
+}
+
 type fakeSecretGen struct {
 	secret string
 	err    error

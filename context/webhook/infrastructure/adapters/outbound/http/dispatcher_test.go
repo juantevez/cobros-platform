@@ -28,9 +28,21 @@ func deliveryWithAttempts(n int) *domain.WebhookDelivery {
 		domain.StatusFailed, n, &now, nil, now, now)
 }
 
+// newTestDispatcher permite redes privadas: los servidores httptest escuchan
+// en 127.0.0.1.
+func newTestDispatcher() *Dispatcher { return NewDispatcher(NewDestinationGuard(true)) }
+
 func TestNewDispatcher_Timeout(t *testing.T) {
-	if got := NewDispatcher().client.Timeout; got != 30*time.Second {
+	if got := newTestDispatcher().client.Timeout; got != 30*time.Second {
 		t.Errorf("timeout = %v, want 30s", got)
+	}
+}
+
+// Con proxy, el dialer validaría la IP del proxy y no la del destino.
+func TestNewDispatcher_IgnoresEnvironmentProxy(t *testing.T) {
+	tr, ok := newTestDispatcher().client.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Errorf("transport = %T proxy set = %v, want *http.Transport without proxy", newTestDispatcher().client.Transport, ok && tr.Proxy != nil)
 	}
 }
 
@@ -50,7 +62,7 @@ func TestDispatcher_Dispatch(t *testing.T) {
 		d := deliveryWithAttempts(2)
 		before := time.Now().Unix()
 
-		attempt, err := NewDispatcher().Dispatch(context.Background(), e, d)
+		attempt, err := newTestDispatcher().Dispatch(context.Background(), e, d)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -92,7 +104,7 @@ func TestDispatcher_Dispatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		attempt, err := NewDispatcher().Dispatch(context.Background(), endpointFor(srv.URL), deliveryWithAttempts(0))
+		attempt, err := newTestDispatcher().Dispatch(context.Background(), endpointFor(srv.URL), deliveryWithAttempts(0))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -114,7 +126,7 @@ func TestDispatcher_Dispatch(t *testing.T) {
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 
-			attempt, err := NewDispatcher().Dispatch(context.Background(), endpointFor(srv.URL+"/hooks"), deliveryWithAttempts(0))
+			attempt, err := newTestDispatcher().Dispatch(context.Background(), endpointFor(srv.URL+"/hooks"), deliveryWithAttempts(0))
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -130,13 +142,34 @@ func TestDispatcher_Dispatch(t *testing.T) {
 		})
 	}
 
+	// SSRF: el control efectivo es el del dialer, sobre la IP resuelta. El
+	// servidor de prueba escucha en 127.0.0.1 y no debe recibir nada.
+	t.Run("internal destination is blocked at dial time", func(t *testing.T) {
+		hits := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+		defer srv.Close()
+
+		for _, u := range []string{srv.URL, strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)} {
+			attempt, err := NewDispatcher(NewDestinationGuard(false)).Dispatch(context.Background(), endpointFor(u), deliveryWithAttempts(0))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if attempt.HTTPStatus() != 0 || attempt.Succeeded() || !strings.Contains(attempt.ErrMsg(), domain.ErrDestinationNotAllowed.Error()) {
+				t.Errorf("%s: attempt = status %d err %q", u, attempt.HTTPStatus(), attempt.ErrMsg())
+			}
+		}
+		if hits != 0 {
+			t.Errorf("internal server was hit %d times", hits)
+		}
+	})
+
 	t.Run("response body is read up to 500 bytes", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(strings.Repeat("x", 2000)))
 		}))
 		defer srv.Close()
 
-		attempt, _ := NewDispatcher().Dispatch(context.Background(), endpointFor(srv.URL), deliveryWithAttempts(0))
+		attempt, _ := newTestDispatcher().Dispatch(context.Background(), endpointFor(srv.URL), deliveryWithAttempts(0))
 		if len(attempt.ResponseBody()) != 500 {
 			t.Errorf("body len = %d, want 500", len(attempt.ResponseBody()))
 		}
@@ -147,7 +180,7 @@ func TestDispatcher_Dispatch(t *testing.T) {
 		url := srv.URL
 		srv.Close() // nadie escucha
 
-		attempt, err := NewDispatcher().Dispatch(context.Background(), endpointFor(url), deliveryWithAttempts(1))
+		attempt, err := newTestDispatcher().Dispatch(context.Background(), endpointFor(url), deliveryWithAttempts(1))
 		if err != nil {
 			t.Fatalf("errors must be captured in the attempt, got %v", err)
 		}
@@ -175,7 +208,7 @@ func TestDispatcher_Dispatch(t *testing.T) {
 	})
 
 	t.Run("invalid URL is captured as build request error", func(t *testing.T) {
-		attempt, err := NewDispatcher().Dispatch(context.Background(), endpointFor("http://[::1"), deliveryWithAttempts(0))
+		attempt, err := newTestDispatcher().Dispatch(context.Background(), endpointFor("http://[::1"), deliveryWithAttempts(0))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

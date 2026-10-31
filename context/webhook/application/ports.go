@@ -42,6 +42,12 @@ type HTTPDispatcher interface {
 	Dispatch(ctx context.Context, endpoint *domain.WebhookEndpoint, delivery *domain.WebhookDelivery) (domain.DeliveryAttempt, error)
 }
 
+// DestinationGuard rechaza URLs que apuntan a la red interna de la plataforma
+// (SSRF). El dispatcher vuelve a validar la IP resuelta en cada conexión.
+type DestinationGuard interface {
+	Check(ctx context.Context, rawURL string) error
+}
+
 // SecretGenerator genera el secret HMAC para nuevos endpoints.
 type SecretGenerator interface {
 	Generate() (string, error)

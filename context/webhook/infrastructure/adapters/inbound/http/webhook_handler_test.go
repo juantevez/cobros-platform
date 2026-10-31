@@ -129,7 +129,7 @@ func newEnv() *env {
 	dispatcher := &fakeDispatcher{}
 	secretGen := &fakeSecretGen{}
 	h := NewWebhookHandler(
-		application.NewRegisterEndpointUseCase(endpoints, secretGen, fakeTx{}, fakePublisher{}),
+		application.NewRegisterEndpointUseCase(endpoints, &allowAll{}, secretGen, fakeTx{}, fakePublisher{}),
 		application.NewDeactivateEndpointUseCase(endpoints, fakeTx{}, fakePublisher{}),
 		application.NewListEndpointsUseCase(endpoints),
 		application.NewListDeliveriesUseCase(deliveries),
@@ -383,6 +383,11 @@ func TestRetryDelivery(t *testing.T) {
 
 // ── respondError / RegisterRoutes ─────────────────────────────────────────────
 
+// allowAll acepta cualquier destino: los handlers no prueban el filtro SSRF.
+type allowAll struct{}
+
+func (allowAll) Check(context.Context, string) error { return nil }
+
 func TestRespondError(t *testing.T) {
 	cases := []struct {
 		err  error
@@ -395,6 +400,7 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrEndpointURLEmpty, http.StatusBadRequest},
 		{fmt.Errorf("%w: missing host", domain.ErrInvalidEndpointURL), http.StatusBadRequest},
 		{domain.ErrNoEventsSubscribed, http.StatusBadRequest},
+		{fmt.Errorf("%w: 127.0.0.1", domain.ErrDestinationNotAllowed), http.StatusBadRequest},
 		{fmt.Errorf("wrapped: %w", domain.ErrDeliveryNotFound), http.StatusNotFound},
 		{errBoom, http.StatusInternalServerError},
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,16 +33,28 @@ type Dispatcher struct {
 	client *http.Client
 }
 
-// NewDispatcher crea un Dispatcher con timeout de 30s que no sigue redirects.
+// NewDispatcher crea un Dispatcher con timeout de 30s que no sigue redirects y
+// que solo conecta a las IPs que acepta guard (ver DestinationGuard). No usa
+// el proxy del entorno: con proxy, el dialer validaría la IP del proxy y no la
+// del destino.
 //
 // Ante 301/302/303 el http.Client repite el request como GET sin body: el
 // destino podía responder 2xx y la delivery quedaba entregada sin que el
 // comercio recibiera el evento. Un 3xx es un intento fallido; el comercio
 // tiene que registrar la URL final.
-func NewDispatcher() *Dispatcher {
+func NewDispatcher(guard *DestinationGuard) *Dispatcher {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   guard.control,
+	}).DialContext
+
 	return &Dispatcher{
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},

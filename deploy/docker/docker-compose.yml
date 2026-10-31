@@ -96,6 +96,8 @@ services:
       SMTP_USERNAME:          "${SMTP_USERNAME:-}"
       SMTP_PASSWORD:          "${SMTP_PASSWORD:-}"
       SMTP_FROM:              "${SMTP_FROM:-noreply@cobros-platform.com}"
+      # true → webhooks a localhost/redes privadas (solo dev; en prod abre SSRF)
+      WEBHOOK_ALLOW_PRIVATE_TARGETS: "${WEBHOOK_ALLOW_PRIVATE_TARGETS:-false}"
     ports:
       - "8080:8080"
     depends_on:
@@ -123,6 +125,7 @@ services:
       NATS_URL:          "nats://nats:4222"
       OUTBOX_INTERVAL:   "1s"
       OUTBOX_BATCH_SIZE: "50"
+      WEBHOOK_ALLOW_PRIVATE_TARGETS: "${WEBHOOK_ALLOW_PRIVATE_TARGETS:-false}"
     depends_on:
       migrate:
         condition: service_completed_successfully

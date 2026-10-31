@@ -360,6 +360,7 @@ make run-worker
 | `SMTP_PORT` | `587` | Puerto SMTP |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | *(vacío)* | Credenciales SMTP |
 | `SMTP_FROM` | `noreply@cobros-platform.com` | Remitente de los emails |
+| `WEBHOOK_ALLOW_PRIVATE_TARGETS` | `false` | `true` ⇒ los webhooks pueden apuntar a `localhost` y redes privadas. Solo desarrollo: en producción abre SSRF |
 | `SMTP_USE_TLS` | `false` | `true` ⇒ TLS implícito (puerto 465); si no, STARTTLS cuando el servidor lo ofrece |
 
 > ⚠️ **En producción**, `JWT_SECRET` debe generarse con `openssl rand -hex 32` y gestionarse con un secret manager.

@@ -11,6 +11,7 @@ import (
 // Genera el secret HMAC y lo retorna una única vez.
 type RegisterEndpointUseCase struct {
 	endpointRepo EndpointRepository
+	guard        DestinationGuard
 	secretGen    SecretGenerator
 	txManager    TxManager
 	publisher    EventPublisher
@@ -18,12 +19,14 @@ type RegisterEndpointUseCase struct {
 
 func NewRegisterEndpointUseCase(
 	endpointRepo EndpointRepository,
+	guard DestinationGuard,
 	secretGen SecretGenerator,
 	txManager TxManager,
 	publisher EventPublisher,
 ) *RegisterEndpointUseCase {
 	return &RegisterEndpointUseCase{
 		endpointRepo: endpointRepo,
+		guard:        guard,
 		secretGen:    secretGen,
 		txManager:    txManager,
 		publisher:    publisher,
@@ -44,6 +47,9 @@ func (uc *RegisterEndpointUseCase) Execute(ctx context.Context, cmd RegisterEndp
 	id := domain.NewEndpointID()
 	endpoint, err := domain.NewWebhookEndpoint(id, tenantID, cmd.URL, secret, cmd.Events, cmd.Description)
 	if err != nil {
+		return RegisterEndpointResult{}, err
+	}
+	if err := uc.guard.Check(ctx, endpoint.URL()); err != nil {
 		return RegisterEndpointResult{}, err
 	}
 

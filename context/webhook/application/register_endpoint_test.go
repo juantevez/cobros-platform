@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,17 +21,34 @@ func TestRegisterEndpointUseCase_Execute(t *testing.T) {
 	}
 
 	type deps struct {
-		repo *fakeEndpointRepo
-		gen  *fakeSecretGen
-		tx   *fakeTx
-		pub  *fakePublisher
+		repo  *fakeEndpointRepo
+		guard *fakeGuard
+		gen   *fakeSecretGen
+		tx    *fakeTx
+		pub   *fakePublisher
 	}
 	newDeps := func() *deps {
-		return &deps{repo: newEndpointRepo(), gen: &fakeSecretGen{secret: "whsec_0123456789abcdef"}, tx: &fakeTx{}, pub: &fakePublisher{}}
+		return &deps{repo: newEndpointRepo(), guard: &fakeGuard{}, gen: &fakeSecretGen{secret: "whsec_0123456789abcdef"}, tx: &fakeTx{}, pub: &fakePublisher{}}
 	}
 	exec := func(d *deps, cmd RegisterEndpointCmd) (RegisterEndpointResult, error) {
-		return NewRegisterEndpointUseCase(d.repo, d.gen, d.tx, d.pub).Execute(ctx, cmd)
+		return NewRegisterEndpointUseCase(d.repo, d.guard, d.gen, d.tx, d.pub).Execute(ctx, cmd)
 	}
+
+	t.Run("internal destination is rejected and nothing is saved", func(t *testing.T) {
+		d := newDeps()
+		d.guard.err = fmt.Errorf("%w: 127.0.0.1", domain.ErrDestinationNotAllowed)
+
+		_, err := exec(d, validCmd)
+		if !errors.Is(err, domain.ErrDestinationNotAllowed) {
+			t.Fatalf("expected ErrDestinationNotAllowed, got %v", err)
+		}
+		if len(d.guard.urls) != 1 || d.guard.urls[0] != validCmd.URL {
+			t.Errorf("guard checked %v", d.guard.urls)
+		}
+		if d.tx.calls != 0 || len(d.pub.events) != 0 {
+			t.Errorf("tx calls = %d published = %d, want nothing", d.tx.calls, len(d.pub.events))
+		}
+	})
 
 	t.Run("registers endpoint and returns secret once", func(t *testing.T) {
 		d := newDeps()

@@ -220,7 +220,7 @@ func main() {
 	endpointRepo  := webhookpg.NewEndpointRepository(pool)
 	deliveryRepo  := webhookpg.NewDeliveryRepository(pool)
 	secretGen     := webhookcrypto.NewHexSecretGenerator()
-	httpDispatcher := webhookdispatcher.NewDispatcher()
+	httpDispatcher := webhookdispatcher.NewDispatcher(webhookdispatcher.NewDestinationGuard(cfg.WebhookAllowPrivateTargets))
 	_ = secretGen // usado en cmd/api
 
 	dispatchEvent := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
