@@ -173,7 +173,8 @@ func respondError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrEndpointURLEmpty),
 		errors.Is(err, domain.ErrInvalidEndpointURL),
 		errors.Is(err, domain.ErrDestinationNotAllowed),
-		errors.Is(err, domain.ErrNoEventsSubscribed):
+		errors.Is(err, domain.ErrNoEventsSubscribed),
+		errors.Is(err, domain.ErrUnknownEventType):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})

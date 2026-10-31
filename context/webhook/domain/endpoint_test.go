@@ -73,7 +73,7 @@ func TestNewWebhookEndpoint(t *testing.T) {
 	}
 	for _, tc := range hints {
 		t.Run("secret hint for "+tc.secret, func(t *testing.T) {
-			e, err := NewWebhookEndpoint(NewEndpointID(), testTenant, "https://x.example.com", tc.secret, []string{"a.b"}, "")
+			e, err := NewWebhookEndpoint(NewEndpointID(), testTenant, "https://x.example.com", tc.secret, []string{"payment.captured"}, "")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -90,14 +90,17 @@ func TestNewWebhookEndpoint(t *testing.T) {
 		wantErr error
 		wantMsg string
 	}{
-		{"empty url", "", []string{"a.b"}, ErrEndpointURLEmpty, ""},
-		{"relative url", "merchant.example.com/hooks", []string{"a.b"}, ErrInvalidEndpointURL, ""},
-		{"path without host", "/hooks", []string{"a.b"}, ErrInvalidEndpointURL, "scheme must be http or https"},
-		{"non http scheme", "ftp://merchant.example.com/hooks", []string{"a.b"}, ErrInvalidEndpointURL, "scheme must be http or https"},
-		{"scheme without host", "https://", []string{"a.b"}, ErrInvalidEndpointURL, "missing host"},
+		{"empty url", "", []string{"payment.captured"}, ErrEndpointURLEmpty, ""},
+		{"relative url", "merchant.example.com/hooks", []string{"payment.captured"}, ErrInvalidEndpointURL, ""},
+		{"path without host", "/hooks", []string{"payment.captured"}, ErrInvalidEndpointURL, "scheme must be http or https"},
+		{"non http scheme", "ftp://merchant.example.com/hooks", []string{"payment.captured"}, ErrInvalidEndpointURL, "scheme must be http or https"},
+		{"scheme without host", "https://", []string{"payment.captured"}, ErrInvalidEndpointURL, "missing host"},
 		{"no events", "https://x.example.com", nil, ErrNoEventsSubscribed, ""},
 		{"empty events slice", "https://x.example.com", []string{}, ErrNoEventsSubscribed, ""},
 		{"only blank events", "https://x.example.com", []string{"", "  "}, ErrNoEventsSubscribed, ""},
+		// Un typo o un tipo inexistente daba un endpoint que nunca recibía nada.
+		{"unknown event type", "https://x.example.com", []string{"payment.captured", "payment.capturd"}, ErrUnknownEventType, "payment.capturd"},
+		{"event that is not forwarded", "https://x.example.com", []string{"kyc.approved"}, ErrUnknownEventType, "allowed: payment.captured"},
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,9 +118,26 @@ func TestNewWebhookEndpoint(t *testing.T) {
 	}
 }
 
+// Todo el catálogo se acepta, con o sin versión.
+func TestNewWebhookEndpoint_AcceptsCatalog(t *testing.T) {
+	versioned := make([]string, len(SubscribableEvents))
+	for i, ev := range SubscribableEvents {
+		versioned[i] = ev + ".v1"
+	}
+	for _, events := range [][]string{SubscribableEvents, versioned} {
+		e, err := NewWebhookEndpoint(NewEndpointID(), testTenant, "https://x.example.com", "s", events, "")
+		if err != nil {
+			t.Fatalf("catalog rejected: %v", err)
+		}
+		if !reflect.DeepEqual(e.Events(), SubscribableEvents) {
+			t.Errorf("events = %v", e.Events())
+		}
+	}
+}
+
 func TestNewWebhookEndpoint_AcceptedURLs(t *testing.T) {
 	for _, u := range []string{"https://merchant.example.com/hooks", "http://localhost:8080/hooks", "https://merchant.example.com:8443/a?b=c"} {
-		if _, err := NewWebhookEndpoint(NewEndpointID(), testTenant, u, "secret", []string{"a.b"}, ""); err != nil {
+		if _, err := NewWebhookEndpoint(NewEndpointID(), testTenant, u, "secret", []string{"payment.captured"}, ""); err != nil {
 			t.Errorf("%q should be accepted: %v", u, err)
 		}
 	}

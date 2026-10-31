@@ -57,6 +57,9 @@ func NewWebhookEndpoint(
 	if len(normalized) == 0 {
 		return nil, ErrNoEventsSubscribed
 	}
+	if err := validateSubscriptions(normalized); err != nil {
+		return nil, err
+	}
 
 	hint := secret
 	if len(hint) > 4 {

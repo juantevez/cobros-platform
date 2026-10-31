@@ -425,6 +425,7 @@ func TestRespondError(t *testing.T) {
 		{fmt.Errorf("%w: invalid delivery id: x", domain.ErrInvalidID), http.StatusBadRequest},
 		{fmt.Errorf("%w: missing host", domain.ErrInvalidEndpointURL), http.StatusBadRequest},
 		{domain.ErrNoEventsSubscribed, http.StatusBadRequest},
+		{fmt.Errorf("%w: kyc.approved", domain.ErrUnknownEventType), http.StatusBadRequest},
 		{fmt.Errorf("%w: 127.0.0.1", domain.ErrDestinationNotAllowed), http.StatusBadRequest},
 		{fmt.Errorf("wrapped: %w", domain.ErrDeliveryNotFound), http.StatusNotFound},
 		{errBoom, http.StatusInternalServerError},

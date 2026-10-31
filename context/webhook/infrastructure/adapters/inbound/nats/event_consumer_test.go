@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,4 +262,30 @@ func TestHandle(t *testing.T) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
 	})
+}
+
+// Cada tipo del catálogo suscribible tiene que llegar por alguno de los
+// durables (el filtro real de cada Start*): si no, el comercio podría
+// suscribirse a algo que nunca recibe.
+func TestSubscribableEventsPassConsumerFilters(t *testing.T) {
+	var filters []string
+	for _, start := range []func(*EventConsumer, context.Context) error{
+		(*EventConsumer).StartPaymentConsumer, (*EventConsumer).StartPayoutConsumer,
+		(*EventConsumer).StartOnboardingConsumer, (*EventConsumer).StartAuthConsumer,
+	} {
+		bus := &fakeBus{}
+		_ = start(newEnv(bus).consumer, context.Background())
+		filters = append(filters, bus.cfg.FilterSubject)
+	}
+
+	for _, ev := range domain.SubscribableEvents {
+		subject := ev + ".v1"
+		matched := false
+		for _, f := range filters {
+			matched = matched || strings.HasPrefix(subject, strings.TrimSuffix(f, ">"))
+		}
+		if !matched {
+			t.Errorf("%s is subscribable but no consumer filter %v forwards it", ev, filters)
+		}
+	}
 }
