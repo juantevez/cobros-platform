@@ -40,7 +40,12 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payment) error {
 	r.byKey[p.IdempotencyKey()] = p
 	return nil
 }
-func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment) error { return nil }
+func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment, from domain.PaymentStatus) error {
+	return nil
+}
+func (r *fakeRepo) ListStuckProcessing(context.Context, time.Time, int) ([]*domain.Payment, error) {
+	return nil, nil
+}
 func (r *fakeRepo) ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error) {
 	return true, nil
 }
@@ -72,6 +77,9 @@ func (f fakePSP) Refund(ctx context.Context, req application.PSPRefundRequest) (
 		return application.PSPRefundResult{}, f.refundErr
 	}
 	return application.PSPRefundResult{PSPReference: "REF-1"}, nil
+}
+func (fakePSP) GetCapture(context.Context, application.PSPCaptureLookupRequest) (application.PSPCaptureLookup, error) {
+	return application.PSPCaptureLookup{}, nil
 }
 func (fakePSP) Name() string { return "fake" }
 

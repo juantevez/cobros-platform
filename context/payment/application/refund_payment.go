@@ -77,7 +77,7 @@ func (uc *RefundPaymentUseCase) Execute(ctx context.Context, cmd RefundPaymentCm
 	}
 
 	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-		if err := uc.repo.Update(ctx, payment); err != nil {
+		if err := uc.repo.Update(ctx, payment, domain.StatusCaptured); err != nil {
 			return fmt.Errorf("update refunded: %w", err)
 		}
 		return uc.publisher.Publish(ctx, payment.PullEvents()...)

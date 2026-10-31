@@ -54,26 +54,32 @@ func (r *pgPaymentRepository) Save(ctx context.Context, p *domain.Payment) error
 	return nil
 }
 
-func (r *pgPaymentRepository) Update(ctx context.Context, p *domain.Payment) error {
+func (r *pgPaymentRepository) Update(ctx context.Context, p *domain.Payment, from domain.PaymentStatus) error {
 	conn := postgres.ConnFromContext(ctx, r.pool)
 
-	_, err := conn.Exec(ctx, `
+	// Condicional al estado de partida: el request original y el recuperador
+	// pueden resolver el mismo pago en processing; solo uno escribe.
+	tag, err := conn.Exec(ctx, `
 		UPDATE payments SET
 			status=$2, psp_name=$3, psp_reference=$4,
 			platform_fee=$5, psp_fee=$6,
 			failure_reason=$7,
 			authorized_at=$8, captured_at=$9, failed_at=$10,
 			updated_at=$11
-		WHERE id=$1`,
+		WHERE id=$1 AND status=$12`,
 		p.ID().String(),
 		p.Status().String(), nullStr(p.PSPName()), nullStr(p.PSPReference()),
 		p.PlatformFee().Amount(), p.PSPFee().Amount(),
 		nullStr(p.FailureReason()),
 		p.AuthorizedAt(), p.CapturedAt(), p.FailedAt(),
 		p.UpdatedAt(),
+		from.String(),
 	)
 	if err != nil {
 		return fmt.Errorf("payment repo: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("payment repo: update %s from %s: %w", p.ID(), from, domain.ErrPaymentChanged)
 	}
 	return nil
 }
@@ -85,10 +91,10 @@ func (r *pgPaymentRepository) ClaimProcessing(ctx context.Context, p *domain.Pay
 	conn := postgres.ConnFromContext(ctx, r.pool)
 
 	tag, err := conn.Exec(ctx, `
-		UPDATE payments SET status=$2, updated_at=$3
+		UPDATE payments SET status=$2, updated_at=$3, platform_fee=$5
 		WHERE id=$1 AND status=$4`,
 		p.ID().String(), domain.StatusProcessing.String(), p.UpdatedAt(),
-		domain.StatusInitiated.String(),
+		domain.StatusInitiated.String(), p.PlatformFee().Amount(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("payment repo: claim processing: %w", err)
@@ -107,6 +113,26 @@ func (r *pgPaymentRepository) FindByIdempotencyKey(ctx context.Context, tenantID
 	row := conn.QueryRow(ctx, baseSelect+" WHERE tenant_id=$1 AND idempotency_key=$2",
 		tenantID.String(), key)
 	return scanPayment(row)
+}
+
+// ListStuckProcessing es cross-tenant (lo usa el recuperador del worker).
+func (r *pgPaymentRepository) ListStuckProcessing(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payment, error) {
+	rows, err := r.pool.Query(ctx,
+		baseSelect+" WHERE status=$1 AND updated_at < $2 ORDER BY updated_at LIMIT $3",
+		domain.StatusProcessing.String(), olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("payment repo: list stuck processing: %w", err)
+	}
+	defer rows.Close()
+	var out []*domain.Payment
+	for rows.Next() {
+		p, err := scanPayment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 const baseSelect = `

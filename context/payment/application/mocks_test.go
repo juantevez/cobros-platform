@@ -31,6 +31,16 @@ type fakeRepo struct {
 	findKeyErr  error
 	// claimLost simula que otra ejecución ya reclamó el pago (ClaimProcessing → false).
 	claimLost bool
+	// froms registra el estado de partida de cada Update; changed hace que
+	// Update devuelva ErrPaymentChanged (otra ejecución lo resolvió antes).
+	froms   []domain.PaymentStatus
+	changed bool
+	// stuck es lo que devuelve ListStuckProcessing; stuckBefore, el corte pedido.
+	stuck       []*domain.Payment
+	stuckErr    error
+	stuckBefore time.Time
+	// findByIDHook, si está, decide qué devuelve FindByID.
+	findByIDHook func(domain.PaymentID) *domain.Payment
 
 	// capturados para aserciones
 	keyLookups    int
@@ -46,12 +56,21 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payment) error {
 	return nil
 }
 
-func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment) error {
+func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment, from domain.PaymentStatus) error {
 	r.updates = append(r.updates, p.Status())
+	r.froms = append(r.froms, from)
 	if r.updateErr != nil && (r.updateErrAt == 0 || r.updateErrAt == len(r.updates)) {
 		return r.updateErr
 	}
+	if r.changed {
+		return domain.ErrPaymentChanged
+	}
 	return nil
+}
+
+func (r *fakeRepo) ListStuckProcessing(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payment, error) {
+	r.stuckBefore = olderThan
+	return r.stuck, r.stuckErr
 }
 
 // ClaimProcessing registra la transición como un Update más, para que las
@@ -67,6 +86,9 @@ func (r *fakeRepo) ClaimProcessing(ctx context.Context, p *domain.Payment) (bool
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
 	if r.findErr != nil {
 		return nil, r.findErr
+	}
+	if r.findByIDHook != nil {
+		return r.findByIDHook(id), nil
 	}
 	p, ok := r.byID[id]
 	if !ok {
@@ -94,6 +116,9 @@ type fakePSP struct {
 	captureErr    error
 	refundResult  PSPRefundResult
 	refundErr     error
+	lookup        PSPCaptureLookup
+	lookupErr     error
+	lookups       []PSPCaptureLookupRequest
 	captures      []PSPCaptureRequest
 	refunds       []PSPRefundRequest
 }
@@ -112,6 +137,11 @@ func (p *fakePSP) Refund(ctx context.Context, req PSPRefundRequest) (PSPRefundRe
 		return PSPRefundResult{}, p.refundErr
 	}
 	return p.refundResult, nil
+}
+
+func (p *fakePSP) GetCapture(ctx context.Context, req PSPCaptureLookupRequest) (PSPCaptureLookup, error) {
+	p.lookups = append(p.lookups, req)
+	return p.lookup, p.lookupErr
 }
 
 func (p *fakePSP) Name() string { return "fakepsp" }

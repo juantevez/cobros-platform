@@ -17,6 +17,9 @@ func (p namedPSP) AuthorizeAndCapture(context.Context, application.PSPCaptureReq
 func (p namedPSP) Refund(context.Context, application.PSPRefundRequest) (application.PSPRefundResult, error) {
 	return application.PSPRefundResult{}, nil
 }
+func (p namedPSP) GetCapture(context.Context, application.PSPCaptureLookupRequest) (application.PSPCaptureLookup, error) {
+	return application.PSPCaptureLookup{}, nil
+}
 func (p namedPSP) Name() string { return p.name }
 
 func TestRouter_Route(t *testing.T) {

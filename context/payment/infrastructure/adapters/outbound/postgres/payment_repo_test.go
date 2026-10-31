@@ -132,7 +132,7 @@ func TestPaymentRepository_Update(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPaymentRepository(mock)
 		p := newPayment(t, nil)
-		_ = p.MarkProcessing()
+		_ = p.MarkProcessing(domain.ReconstituteMoney(300, "ARS"))
 		_ = p.Capture("mock", "PSP-1", domain.ReconstituteMoney(300, "ARS"), domain.ReconstituteMoney(150, "ARS"))
 
 		mock.ExpectExec("UPDATE payments SET").WithArgs(
@@ -142,9 +142,10 @@ func TestPaymentRepository_Update(t *testing.T) {
 			(*string)(nil),
 			(*time.Time)(nil), p.CapturedAt(), (*time.Time)(nil),
 			p.UpdatedAt(),
+			"processing",
 		).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := repo.Update(context.Background(), p); err != nil {
+		if err := repo.Update(context.Background(), p, domain.StatusProcessing); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -156,11 +157,23 @@ func TestPaymentRepository_Update(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPaymentRepository(mock)
 
-		mock.ExpectExec("UPDATE payments SET").WithArgs(anyArgs(11)...).WillReturnError(errBoom)
+		mock.ExpectExec("UPDATE payments SET").WithArgs(anyArgs(12)...).WillReturnError(errBoom)
 
-		err := repo.Update(context.Background(), newPayment(t, nil))
+		err := repo.Update(context.Background(), newPayment(t, nil), domain.StatusInitiated)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "payment repo: update") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
+		}
+	})
+
+	// El request original y el recuperador pueden resolver el mismo pago:
+	// el UPDATE exige el estado de partida y el que llega tarde no escribe.
+	t.Run("payment no longer in the from status returns ErrPaymentChanged", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectExec(`UPDATE payments SET[\s\S]*WHERE id=\$1 AND status=\$12`).WithArgs(anyArgs(12)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		err := NewPaymentRepository(mock).Update(context.Background(), newPayment(t, nil), domain.StatusProcessing)
+		if !errors.Is(err, domain.ErrPaymentChanged) {
+			t.Fatalf("expected ErrPaymentChanged, got %v", err)
 		}
 	})
 }
@@ -303,16 +316,16 @@ func TestNullStrDeref(t *testing.T) {
 
 func TestPaymentRepository_ClaimProcessing(t *testing.T) {
 	// El WHERE condicional (status=$4 = initiated) es lo que hace atómico el claim.
-	claimSQL := `UPDATE payments SET status=\$2, updated_at=\$3\s+WHERE id=\$1 AND status=\$4`
+	claimSQL := `UPDATE payments SET status=\$2, updated_at=\$3, platform_fee=\$5\s+WHERE id=\$1 AND status=\$4`
 
 	t.Run("claims when the payment is still initiated", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPaymentRepository(mock)
 		p := newPayment(t, nil)
-		_ = p.MarkProcessing()
+		_ = p.MarkProcessing(domain.ReconstituteMoney(300, "ARS"))
 
 		mock.ExpectExec(claimSQL).
-			WithArgs(p.ID().String(), "processing", p.UpdatedAt(), "initiated").
+			WithArgs(p.ID().String(), "processing", p.UpdatedAt(), "initiated", int64(300)).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		claimed, err := repo.ClaimProcessing(context.Background(), p)
@@ -328,10 +341,10 @@ func TestPaymentRepository_ClaimProcessing(t *testing.T) {
 		mock := newMock(t)
 		repo := NewPaymentRepository(mock)
 		p := newPayment(t, nil)
-		_ = p.MarkProcessing()
+		_ = p.MarkProcessing(domain.ReconstituteMoney(300, "ARS"))
 
 		mock.ExpectExec(claimSQL).
-			WithArgs(anyArgs(4)...).
+			WithArgs(anyArgs(5)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 		claimed, err := repo.ClaimProcessing(context.Background(), p)
@@ -345,11 +358,27 @@ func TestPaymentRepository_ClaimProcessing(t *testing.T) {
 		repo := NewPaymentRepository(mock)
 		p := newPayment(t, nil)
 
-		mock.ExpectExec(claimSQL).WithArgs(anyArgs(4)...).WillReturnError(errBoom)
+		mock.ExpectExec(claimSQL).WithArgs(anyArgs(5)...).WillReturnError(errBoom)
 
 		_, err := repo.ClaimProcessing(context.Background(), p)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "claim processing") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
+}
+
+func TestPaymentRepository_ListStuckProcessing(t *testing.T) {
+	mock := newMock(t)
+	cut := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	id, tenantID := uuid.NewString(), uuid.NewString()
+	mock.ExpectQuery(`FROM payments WHERE status=\$1 AND updated_at < \$2 ORDER BY updated_at LIMIT \$3`).
+		WithArgs("processing", cut, 50).
+		WillReturnRows(pgxmock.NewRows(paymentCols).AddRow(capturedRow(id, tenantID)...))
+	got, err := NewPaymentRepository(mock).ListStuckProcessing(context.Background(), cut, 50)
+	if err != nil || len(got) != 1 || got[0].ID().String() != id {
+		t.Fatalf("got %d, %v", len(got), err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
+	}
 }

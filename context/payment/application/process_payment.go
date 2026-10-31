@@ -147,7 +147,7 @@ func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Pa
 	if !decision.Approved {
 		_ = payment.RejectByRisk(decision.Reason)
 		if updateErr := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-			if err := uc.repo.Update(ctx, payment); err != nil {
+			if err := uc.repo.Update(ctx, payment, domain.StatusInitiated); err != nil {
 				return err
 			}
 			return uc.publisher.Publish(ctx, payment.PullEvents()...)
@@ -171,7 +171,7 @@ func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Pa
 		return ProcessPaymentResult{}, fmt.Errorf("route psp: %w", err)
 	}
 
-	if err := payment.MarkProcessing(); err != nil {
+	if err := payment.MarkProcessing(platformFee); err != nil {
 		return ProcessPaymentResult{}, err
 	}
 	claimed, err := uc.repo.ClaimProcessing(ctx, payment)
@@ -214,7 +214,7 @@ func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Pa
 	if pspErr != nil {
 		_ = payment.Fail(psp.Name(), pspErr.Error())
 		if updateErr := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-			if err := uc.repo.Update(ctx, payment); err != nil {
+			if err := uc.repo.Update(ctx, payment, domain.StatusProcessing); err != nil {
 				return err
 			}
 			return uc.publisher.Publish(ctx, payment.PullEvents()...)
@@ -235,14 +235,23 @@ func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Pa
 	}
 
 	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-		if err := uc.repo.Update(ctx, payment); err != nil {
+		if err := uc.repo.Update(ctx, payment, domain.StatusProcessing); err != nil {
 			return fmt.Errorf("update captured: %w", err)
 		}
 		// PaymentCapturedEvent en outbox → Ledger lo consume y registra el asiento.
 		return uc.publisher.Publish(ctx, payment.PullEvents()...)
 	}); err != nil {
-		// CRÍTICO: el PSP capturó pero no pudimos persistir.
-		// El job de reconciliación detectará esta discrepancia.
+		if errors.Is(err, domain.ErrPaymentChanged) {
+			// El recuperador lo resolvió mientras el PSP respondía: se informa
+			// el estado que quedó.
+			current, findErr := uc.repo.FindByID(ctx, payment.ID())
+			if findErr != nil {
+				return ProcessPaymentResult{}, fmt.Errorf("reload resolved payment: %w", findErr)
+			}
+			return toResult(current, wasExisting), nil
+		}
+		// El PSP capturó pero no pudimos persistir: el pago queda en
+		// processing y lo resuelve el recuperador consultando al PSP.
 		return ProcessPaymentResult{}, fmt.Errorf("persist capture: %w", err)
 	}
 

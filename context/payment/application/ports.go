@@ -12,7 +12,10 @@ import (
 
 type PaymentRepository interface {
 	Save(ctx context.Context, p *domain.Payment) error
-	Update(ctx context.Context, p *domain.Payment) error
+	// Update persiste el estado del pago solo si sigue en from (el estado del
+	// que partió la transición). Si otra ejecución ya lo cambió, retorna
+	// domain.ErrPaymentChanged y no escribe.
+	Update(ctx context.Context, p *domain.Payment, from domain.PaymentStatus) error
 	// ClaimProcessing persiste la transición initiated → processing solo si el
 	// pago sigue en initiated (UPDATE condicional). Retorna false si otra
 	// ejecución ya lo reclamó: así un mismo pago llega una sola vez al PSP
@@ -20,6 +23,9 @@ type PaymentRepository interface {
 	ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error)
 	FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error)
 	FindByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, key string) (*domain.Payment, error)
+	// ListStuckProcessing retorna pagos en processing sin cambios desde antes
+	// de olderThan, de todos los tenants (los resuelve el recuperador).
+	ListStuckProcessing(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payment, error)
 }
 
 // ── PSP ───────────────────────────────────────────────────────────────────────
@@ -38,6 +44,9 @@ type PSPAdapter interface {
 	// Es la operación más común para pagos de ecommerce. Un rechazo definitivo
 	// debe envolver ErrPSPDeclined; otro error significa resultado desconocido.
 	AuthorizeAndCapture(ctx context.Context, req PSPCaptureRequest) (PSPCaptureResult, error)
+	// GetCapture consulta al PSP el resultado de una captura por su clave de
+	// idempotencia: resuelve los pagos cuyo resultado quedó desconocido.
+	GetCapture(ctx context.Context, req PSPCaptureLookupRequest) (PSPCaptureLookup, error)
 	// Refund devuelve fondos al pagador.
 	Refund(ctx context.Context, req PSPRefundRequest) (PSPRefundResult, error)
 	// Name retorna el identificador del PSP para logging y auditoría.
@@ -63,6 +72,22 @@ type PSPCaptureResult struct {
 	PSPReference string // ID de la transacción en el PSP
 	PSPFee       int64  // comisión cobrada por el PSP (en centavos)
 	Status       string // "approved", "pending", "rejected"
+}
+
+// PSPCaptureLookupRequest identifica la captura a consultar.
+type PSPCaptureLookupRequest struct {
+	PaymentID      string
+	IdempotencyKey string
+	Amount         int64
+	Currency       string
+}
+
+// PSPCaptureLookup es lo que el PSP sabe de esa captura.
+type PSPCaptureLookup struct {
+	Found        bool // false: el PSP no tiene registro de la operación
+	Approved     bool // con Found: true capturada, false rechazada
+	PSPReference string
+	PSPFee       int64
 }
 
 // PSPRefundRequest contiene los datos para un reembolso.

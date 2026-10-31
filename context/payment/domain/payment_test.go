@@ -30,7 +30,7 @@ func newTestPayment(t *testing.T) *Payment {
 func newProcessingPayment(t *testing.T) *Payment {
 	t.Helper()
 	p := newTestPayment(t)
-	if err := p.MarkProcessing(); err != nil {
+	if err := p.MarkProcessing(ReconstituteMoney(300, "ARS")); err != nil {
 		t.Fatalf("MarkProcessing: %v", err)
 	}
 	return p
@@ -132,7 +132,7 @@ func TestPayment_MarkProcessing(t *testing.T) {
 		p := newTestPayment(t)
 		created := p.UpdatedAt()
 
-		if err := p.MarkProcessing(); err != nil {
+		if err := p.MarkProcessing(ReconstituteMoney(300, "ARS")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if p.Status() != StatusProcessing {
@@ -149,7 +149,7 @@ func TestPayment_MarkProcessing(t *testing.T) {
 	for _, st := range allStatusesExcept(StatusInitiated) {
 		t.Run("rejected from "+st.String(), func(t *testing.T) {
 			p := reconstituteWithStatus(st)
-			if err := p.MarkProcessing(); !errors.Is(err, ErrInvalidTransition) {
+			if err := p.MarkProcessing(ReconstituteMoney(300, "ARS")); !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("expected ErrInvalidTransition, got %v", err)
 			}
 			if p.Status() != st {

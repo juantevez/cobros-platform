@@ -380,6 +380,35 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		})
 	}
 
+	// El recuperador lo capturó mientras el PSP respondía: el Update
+	// condicional falla y se informa el estado que quedó, sin error.
+	t.Run("capture resolved meanwhile by the recoverer returns the current state", func(t *testing.T) {
+		d := newProcessDeps()
+		d.repo.changed = true
+		d.repo.byID = map[domain.PaymentID]*domain.Payment{}
+		resolved := buildPayment(tenantA, domain.StatusCaptured)
+		d.repo.findByIDHook = func(id domain.PaymentID) *domain.Payment { return resolved }
+
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil || res.Status != domain.StatusCaptured.String() {
+			t.Fatalf("res = %+v err = %v, want captured without error", res, err)
+		}
+	})
+
+	t.Run("final transitions are conditional on their starting status", func(t *testing.T) {
+		d := newProcessDeps()
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(d.repo.froms, []domain.PaymentStatus{domain.StatusProcessing}) {
+			t.Errorf("capture update from = %v, want [processing]", d.repo.froms)
+		}
+		// La comisión se fija en el claim (el recuperador la reusa).
+		if d.repo.saved[0].PlatformFee().Amount() != 300 {
+			t.Errorf("platform fee = %d", d.repo.saved[0].PlatformFee().Amount())
+		}
+	})
+
 	t.Run("psp rejection persist error is wrapped", func(t *testing.T) {
 		d := newProcessDeps()
 		d.psp.captureErr = fmt.Errorf("%w: card declined", ErrPSPDeclined)

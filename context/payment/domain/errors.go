@@ -14,6 +14,9 @@ var (
 	// ErrPaymentPending: el PSP no confirmó el resultado (timeout, error de
 	// red). El pago queda en processing hasta que se resuelva.
 	ErrPaymentPending = errors.New("payment outcome is pending confirmation from the payment provider")
+	// ErrPaymentChanged: el pago ya no estaba en el estado del que partía la
+	// transición (otra ejecución lo resolvió antes).
+	ErrPaymentChanged = errors.New("payment was modified concurrently")
 	ErrTenantNotActive      = errors.New("tenant is not enabled to process payments")
 	ErrAlreadyCaptured      = errors.New("payment is already captured")
 	ErrNotCaptured          = errors.New("payment is not captured; cannot refund")

@@ -43,6 +43,13 @@ func (a *Adapter) AuthorizeAndCapture(_ context.Context, req application.PSPCapt
 	}, nil
 }
 
+// GetCapture: el mock no guarda estado. El único resultado desconocido que
+// produce es TIMEOUT, que simula un timeout antes de capturar: el PSP no tiene
+// registro de la operación.
+func (a *Adapter) GetCapture(_ context.Context, _ application.PSPCaptureLookupRequest) (application.PSPCaptureLookup, error) {
+	return application.PSPCaptureLookup{Found: false}, nil
+}
+
 func (a *Adapter) Refund(_ context.Context, req application.PSPRefundRequest) (application.PSPRefundResult, error) {
 	return application.PSPRefundResult{
 		PSPReference: fmt.Sprintf("MOCK-REF-%s", uuid.NewString()[:8]),

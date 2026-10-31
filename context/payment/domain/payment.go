@@ -106,12 +106,15 @@ func ReconstitutePayment(
 
 // ── Transiciones ──────────────────────────────────────────────────────────────
 
-// MarkProcessing indica que el pago fue enviado al PSP.
-func (p *Payment) MarkProcessing() error {
+// MarkProcessing indica que el pago se envía al PSP y fija la comisión de la
+// plataforma calculada para él: se persiste con el claim, así quien resuelva
+// un pago trabado (el recuperador) captura con la misma comisión.
+func (p *Payment) MarkProcessing(platformFee Money) error {
 	if p.status != StatusInitiated {
 		return fmt.Errorf("%w: cannot mark processing from %q", ErrInvalidTransition, p.status)
 	}
 	p.status = StatusProcessing
+	p.platformFee = platformFee
 	p.updatedAt = time.Now().UTC()
 	return nil
 }
