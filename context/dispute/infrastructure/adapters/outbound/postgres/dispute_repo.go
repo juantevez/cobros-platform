@@ -213,12 +213,16 @@ func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn pkgpost
 	if err != nil {
 		return nil, err
 	}
-	return r.withEvidence(ctx, conn, rec)
+	evidence, err := loadEvidence(ctx, conn, []string{rec.idStr})
+	if err != nil {
+		return nil, err
+	}
+	return rec.toDispute(evidence[rec.idStr]), nil
 }
 
-// scanAll lee todas las filas antes de cargar la evidencia de cada una: con
-// una sola conexión (la de la sesión RLS) no se puede consultar mientras el
-// cursor de rows sigue abierto.
+// scanAll lee todas las filas y después carga la evidencia de todas en una
+// sola query (antes, una por disputa: N+1). Además, con una sola conexión (la
+// de la sesión RLS) no se puede consultar mientras el cursor sigue abierto.
 func (r *pgDisputeRepository) scanAll(ctx context.Context, conn pkgpostgres.Conn, rows pgx.Rows) ([]*domain.Dispute, error) {
 	var recs []disputeRecord
 	for rows.Next() {
@@ -233,42 +237,52 @@ func (r *pgDisputeRepository) scanAll(ctx context.Context, conn pkgpostgres.Conn
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	disputes := make([]*domain.Dispute, 0, len(recs))
-	for _, rec := range recs {
-		d, err := r.withEvidence(ctx, conn, rec)
-		if err != nil {
-			return nil, err
-		}
-		disputes = append(disputes, d)
+	if len(recs) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(recs))
+	for i, rec := range recs {
+		ids[i] = rec.idStr
+	}
+	evidence, err := loadEvidence(ctx, conn, ids)
+	if err != nil {
+		return nil, err
+	}
+	disputes := make([]*domain.Dispute, len(recs))
+	for i, rec := range recs {
+		disputes[i] = rec.toDispute(evidence[rec.idStr])
 	}
 	return disputes, nil
 }
 
-// withEvidence carga la evidencia de la disputa y reconstituye el agregado.
-func (r *pgDisputeRepository) withEvidence(ctx context.Context, conn pkgpostgres.Conn, rec disputeRecord) (*domain.Dispute, error) {
-	evRows, err := conn.Query(ctx, `
-		SELECT id, evidence_type, reference, COALESCE(description,''), submitted_at
-		FROM dispute_evidence WHERE dispute_id=$1 ORDER BY submitted_at`, rec.idStr)
+// loadEvidence trae la evidencia de las disputas dadas, agrupada por disputa.
+func loadEvidence(ctx context.Context, conn pkgpostgres.Conn, disputeIDs []string) (map[string][]domain.Evidence, error) {
+	rows, err := conn.Query(ctx, `
+		SELECT dispute_id, id, evidence_type, reference, COALESCE(description,''), submitted_at
+		FROM dispute_evidence WHERE dispute_id = ANY($1::uuid[]) ORDER BY submitted_at`, disputeIDs)
 	if err != nil {
 		return nil, fmt.Errorf("dispute repo: load evidence: %w", err)
 	}
-	defer evRows.Close()
+	defer rows.Close()
 
-	var evidence []domain.Evidence
-	for evRows.Next() {
-		var eid, evType, ref, desc string
+	byDispute := make(map[string][]domain.Evidence, len(disputeIDs))
+	for rows.Next() {
+		var disputeID, eid, evType, ref, desc string
 		var submittedAt time.Time
-		if err := evRows.Scan(&eid, &evType, &ref, &desc, &submittedAt); err != nil {
+		if err := rows.Scan(&disputeID, &eid, &evType, &ref, &desc, &submittedAt); err != nil {
 			return nil, fmt.Errorf("dispute repo: scan evidence: %w", err)
 		}
-		evidence = append(evidence, domain.ReconstituteEvidence(
+		byDispute[disputeID] = append(byDispute[disputeID], domain.ReconstituteEvidence(
 			domain.EvidenceID(eid), evType, ref, desc, submittedAt.UTC(),
 		))
 	}
-	if err := evRows.Err(); err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("dispute repo: load evidence: %w", err)
 	}
+	return byDispute, nil
+}
 
+func (rec disputeRecord) toDispute(evidence []domain.Evidence) *domain.Dispute {
 	reason, _ := domain.ParseDisputeReason(rec.reasonStr)
 	return domain.ReconstituteDispute(
 		domain.DisputeID(rec.idStr), domain.TenantID(rec.tenantIDStr),
@@ -280,7 +294,7 @@ func (r *pgDisputeRepository) withEvidence(ctx context.Context, conn pkgpostgres
 		rec.deadline.UTC(), rec.openedAt.UTC(),
 		rec.respondedAt, rec.resolvedAt,
 		rec.version,
-	), nil
+	)
 }
 
 func (r *pgDisputeRepository) saveEvidence(ctx context.Context, conn pkgpostgres.Conn, d *domain.Dispute) error {

@@ -22,7 +22,7 @@ var disputeCols = []string{
 	"deadline", "opened_at", "responded_at", "resolved_at", "version",
 }
 
-var evidenceCols = []string{"id", "evidence_type", "reference", "description", "submitted_at"}
+var evidenceCols = []string{"dispute_id", "id", "evidence_type", "reference", "description", "submitted_at"}
 
 // newTxMock devuelve el mock y un contexto con una tx abierta sobre él, como
 // el de TxManager.RunInTx: RunWithAppTenant delega en esa tx (las variables
@@ -195,9 +195,9 @@ func TestDisputeRepository_FindByID(t *testing.T) {
 
 		mock.ExpectQuery("FROM disputes WHERE id=\\$1").WithArgs(id.String()).
 			WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), tid)...))
-		mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+		mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 			WillReturnRows(pgxmock.NewRows(evidenceCols).
-				AddRow(uuid.NewString(), "receipt", "ref", "desc", testTime))
+				AddRow(id.String(), uuid.NewString(), "receipt", "ref", "desc", testTime))
 
 		d, err := repo.FindByID(ctx, id)
 		if err != nil {
@@ -228,7 +228,7 @@ func TestDisputeRepository_FindByID(t *testing.T) {
 		repo := NewDisputeRepository(mock)
 		mock.ExpectQuery("FROM disputes WHERE id=\\$1").WithArgs(id.String()).
 			WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), tid)...))
-		mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+		mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 			WillReturnError(errors.New("boom"))
 
 		if _, err := repo.FindByID(ctx, id); err == nil {
@@ -256,7 +256,7 @@ func TestDisputeRepository_FindByPaymentID(t *testing.T) {
 		id := domain.NewDisputeID()
 		mock.ExpectQuery("FROM disputes WHERE payment_id=\\$1").WithArgs("pay-1").
 			WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), uuid.NewString())...))
-		mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+		mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 			WillReturnRows(pgxmock.NewRows(evidenceCols))
 
 		d, err := repo.FindByPaymentID(ctx, "pay-1")
@@ -279,7 +279,7 @@ func TestDisputeRepository_ListByTenant(t *testing.T) {
 		mock.ExpectQuery("WHERE tenant_id=\\$1 ORDER BY opened_at DESC LIMIT \\$2").
 			WithArgs(tid.String(), 50).
 			WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), tid.String())...))
-		mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+		mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 			WillReturnRows(pgxmock.NewRows(evidenceCols))
 
 		out, err := repo.ListByTenant(ctx, tid, "", 50)
@@ -298,7 +298,7 @@ func TestDisputeRepository_ListByTenant(t *testing.T) {
 		mock.ExpectQuery("WHERE tenant_id=\\$1 AND status=\\$2 ORDER BY opened_at DESC LIMIT \\$3").
 			WithArgs(tid.String(), "open", 50).
 			WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), tid.String())...))
-		mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+		mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 			WillReturnRows(pgxmock.NewRows(evidenceCols))
 
 		out, err := repo.ListByTenant(ctx, tid, "open", 50)
@@ -328,7 +328,7 @@ func TestDisputeRepository_ListOverdue(t *testing.T) {
 		mock.ExpectQuery("WHERE status='open' AND deadline < \\$1").
 			WithArgs(testTime, 100).
 			WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), uuid.NewString())...))
-		mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+		mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 			WillReturnRows(pgxmock.NewRows(evidenceCols))
 
 		out, err := repo.ListOverdue(ctx, testTime, 100)
@@ -399,7 +399,7 @@ func TestDisputeRepository_scanErrors(t *testing.T) {
 		mock.ExpectQuery("FROM disputes WHERE id=\\$1").WithArgs(id.String()).
 			WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), uuid.NewString())...))
 		// Fila de evidencia con menos columnas → error de scan.
-		mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+		mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 			WillReturnRows(pgxmock.NewRows([]string{"id", "evidence_type"}).AddRow("e1", "receipt"))
 
 		if _, err := repo.FindByID(ctx, id); err == nil {
@@ -416,7 +416,7 @@ func TestDisputeRepository_ListByTenant_scanError(t *testing.T) {
 	mock.ExpectQuery("WHERE tenant_id=\\$1 ORDER BY").WithArgs(tid.String(), 50).
 		WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(id.String(), tid.String())...))
 	// La carga de evidencia falla dentro del loop → scanWithEvidence retorna error.
-	mock.ExpectQuery("FROM dispute_evidence").WithArgs(id.String()).
+	mock.ExpectQuery("FROM dispute_evidence").WithArgs([]string{id.String()}).
 		WillReturnError(errors.New("boom"))
 
 	if _, err := repo.ListByTenant(ctx, tid, "", 50); err == nil {
@@ -512,5 +512,30 @@ func TestDisputeRepository_Save_DuplicatePayment(t *testing.T) {
 		if errors.Is(err, application.ErrDuplicatePaymentKey) != tc.dup || err == nil {
 			t.Errorf("%s: err = %v, duplicate = %v", name, err, tc.dup)
 		}
+	}
+}
+
+// La evidencia de un listado se carga en una sola query (antes, una por
+// disputa) y se reparte por disputa.
+func TestDisputeRepository_ListLoadsEvidenceInOneQuery(t *testing.T) {
+	mock, ctx := newTxMock(t)
+	tid := uuid.NewString()
+	a, b := uuid.NewString(), uuid.NewString()
+	mock.ExpectQuery("FROM disputes").WithArgs(tid, 50).
+		WillReturnRows(pgxmock.NewRows(disputeCols).AddRow(disputeRow(a, tid)...).AddRow(disputeRow(b, tid)...))
+	mock.ExpectQuery("FROM dispute_evidence WHERE dispute_id = ANY").WithArgs([]string{a, b}).
+		WillReturnRows(pgxmock.NewRows(evidenceCols).
+			AddRow(b, uuid.NewString(), "receipt", "r1", "", testTime).
+			AddRow(b, uuid.NewString(), "tracking", "r2", "", testTime))
+
+	out, err := NewDisputeRepository(mock).ListByTenant(ctx, domain.TenantID(tid), "", 50)
+	if err != nil || len(out) != 2 {
+		t.Fatalf("list = %d, %v", len(out), err)
+	}
+	if len(out[0].Evidence()) != 0 || len(out[1].Evidence()) != 2 {
+		t.Errorf("evidence per dispute = %d/%d, want 0/2", len(out[0].Evidence()), len(out[1].Evidence()))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
 	}
 }
