@@ -7,6 +7,9 @@ var (
 	ErrPaymentAlreadyExists = errors.New("payment with this idempotency key already exists")
 	// ErrIdempotencyKeyConflict: la clave ya se usó para un pago con otro
 	// monto, moneda o método.
+	// ErrInvalidFee: una comisión negativa, o comisiones que dejan el neto del
+	// comercio en cero o negativo (Ledger no puede registrar ese asiento).
+	ErrInvalidFee             = errors.New("invalid fee: fees must be non-negative and below the payment amount")
 	ErrIdempotencyKeyConflict = errors.New("idempotency key already used with a different amount, currency or payment method")
 	ErrInvalidTransition      = errors.New("invalid payment status transition")
 	ErrInvalidAmount          = errors.New("payment amount must be greater than zero")

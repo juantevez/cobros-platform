@@ -409,6 +409,33 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	// Una comisión de Billing que deja el neto ≤ 0 no llega al PSP: el pago
+	// queda initiated (un reintento lo retoma cuando se corrija el plan).
+	t.Run("platform fee not below the amount aborts before the PSP", func(t *testing.T) {
+		d := newProcessDeps()
+		d.fees.fee = 10_000
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); !errors.Is(err, domain.ErrInvalidFee) {
+			t.Fatalf("expected ErrInvalidFee, got %v", err)
+		}
+		if len(d.psp.captures) != 0 || d.repo.saved[0].Status() != domain.StatusInitiated {
+			t.Errorf("captures = %d status = %q", len(d.psp.captures), d.repo.saved[0].Status())
+		}
+	})
+
+	// El PSP informó una comisión imposible: el pago queda processing (el
+	// recuperador lo reporta en cada ciclo) y no se publica una captura que
+	// Ledger rechazaría.
+	t.Run("absurd psp fee leaves the payment processing without events", func(t *testing.T) {
+		d := newProcessDeps()
+		d.psp.captureResult.PSPFee = 9_800
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); !errors.Is(err, domain.ErrInvalidFee) {
+			t.Fatalf("expected ErrInvalidFee, got %v", err)
+		}
+		if d.repo.saved[0].Status() != domain.StatusProcessing || len(d.pub.events) != 0 {
+			t.Errorf("status = %q events = %v", d.repo.saved[0].Status(), d.pub.eventTypes())
+		}
+	})
+
 	t.Run("psp rejection persist error is wrapped", func(t *testing.T) {
 		d := newProcessDeps()
 		d.psp.captureErr = fmt.Errorf("%w: card declined", ErrPSPDeclined)

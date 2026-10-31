@@ -118,6 +118,9 @@ func (p *Payment) MarkProcessing(platformFee Money) error {
 	if p.status != StatusInitiated {
 		return fmt.Errorf("%w: cannot mark processing from %q", ErrInvalidTransition, p.status)
 	}
+	if err := p.validateFees(platformFee, Money{amount: 0, currency: p.amount.currency}); err != nil {
+		return err
+	}
 	p.status = StatusProcessing
 	p.platformFee = platformFee
 	p.updatedAt = time.Now().UTC()
@@ -129,6 +132,9 @@ func (p *Payment) MarkProcessing(platformFee Money) error {
 func (p *Payment) Capture(pspName, pspReference string, platformFee, pspFee Money) error {
 	if p.status != StatusProcessing {
 		return fmt.Errorf("%w: cannot capture from %q", ErrInvalidTransition, p.status)
+	}
+	if err := p.validateFees(platformFee, pspFee); err != nil {
+		return err
 	}
 
 	now := time.Now().UTC()
@@ -228,6 +234,20 @@ func (p *Payment) Refund(pspReference string) error {
 		PSPReference: pspReference,
 	})
 
+	return nil
+}
+
+// validateFees exige comisiones no negativas que dejen un neto positivo para
+// el comercio: con neto ≤ 0, Ledger rechaza el asiento y el pago quedaría
+// captured sin contabilizar.
+func (p *Payment) validateFees(platformFee, pspFee Money) error {
+	if platformFee.amount < 0 || pspFee.amount < 0 {
+		return fmt.Errorf("%w: platform_fee=%d psp_fee=%d", ErrInvalidFee, platformFee.amount, pspFee.amount)
+	}
+	if platformFee.amount+pspFee.amount >= p.amount.amount {
+		return fmt.Errorf("%w: platform_fee=%d + psp_fee=%d >= amount=%d",
+			ErrInvalidFee, platformFee.amount, pspFee.amount, p.amount.amount)
+	}
 	return nil
 }
 

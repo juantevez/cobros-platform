@@ -411,3 +411,46 @@ func TestReconstitutePayment(t *testing.T) {
 		t.Error("reconstitution must not emit events")
 	}
 }
+
+// Comisiones negativas o que dejan el neto ≤ 0: Ledger rechaza ese asiento y
+// el pago quedaba captured sin contabilizar.
+func TestPayment_FeeValidation(t *testing.T) {
+	ars := func(n int64) Money { return ReconstituteMoney(n, "ARS") }
+	amount := newTestPayment(t).Amount().Amount()
+
+	for name, fee := range map[string]int64{"negative": -1, "equal to amount": amount, "above amount": amount + 1} {
+		t.Run("MarkProcessing rejects platform fee "+name, func(t *testing.T) {
+			p := newTestPayment(t)
+			if err := p.MarkProcessing(ars(fee)); !errors.Is(err, ErrInvalidFee) {
+				t.Fatalf("expected ErrInvalidFee, got %v", err)
+			}
+			if p.Status() != StatusInitiated {
+				t.Errorf("status = %q, want initiated", p.Status())
+			}
+		})
+	}
+
+	for name, tc := range map[string]struct{ platform, psp int64 }{
+		"negative psp fee":      {300, -1},
+		"fees equal to amount":  {300, amount - 300},
+		"fees above amount":     {300, amount},
+		"negative platform fee": {-1, 10},
+	} {
+		t.Run("Capture rejects "+name, func(t *testing.T) {
+			p := newProcessingPayment(t)
+			if err := p.Capture("mock", "PSP-1", ars(tc.platform), ars(tc.psp)); !errors.Is(err, ErrInvalidFee) {
+				t.Fatalf("expected ErrInvalidFee, got %v", err)
+			}
+			if p.Status() != StatusProcessing || len(p.PullEvents()) != 0 {
+				t.Errorf("status = %q, want processing without events", p.Status())
+			}
+		})
+	}
+
+	t.Run("fees leaving a positive net are accepted", func(t *testing.T) {
+		p := newProcessingPayment(t)
+		if err := p.Capture("mock", "PSP-1", ars(300), ars(amount-301)); err != nil || p.NetAmount() != 1 {
+			t.Fatalf("err = %v net = %d", err, p.NetAmount())
+		}
+	})
+}
