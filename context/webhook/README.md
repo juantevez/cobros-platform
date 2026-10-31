@@ -207,6 +207,7 @@ Respuesta (el secret solo se muestra una vez):
 | PAYOUT | `payout.>` | `payout.initiated`, `payout.confirmed`, `payout.failed`, `payout.unknown` |
 | ONBOARDING | `onboarding.>` | `onboarding.application.{submitted,sent_for_review,approved,rejected,more_info,reopened}` |
 | AUTH | `auth.tenant.>` | `auth.tenant.created`, `auth.tenant.activated`, `auth.tenant.suspended` |
+| DISPUTE | `dispute.>` | `dispute.opened` (con el `deadline` para responder), `dispute.resolved` |
 
 Detalle completo (modelo, API, persistencia, limitaciones) en [docs/technical/WEBHOOK.md](../../docs/technical/WEBHOOK.md).
 
@@ -216,7 +217,7 @@ Detalle completo (modelo, API, persistencia, limitaciones) en [docs/technical/WE
 
 ```
 Produce eventos → stream WEBHOOK (webhook.endpoint.registered.v1, etc.)
-Consume eventos → PAYMENT, PAYOUT, ONBOARDING, AUTH
+Consume eventos → PAYMENT, PAYOUT, ONBOARDING, AUTH, DISPUTE
 
 Depende de → pkg/postgres
              pkg/outbox (EventPublisher)

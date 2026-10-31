@@ -94,6 +94,10 @@ func TestNewDispute(t *testing.T) {
 		if opened.Amount != 5000 || opened.Currency != "ARS" || opened.Reason != "duplicate" {
 			t.Errorf("event payload mismatch: %+v", opened)
 		}
+		// El comercio necesita el plazo (notificación y webhook).
+		if !opened.Deadline.Equal(deadline) || opened.Deadline.Location() != time.UTC {
+			t.Errorf("event deadline = %v, want %v in UTC", opened.Deadline, deadline)
+		}
 	})
 
 	// La disputa es del dueño del pago: no hay tenant del caller que reasignar.

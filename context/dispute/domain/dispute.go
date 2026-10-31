@@ -120,6 +120,7 @@ func NewDispute(
 		Amount:    amount,
 		Currency:  currency,
 		Reason:    reason.String(),
+		Deadline:  deadline.UTC(),
 	})
 
 	return d, nil

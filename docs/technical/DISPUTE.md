@@ -45,7 +45,6 @@ Cableado en dos procesos:
 - Ingesta automática de disputas desde el PSP (webhooks, API de chargebacks).
 - Pre-arbitraje, múltiples rondas de evidencia, fees de chargeback, representación legal.
 - Envío real de evidencia al banco (solo se guarda la referencia externa).
-- Webhooks salientes ni notificaciones al comercio por `dispute.*` (§10).
 
 ---
 
@@ -338,7 +337,7 @@ Body: `{ "outcome": "won" | "lost", "note": "…" }` (`outcome` requerido).
 
 | Subject | Payload | Quién lo dispara |
 |---|---|---|
-| `dispute.opened.v1` | `dispute_id, payment_id, tenant_id, amount, currency, reason` | `NewDispute` (vía `OpenDispute`) |
+| `dispute.opened.v1` | `dispute_id, payment_id, tenant_id, amount, currency, reason, deadline` | `NewDispute` (vía `OpenDispute`) |
 | `dispute.resolved.v1` | `dispute_id, payment_id, tenant_id, amount, currency, outcome` (`won\|lost\|accepted\|expired`) | `Accept`, `Resolve`, `Expire` |
 
 Publicación por **outbox transaccional** (`pkg/outbox` → relay JetStream); el `event_id`
@@ -351,8 +350,10 @@ es UUID y sirve de `Nats-Msg-Id` (dedupe de 5 min).
 | `ledger-dispute-consumer` | worker | `DISPUTE` / `dispute.>` | Asientos de hold/liberación (§4.3), idempotente por claves `dispute_opened_*` / `dispute_resolved_*`. `MaxDeliver: 5`. |
 | Reporting | worker | `DISPUTE` | Proyección de disputas en el read-model (ver REPORTING.md). |
 | Audit | worker | `DISPUTE` | Bitácora. |
+| `webhook-dispute-consumer` | worker | `DISPUTE` / `dispute.>` | Entrega `dispute.opened` y `dispute.resolved` a los endpoints suscriptos del comercio (ver WEBHOOK.md). |
+| `notification-dispute-consumer` | worker | `DISPUTE` / `dispute.>` | Email al comercio: al abrir, con monto, motivo y plazo para responder; al cerrar, con el resultado (ver NOTIFICATION.md). |
 
-No hay webhook saliente ni notificación al comercio por `dispute.*`, ni screening de Compliance por tasa de contracargos (§10).
+No hay screening de Compliance por tasa de contracargos (§10).
 
 ### 7.3 Este BC no consume eventos de otros
 
@@ -439,15 +440,14 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Disputas invisibles para el comercio | Sin webhook ni notificación por `dispute.*`: el comercio no se entera por un canal oficial de que tiene una disputa ni de su plazo, y la pierde por vencimiento. `dispute.opened.v1` tampoco lleva el `deadline`. (Reporting sí proyecta las disputas.) |
-| 2 | Media | Concurrencia optimista declarada pero inexistente | El puerto, el dominio (`version`) y `ErrOptimisticLock` describen un `UPDATE … WHERE version`, pero la tabla no tiene la columna y `Update` filtra solo por `id`: operaciones concurrentes publican dos `resolved.v1` (last-write-wins). La idempotencia del Ledger evita el doble asiento, no la doble resolución lógica. |
-| 3 | Baja | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`. El caso de uso traduce `ErrDuplicatePaymentKey` a 409, pero el repo nunca lo devuelve: si gana la constraint `UNIQUE(payment_id)`, responde **500**. |
-| 4 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
-| 5 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
-| 6 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
-| 7 | Media | RLS no efectiva | La política de `disputes` no tiene `NULLIF` ni política de operador; `dispute_evidence` no tiene RLS ni `tenant_id`. Lecturas, poller y `PaymentReader` van por pool directo; para abrir disputas bajo RLS, `PaymentReader` necesita además leer `payments` como operador (hoy esa tabla no tiene política de operador). Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
-| 8 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y ninguno se persiste). |
-| 9 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
+| 1 | Media | Concurrencia optimista declarada pero inexistente | El puerto, el dominio (`version`) y `ErrOptimisticLock` describen un `UPDATE … WHERE version`, pero la tabla no tiene la columna y `Update` filtra solo por `id`: operaciones concurrentes publican dos `resolved.v1` (last-write-wins). La idempotencia del Ledger evita el doble asiento, no la doble resolución lógica. |
+| 2 | Baja | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`. El caso de uso traduce `ErrDuplicatePaymentKey` a 409, pero el repo nunca lo devuelve: si gana la constraint `UNIQUE(payment_id)`, responde **500**. |
+| 3 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
+| 4 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
+| 5 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
+| 6 | Media | RLS no efectiva | La política de `disputes` no tiene `NULLIF` ni política de operador; `dispute_evidence` no tiene RLS ni `tenant_id`. Lecturas, poller y `PaymentReader` van por pool directo; para abrir disputas bajo RLS, `PaymentReader` necesita además leer `payments` como operador (hoy esa tabla no tiene política de operador). Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
+| 7 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y ninguno se persiste). |
+| 8 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
 
 ---
 
@@ -455,7 +455,7 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 | Capa | Archivos | Tipo |
 |---|---|---|
-| Dominio | `domain/dispute_test.go`, `events_test.go`, `vo_test.go` | Unitarios: creación y validaciones, cada transición de la FSM, deadline/`ErrDisputeExpired`, evidencia requerida, `IsOverdue`, `IsFinal`, parseo de enums/IDs, reconstitución, eventos registrados. |
+| Dominio | `domain/dispute_test.go`, `events_test.go`, `vo_test.go` | Unitarios: creación y validaciones (tenant del pago, `deadline` en el evento de apertura), cada transición de la FSM, deadline/`ErrDisputeExpired`, evidencia requerida, `IsOverdue`, `IsFinal`, parseo de enums/IDs, reconstitución, eventos registrados. |
 | Aplicación | `application/use_cases_test.go`, `expiry_poller_test.go` (+ `mocks_test.go`) | Fakes en memoria de repo/tx/publisher/clock: happy paths, duplicados, cross-tenant, outcomes inválidos, límites de `limit`, mapper `toView`, ciclo del poller (expira, publica, tolera errores) y cancelación de contexto. |
 | HTTP inbound | `inbound/http/handler_test.go` | Gin + `httptest`: códigos 201/204/400/404/409/422, `RegisterRoutes`, el guard de cada ruta (403; pánico si falta alguno) y el mapeo de cada error de dominio. |
 | Postgres outbound | `outbound/postgres/dispute_repo_test.go` | **pgxmock v4**: SQL exacto de Save/Update/finds/ListByTenant/ListOverdue, scan de evidencia, errores de scan/save, `nullStr`. |

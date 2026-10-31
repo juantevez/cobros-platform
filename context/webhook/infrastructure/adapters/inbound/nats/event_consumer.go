@@ -61,6 +61,10 @@ func (c *EventConsumer) StartOnboardingConsumer(ctx context.Context) error {
 	return c.startConsumer(ctx, "ONBOARDING", "webhook-onboarding-consumer", "onboarding.>")
 }
 
+func (c *EventConsumer) StartDisputeConsumer(ctx context.Context) error {
+	return c.startConsumer(ctx, "DISPUTE", "webhook-dispute-consumer", "dispute.>")
+}
+
 func (c *EventConsumer) StartAuthConsumer(ctx context.Context) error {
 	return c.startConsumer(ctx, "AUTH", "webhook-auth-consumer", "auth.tenant.>")
 }
