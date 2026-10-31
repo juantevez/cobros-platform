@@ -176,9 +176,22 @@ func respondError(c *gin.Context, err error) {
 	}
 }
 
+// RouteGuards autoriza las rutas. Se inyecta desde el composition root para no
+// acoplar este contexto con Auth; en producción es
+// RequirePermission(webhooks:manage, webhooks:write). Un solo guard para todo:
+// registrar una URL decide a dónde salen los datos del tenant, y el historial
+// de deliveries expone los payloads completos.
+type RouteGuards struct {
+	Manage gin.HandlerFunc
+}
+
 // RegisterRoutes registra las rutas de Webhooks en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *WebhookHandler) {
-	wh := rg.Group("/webhooks")
+func RegisterRoutes(rg *gin.RouterGroup, h *WebhookHandler, guards RouteGuards) {
+	if guards.Manage == nil {
+		panic("webhook: RegisterRoutes requires a Manage guard")
+	}
+
+	wh := rg.Group("/webhooks", guards.Manage)
 	{
 		wh.POST("/endpoints", h.RegisterEndpoint)
 		wh.GET("/endpoints", h.ListEndpoints)

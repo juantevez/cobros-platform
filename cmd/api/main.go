@@ -309,7 +309,9 @@ func main() {
 	webhookhttp.RegisterRoutes(protected, webhookhttp.NewWebhookHandler(
 		registerEndpoint, deactivateEndpoint, listEndpoints,
 		listDeliveries, getDelivery, retryDelivery,
-	))
+	), webhookhttp.RouteGuards{
+		Manage: authttp.RequirePermission(authdomain.ActionManageWebhooks, authdomain.ScopeWebhooks),
+	})
 
 	// ── Reconciliation ────────────────────────────────────────────────────────
 
