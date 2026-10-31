@@ -2,6 +2,9 @@ package http
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -74,11 +77,10 @@ func TestDispatcher_Dispatch(t *testing.T) {
 			t.Errorf("body = %s, want %s", gotBody, d.Payload())
 		}
 		headers := map[string]string{
-			"Content-Type":       "application/json",
-			"X-Cobros-Signature": "sha256=" + e.ComputeSignature(d.Payload()),
-			"X-Cobros-Event":     "payment.captured",
-			"X-Cobros-Delivery":  d.ID().String(),
-			"User-Agent":         "cobros-platform-webhooks/1.0",
+			"Content-Type":      "application/json",
+			"X-Cobros-Event":    "payment.captured",
+			"X-Cobros-Delivery": d.ID().String(),
+			"User-Agent":        "cobros-platform-webhooks/1.0",
 		}
 		for k, want := range headers {
 			if got := gotReq.Header.Get(k); got != want {
@@ -88,6 +90,19 @@ func TestDispatcher_Dispatch(t *testing.T) {
 		ts, err := strconv.ParseInt(gotReq.Header.Get("X-Cobros-Timestamp"), 10, 64)
 		if err != nil || ts < before || ts > time.Now().Unix() {
 			t.Errorf("timestamp header = %q", gotReq.Header.Get("X-Cobros-Timestamp"))
+		}
+		// Verificación como la haría el comercio: t de la firma = timestamp
+		// del header, y HMAC de "<t>.<body crudo>".
+		sig := gotReq.Header.Get("X-Cobros-Signature")
+		tPart, v1Part, ok := strings.Cut(sig, ",")
+		if !ok || tPart != "t="+strconv.FormatInt(ts, 10) || !strings.HasPrefix(v1Part, "v1=") {
+			t.Fatalf("signature header = %q", sig)
+		}
+		mac := hmac.New(sha256.New, []byte("whsec_test"))
+		mac.Write([]byte(strconv.FormatInt(ts, 10) + "."))
+		mac.Write(gotBody)
+		if !hmac.Equal([]byte(strings.TrimPrefix(v1Part, "v1=")), []byte(hex.EncodeToString(mac.Sum(nil)))) {
+			t.Errorf("signature %q does not verify against t.body", sig)
 		}
 
 		if attempt.AttemptNum() != 3 || attempt.HTTPStatus() != 201 || attempt.ResponseBody() != "thanks" || attempt.ErrMsg() != "" {

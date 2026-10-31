@@ -166,19 +166,27 @@ func TestWebhookEndpoint_SubscribesTo(t *testing.T) {
 }
 
 func TestWebhookEndpoint_ComputeSignature(t *testing.T) {
-	// RFC 4231, test case 2 (HMAC-SHA256).
-	e := ReconstituteWebhookEndpoint(NewEndpointID(), testTenant, "https://x.example.com", "Jefe", "Jefe", "", []string{"a.b"}, true, time.Now(), time.Now())
-	got := e.ComputeSignature([]byte("what do ya want for nothing?"))
-	want := "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+	// Vector calculado aparte, como lo haría el comercio:
+	//   hmac.new(b"whsec_test", b'1700000000.{"a":1}', sha256).hexdigest()
+	e := ReconstituteWebhookEndpoint(NewEndpointID(), testTenant, "https://x.example.com", "whsec_test", "", "", []string{"a.b"}, true, time.Now(), time.Now())
+	got := e.ComputeSignature(1700000000, []byte(`{"a":1}`))
+	want := "38877139021993b830af32feea6e18a8da83eb2f6e49ee50bd9e4cf4ca4d3789"
 	if got != want {
 		t.Errorf("signature = %s, want %s", got, want)
 	}
+	if h := e.SignatureHeader(1700000000, []byte(`{"a":1}`)); h != "t=1700000000,v1="+want {
+		t.Errorf("header = %s", h)
+	}
 
-	if e.ComputeSignature([]byte("a")) == e.ComputeSignature([]byte("b")) {
+	if e.ComputeSignature(1, []byte("a")) == e.ComputeSignature(1, []byte("b")) {
 		t.Error("different payloads must produce different signatures")
 	}
+	// El timestamp está firmado: el mismo body con otro t no verifica (replay).
+	if e.ComputeSignature(1, []byte("a")) == e.ComputeSignature(2, []byte("a")) {
+		t.Error("different timestamps must produce different signatures")
+	}
 	other := ReconstituteWebhookEndpoint(NewEndpointID(), testTenant, "https://x.example.com", "other", "", "", []string{"a.b"}, true, time.Now(), time.Now())
-	if other.ComputeSignature([]byte("a")) == e.ComputeSignature([]byte("a")) {
+	if other.ComputeSignature(1, []byte("a")) == e.ComputeSignature(1, []byte("a")) {
 		t.Error("different secrets must produce different signatures")
 	}
 }

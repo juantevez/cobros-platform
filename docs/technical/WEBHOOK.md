@@ -14,7 +14,7 @@ Webhook entrega los eventos de dominio de la plataforma al **endpoint HTTP del c
 |---|---|
 | Consumer desacoplado del comercio | El consumer NATS solo **crea** la delivery (`pending`). El POST lo hace el `RetryPoller`, así que un endpoint lento no frena el ack a NATS. |
 | Idempotencia por evento | `UNIQUE (endpoint_id, event_id)`. Además hay un chequeo previo en `DispatchEvent`, y una re-entrega de NATS no duplica la delivery. |
-| Autenticidad | `X-Cobros-Signature: sha256=<HMAC-SHA256(secret, body)>` con un secret `whsec_…` que se muestra **una sola vez** al registrar. |
+| Autenticidad | `X-Cobros-Signature: t=<unix>,v1=<HMAC-SHA256(secret, "<unix>." + body)>` (timestamp firmado, contra replay) con un secret `whsec_…` que se muestra **una sola vez** al registrar. |
 | Entrega *at-least-once* | Si falla la persistencia después del POST, la delivery se vuelve a despachar. El comercio debe deduplicar por `delivery_id` (o por `event_id`). |
 | Historial | Cada intento HTTP queda en `webhook_delivery_attempts`: status, primeros 500 bytes de la respuesta (cortados en un carácter completo, con UTF-8 inválido reemplazado y sin `NUL`, para que siempre entren en `TEXT`), error y duración. |
 
@@ -163,10 +163,10 @@ POST /api/v1/webhooks/endpoints
 POST <url>
 Content-Type:       application/json
 User-Agent:         cobros-platform-webhooks/1.0
-X-Cobros-Signature: sha256=<hex HMAC-SHA256(secret, body)>
+X-Cobros-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<unix>." + body)>
 X-Cobros-Event:     payment.captured            (sin versión)
 X-Cobros-Delivery:  <delivery_id>
-X-Cobros-Timestamp: <unix, momento del intento> (no firmado, §10)
+X-Cobros-Timestamp: <unix, momento del intento> (el mismo t de la firma)
 ```
 
 ```json
@@ -185,7 +185,13 @@ X-Cobros-Timestamp: <unix, momento del intento> (no firmado, §10)
 - `data` es el payload interno del evento **tal cual**: el contrato público queda acoplado al interno.
 - El body se guarda como `JSONB`, así que el orden de las claves y los espacios pueden diferir del original. La firma se calcula sobre los bytes que efectivamente se envían.
 
-Verificación en el comercio: `hmac.compare_digest(hex(HMAC-SHA256(secret, raw_body)), header[7:])`.
+Verificación en el comercio (ejemplos en Python y Node en el [README del contexto](../../context/webhook/README.md)):
+
+1. Separar `t` y `v1` del header.
+2. Rechazar si `|now - t|` supera la tolerancia (se recomiendan 5 min): un request capturado no se puede reenviar después, porque cambiar `t` invalida la firma.
+3. Comparar en tiempo constante `v1` contra `hex(HMAC-SHA256(secret, t + "." + raw_body))`, sobre el body **crudo**.
+
+Cada intento lleva su propio `t`, así que la firma cambia entre reintentos. `v1` identifica el esquema: un cambio futuro puede agregar `v2` sin romper a quien verifica `v1`.
 
 Solo un **2xx** cuenta como entregado. Los redirects **no se siguen**: un 3xx es un intento fallido y su `error` indica el `Location`, para que el comercio registre la URL final. Seguirlos convertía un 301/302/303 en un GET sin body que podía dar la delivery por entregada.
 
@@ -264,12 +270,11 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Firma sin timestamp | `X-Cobros-Timestamp` viaja pero no se firma: un request capturado se puede reenviar al comercio indefinidamente con firma válida, y el comercio no tiene cómo rechazar los viejos. |
-| 2 | Baja | IDs inválidos → 500 | `DELETE /endpoints/abc`, `GET`/`POST /deliveries/abc[/retry]`: el error de parseo cae en el `default` de `respondError`. |
-| 3 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
-| 4 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
-| 5 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
-| 6 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
+| 1 | Baja | IDs inválidos → 500 | `DELETE /endpoints/abc`, `GET`/`POST /deliveries/abc[/retry]`: el error de parseo cae en el `default` de `respondError`. |
+| 2 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
+| 3 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
+| 4 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
+| 5 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
 
 ---
 
@@ -277,11 +282,11 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 
 | Capa | Archivos | Tipo |
 |---|---|---|
-| Dominio | `domain/*_test.go` | Validación de URL y eventos, firma (vector RFC 4231), FSM de la delivery, schedule y `MaxAttempts`, truncado y saneado del body (sin partir caracteres, UTF-8 inválido, `NUL`). |
+| Dominio | `domain/*_test.go` | Validación de URL y eventos, firma de `<t>.<body>` (vector calculado aparte en Python, y distinta con otro `t`), FSM de la delivery, schedule y `MaxAttempts`, truncado y saneado del body (sin partir caracteres, UTF-8 inválido, `NUL`). |
 | Aplicación | `application/*_test.go` | Alta (incluido el destino rechazado sin guardar nada) y baja con publicación en tx, `DispatchEvent` (idempotencia, fallo parcial), `RetryDelivery` (tenant ajeno, final, endpoint inactivo, exhausted, estado + evento en la misma tx y error de publish que la descarta, reclamo con su vencimiento y `attempt_count`, delivery reclamada por otro sin POST), poller con concurrencia (saltea en silencio las reclamadas y despacha cada delivery con su tenant), listados. |
 | HTTP | `inbound/http/webhook_handler_test.go` | Handlers, mapeo de errores y guard en cada ruta (403; `RegisterRoutes` exige el guard). |
 | NATS | `inbound/nats/event_consumer_test.go` | Extracción de tenant (y su paso al contexto, para RLS), `event_id` y `occurred_at`; casos que hacen *ack* sin reintentar. |
-| Dispatcher | `outbound/http/dispatcher_test.go`, `destination_guard_test.go` | Headers, firma, errores de red, redirects no seguidos (301/302/303/307/308) y destino interno bloqueado en el dial (sin tocar el servidor) contra `httptest`. Rangos internos, chequeo del alta con resolver falso (incluido un host con una IP pública y otra interna), control del dialer y modo desarrollo. |
+| Dispatcher | `outbound/http/dispatcher_test.go`, `destination_guard_test.go` | Headers, firma `t=…,v1=…` verificada como lo haría el comercio (`t` = `X-Cobros-Timestamp`), errores de red, redirects no seguidos (301/302/303/307/308) y destino interno bloqueado en el dial (sin tocar el servidor) contra `httptest`. Rangos internos, chequeo del alta con resolver falso (incluido un host con una IP pública y otra interna), control del dialer y modo desarrollo. |
 | Postgres | `outbound/postgres/repo_test.go`, `integration_test.go`, `rls_test.go` | `pgxmock` para el SQL de cada método (dentro de una tx simulada) y para la sesión RLS: tenant de la entidad, tenant del llamador, operador en el listado del poller. Integración contra PostgreSQL (`DATABASE_URL`, se saltan si no hay DB): intento con body multibyte cortado y `NUL`; 8 reclamos simultáneos de la misma delivery (gana uno), reclamo vigente fuera del poller, reclamo vencido retomado, `UPDATE` que libera el reclamo y rechaza una escritura con `attempt_count` viejo. RLS con un rol sin `BYPASSRLS`: aislamiento de endpoints, deliveries e intentos entre tenants, sin tenant no se ve nada, el operador lista cross-tenant pero no escribe, y el flujo consumer → poller entrega bajo RLS. |
 
 ```bash

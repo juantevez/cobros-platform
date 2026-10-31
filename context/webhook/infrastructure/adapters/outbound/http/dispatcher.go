@@ -19,16 +19,16 @@ import (
 // Headers enviados al comercio:
 //
 //	Content-Type:          application/json
-//	X-Cobros-Signature:    sha256=<hex(HMAC-SHA256(secret, body))>
+//	X-Cobros-Signature:    t=<unix>,v1=<hex(HMAC-SHA256(secret, "<unix>." + body))>
 //	X-Cobros-Event:        payment.captured
 //	X-Cobros-Delivery:     <delivery_id>
-//	X-Cobros-Timestamp:    <unix_timestamp>
+//	X-Cobros-Timestamp:    <unix> (el mismo t de la firma)
 //
-// El comercio debe verificar la firma:
+// El comercio debe verificar la firma y la frescura:
 //
-//	expected = HMAC-SHA256(secret, raw_body)
-//	received = request.Header("X-Cobros-Signature")[7:]  // quita "sha256="
-//	assert hmac.Equal(expected, received)
+//	t, v1    = parse(request.Header("X-Cobros-Signature"))
+//	expected = HMAC-SHA256(secret, t + "." + raw_body)
+//	assert hmac.Equal(expected, v1) && |now - t| <= 5 min
 type Dispatcher struct {
 	client *http.Client
 }
@@ -68,8 +68,8 @@ func (d *Dispatcher) Dispatch(
 	delivery *domain.WebhookDelivery,
 ) (domain.DeliveryAttempt, error) {
 	payload := delivery.Payload()
-	signature := endpoint.ComputeSignature(payload)
 	timestamp := time.Now().Unix()
+	signature := endpoint.SignatureHeader(timestamp, payload)
 	start := time.Now()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL(), bytes.NewReader(payload))
@@ -83,7 +83,7 @@ func (d *Dispatcher) Dispatch(
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Cobros-Signature", "sha256="+signature)
+	req.Header.Set("X-Cobros-Signature", signature)
 	req.Header.Set("X-Cobros-Event", delivery.EventType())
 	req.Header.Set("X-Cobros-Delivery", delivery.ID().String())
 	req.Header.Set("X-Cobros-Timestamp", strconv.FormatInt(timestamp, 10))
