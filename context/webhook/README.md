@@ -169,7 +169,7 @@ Respuesta (el secret solo se muestra una vez):
 
 ```json
 {
-  "event_type":  "payment.captured",
+  "event_type":  "payment.captured.v1",
   "event_id":    "evt_uuid",
   "delivery_id": "dlv_uuid",
   "occurred_at": "2026-06-01T12:00:00Z",
@@ -188,9 +188,11 @@ Respuesta (el secret solo se muestra una vez):
 | Stream NATS | Filter | Eventos despachados |
 |---|---|---|
 | PAYMENT | `payment.>` | `payment.captured`, `payment.failed`, `payment.refunded` |
-| PAYOUT | `payout.>` | `payout.confirmed`, `payout.failed` |
-| ONBOARDING | `onboarding.>` | `kyc.approved`, `kyc.rejected` |
-| AUTH | `auth.tenant.>` | `auth.tenant.activated`, `auth.tenant.suspended` |
+| PAYOUT | `payout.>` | `payout.initiated`, `payout.confirmed`, `payout.failed`, `payout.unknown` |
+| ONBOARDING | `onboarding.>` | `onboarding.application.{submitted,sent_for_review,approved,rejected,more_info,reopened}` |
+| AUTH | `auth.tenant.>` | `auth.tenant.created`, `auth.tenant.activated`, `auth.tenant.suspended` |
+
+Detalle completo (modelo, API, persistencia, limitaciones) en [docs/technical/WEBHOOK.md](../../docs/technical/WEBHOOK.md).
 
 ---
 
