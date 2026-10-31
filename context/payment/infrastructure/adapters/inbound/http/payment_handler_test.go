@@ -542,3 +542,32 @@ func TestRegisterRoutes_GuardsApplyPerRoute(t *testing.T) {
 		})
 	}
 }
+
+// Las respuestas de cobro y reembolso salían en PascalCase (sin tags JSON),
+// mientras GET usa snake_case.
+func TestResponsesUseSnakeCase(t *testing.T) {
+	tid := uuid.NewString()
+	r := newRepo()
+	process := doRequest(newHandler(r, defaultOpts()).Process, http.MethodPost, "/payments", validBody, tid, nil)
+	var processBody map[string]any
+	_ = json.Unmarshal(process.Body.Bytes(), &processBody)
+	for _, k := range []string{"payment_id", "status", "psp_reference", "amount", "currency", "platform_fee", "captured_at", "was_existing"} {
+		if _, ok := processBody[k]; !ok {
+			t.Errorf("process response lacks %q: %s", k, process.Body)
+		}
+	}
+	paymentID, _ := processBody["payment_id"].(string)
+
+	refund := doRequest(newHandler(r, defaultOpts()).Refund, http.MethodPost, "/payments/x/refund", "", tid,
+		gin.Params{{Key: "paymentID", Value: paymentID}})
+	var refundBody map[string]any
+	_ = json.Unmarshal(refund.Body.Bytes(), &refundBody)
+	for _, k := range []string{"payment_id", "psp_reference", "status"} {
+		if _, ok := refundBody[k]; !ok {
+			t.Errorf("refund response lacks %q: %s", k, refund.Body)
+		}
+	}
+	if strings.Contains(process.Body.String()+refund.Body.String(), "PaymentID") {
+		t.Errorf("PascalCase keys left: %s %s", process.Body, refund.Body)
+	}
+}

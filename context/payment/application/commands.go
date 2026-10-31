@@ -25,15 +25,17 @@ type ProcessPaymentCmd struct {
 	Metadata   map[string]string
 }
 
+// ProcessPaymentResult es también la respuesta HTTP: snake_case, como
+// PaymentView (antes salía en PascalCase).
 type ProcessPaymentResult struct {
-	PaymentID    string
-	Status       string
-	PSPReference string
-	Amount       int64
-	Currency     string
-	PlatformFee  int64
-	CapturedAt   *time.Time
-	WasExisting  bool // true si el pago ya existía (reintento idempotente)
+	PaymentID    string     `json:"payment_id"`
+	Status       string     `json:"status"`
+	PSPReference string     `json:"psp_reference,omitempty"`
+	Amount       int64      `json:"amount"`
+	Currency     string     `json:"currency"`
+	PlatformFee  int64      `json:"platform_fee"`
+	CapturedAt   *time.Time `json:"captured_at,omitempty"`
+	WasExisting  bool       `json:"was_existing"` // true si el pago ya existía (reintento idempotente)
 }
 
 // RefundPaymentCmd solicita el reembolso de un pago capturado.
@@ -43,9 +45,9 @@ type RefundPaymentCmd struct {
 }
 
 type RefundPaymentResult struct {
-	PaymentID    string
-	PSPReference string
-	Status       string
+	PaymentID    string `json:"payment_id"`
+	PSPReference string `json:"psp_reference"`
+	Status       string `json:"status"`
 }
 
 // GetPaymentQuery consulta el estado de un pago.

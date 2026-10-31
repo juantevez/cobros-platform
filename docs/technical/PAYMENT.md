@@ -232,7 +232,7 @@ Las rutas `/api/v1/payments` viven en un grupo propio de `cmd/api` con `JWTOrApi
 |---|---|---|---|---|
 | `POST` | `/payments` | `payments:create` → `admin`, `operator` | `payments:write` | `201` nuevo / `200` si la clave ya existía |
 | `GET` | `/payments/:paymentID` | `payments:read` → todos los roles | `payments:read` o `payments:write` | `200 PaymentView` |
-| `POST` | `/payments/:paymentID/refund` | `payments:refund` → **solo `admin`** | `payments:write` | `200 {"PaymentID","PSPReference","Status"}` ⚠️ claves en PascalCase (el struct no tiene tags JSON) |
+| `POST` | `/payments/:paymentID/refund` | `payments:refund` → **solo `admin`** | `payments:write` | `200 {"payment_id","psp_reference","status"}` |
 
 Sin el permiso → `403 insufficient permissions`. Sin credenciales, o con una key inválida → `401`.
 
@@ -258,13 +258,11 @@ Requeridos: `idempotency_key`, `amount ≥ 1`, `currency`, `payment_method`, `pa
 
 ```json
 {
-  "PaymentID": "…", "Status": "captured", "PSPReference": "MOCK-1a2b3c4d",
-  "Amount": 125000, "Currency": "ARS", "PlatformFee": 3750,
-  "CapturedAt": "2026-10-26T14:00:00Z", "WasExisting": false
+  "payment_id": "…", "status": "captured", "psp_reference": "MOCK-1a2b3c4d",
+  "amount": 125000, "currency": "ARS", "platform_fee": 3750,
+  "captured_at": "2026-10-26T14:00:00Z", "was_existing": false
 }
 ```
-
-⚠️ `ProcessPaymentResult` tampoco tiene tags JSON: las claves salen en PascalCase, a diferencia de `PaymentView` (snake_case).
 
 | Caso | HTTP |
 |---|---|
@@ -366,12 +364,11 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Contrato de respuesta inconsistente | `ProcessPaymentResult` y `RefundPaymentResult` no tienen tags JSON (PascalCase, y `WasExisting` interno), mientras `PaymentView` usa snake_case. |
-| 2 | Baja | Error crudo del PSP expuesto | `failure_reason` guarda el texto del error del PSP y lo expone en `GET /payments/:id`, en `payment.failed.v1` y, por ende, en el email y el webhook al comercio. |
-| 3 | Baja | Rechazo por riesgo indistinguible y duplicable | El rechazo por riesgo emite `payment.failed.v1`, igual que el del PSP. Dos ejecuciones concurrentes de un mismo pago en `initiated` pueden rechazarlo dos veces (evento duplicado): `RejectByRisk` se persiste con un `Update` no condicional. |
-| 4 | Baja | IDs mal formados → 500 | `GET`/`POST /payments/abc[/refund]`: el error de parseo cae en el `default` de `respondDomainError`. |
-| 5 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
-| 6 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
+| 1 | Baja | Error crudo del PSP expuesto | `failure_reason` guarda el texto del error del PSP y lo expone en `GET /payments/:id`, en `payment.failed.v1` y, por ende, en el email y el webhook al comercio. |
+| 2 | Baja | Rechazo por riesgo indistinguible y duplicable | El rechazo por riesgo emite `payment.failed.v1`, igual que el del PSP. Dos ejecuciones concurrentes de un mismo pago en `initiated` pueden rechazarlo dos veces (evento duplicado): `RejectByRisk` se persiste con un `Update` no condicional. |
+| 3 | Baja | IDs mal formados → 500 | `GET`/`POST /payments/abc[/refund]`: el error de parseo cae en el `default` de `respondDomainError`. |
+| 4 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
+| 5 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
 
 ---
 
