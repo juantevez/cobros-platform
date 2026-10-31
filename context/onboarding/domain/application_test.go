@@ -154,6 +154,11 @@ func TestApprove(t *testing.T) {
 		if a.ReviewedAt() == nil || a.ReviewNotes() != "todo ok" {
 			t.Error("review metadata not set")
 		}
+		// Aprobar verifica la cuenta de desembolso (Payout solo usa cuentas
+		// verificadas).
+		if !a.BankAccount().Verified() {
+			t.Error("approving should verify the bank account")
+		}
 		events := a.PullEvents()
 		if len(events) != 1 {
 			t.Fatalf("expected 1 event, got %d", len(events))

@@ -44,12 +44,12 @@ type BalanceChecker interface {
 	GetAvailableBalance(ctx context.Context, tenantID domain.TenantID, currency string) (int64, error)
 }
 
-// BankAccountProvider obtiene los datos de la cuenta bancaria del comercio
-// registrada durante el Onboarding. Sólo debe retornar cuentas verificadas
-// (verified = true) de solicitudes aprobadas; verificarla antes de desembolsar
-// es requisito regulatorio mínimo.
+// BankAccountProvider obtiene la cuenta bancaria del comercio registrada en
+// el Onboarding: solo una cuenta verificada (la verifica la aprobación del
+// KYC) de una solicitud aprobada y en la moneda del payout. Si no hay,
+// domain.ErrNoBankAccount.
 type BankAccountProvider interface {
-	GetBankAccount(ctx context.Context, tenantID domain.TenantID) (domain.BankAccountInfo, error)
+	GetBankAccount(ctx context.Context, tenantID domain.TenantID, currency string) (domain.BankAccountInfo, error)
 }
 
 // PayoutGate verifica que el comercio pueda desembolsar: tenant activo y sin

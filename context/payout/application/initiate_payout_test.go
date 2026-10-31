@@ -378,6 +378,14 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	t.Run("bank account is looked up in the payout currency", func(t *testing.T) {
+		d := newInitiateDeps()
+		_, _ = d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, Currency: "ARS", IdempotencyKey: "k1"})
+		if d.bank.lastCurrency != "ARS" {
+			t.Errorf("provider currency = %q, want ARS", d.bank.lastCurrency)
+		}
+	})
+
 	t.Run("transitions are conditional on their starting status", func(t *testing.T) {
 		d := newInitiateDeps()
 		if _, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"}); err != nil {

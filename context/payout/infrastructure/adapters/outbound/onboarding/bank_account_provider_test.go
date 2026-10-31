@@ -29,11 +29,11 @@ func TestBankAccountProvider_GetBankAccount(t *testing.T) {
 
 	t.Run("returns approved bank account", func(t *testing.T) {
 		mock := newMock(t)
-		mock.ExpectQuery("FROM onboarding_bank_accounts").WithArgs(tenantID).
+		mock.ExpectQuery(`FROM onboarding_bank_accounts[\s\S]*AND oba\.verified\s+AND oba\.currency = \$2`).WithArgs(tenantID, "ARS").
 			WillReturnRows(pgxmock.NewRows(accountCols).
 				AddRow("CVU", "0000003100010000000001", "", "Comercio SA", "ARS"))
 
-		got, err := NewBankAccountProvider(mock).GetBankAccount(context.Background(), domain.TenantID(tenantID))
+		got, err := NewBankAccountProvider(mock).GetBankAccount(context.Background(), domain.TenantID(tenantID), "ars")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -48,10 +48,10 @@ func TestBankAccountProvider_GetBankAccount(t *testing.T) {
 
 	t.Run("no approved application maps to ErrNoBankAccount", func(t *testing.T) {
 		mock := newMock(t)
-		mock.ExpectQuery("FROM onboarding_bank_accounts").WithArgs(tenantID).
+		mock.ExpectQuery(`FROM onboarding_bank_accounts[\s\S]*AND oba\.verified\s+AND oba\.currency = \$2`).WithArgs(tenantID, "ARS").
 			WillReturnRows(pgxmock.NewRows(accountCols))
 
-		_, err := NewBankAccountProvider(mock).GetBankAccount(context.Background(), domain.TenantID(tenantID))
+		_, err := NewBankAccountProvider(mock).GetBankAccount(context.Background(), domain.TenantID(tenantID), "ars")
 		if !errors.Is(err, domain.ErrNoBankAccount) {
 			t.Fatalf("expected ErrNoBankAccount, got %v", err)
 		}
@@ -60,9 +60,9 @@ func TestBankAccountProvider_GetBankAccount(t *testing.T) {
 	t.Run("query error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
 		boom := errors.New("boom")
-		mock.ExpectQuery("FROM onboarding_bank_accounts").WithArgs(tenantID).WillReturnError(boom)
+		mock.ExpectQuery(`FROM onboarding_bank_accounts[\s\S]*AND oba\.verified\s+AND oba\.currency = \$2`).WithArgs(tenantID, "ARS").WillReturnError(boom)
 
-		_, err := NewBankAccountProvider(mock).GetBankAccount(context.Background(), domain.TenantID(tenantID))
+		_, err := NewBankAccountProvider(mock).GetBankAccount(context.Background(), domain.TenantID(tenantID), "ars")
 		if !errors.Is(err, boom) {
 			t.Fatalf("expected boom, got %v", err)
 		}

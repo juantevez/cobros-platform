@@ -114,7 +114,7 @@ func (r *pgApplicationRepository) Update(ctx context.Context, app *domain.Onboar
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 			ON CONFLICT (application_id) DO UPDATE
 				SET account_type=$4, account_number=$5, bank_name=$6,
-				    holder_name=$7, currency=$8`,
+				    holder_name=$7, currency=$8, verified=$9`,
 			ba.ID().String(), app.ID().String(), app.TenantID().String(),
 			ba.AccountType().String(), ba.AccountNumber(),
 			nullStr(ba.BankName()), ba.HolderName(), ba.Currency(),

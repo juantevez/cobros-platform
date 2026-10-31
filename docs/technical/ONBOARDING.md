@@ -1,7 +1,7 @@
 # Onboarding (KYC/KYB) — Documentación técnico-funcional
 
 > **Bounded Context:** `context/onboarding`
-> **Migraciones:** [`000005_onboarding_init`](../../migrations/000005_onboarding_init.up.sql), [`000017_onboarding_version_operator_rls`](../../migrations/000017_onboarding_version_operator_rls.up.sql)
+> **Migraciones:** [`000005_onboarding_init`](../../migrations/000005_onboarding_init.up.sql), [`000017_onboarding_version_operator_rls`](../../migrations/000017_onboarding_version_operator_rls.up.sql), cuentas de solicitudes aprobadas verificadas en [`000047_onboarding_verify_approved_bank_accounts`](../../migrations/000047_onboarding_verify_approved_bank_accounts.up.sql)
 > **Stream NATS:** `ONBOARDING` (`onboarding.>`)
 
 ---
@@ -140,6 +140,7 @@ stateDiagram-v2
 4. **Decisiones del operador solo desde `in_review`**, salvo `Reopen`, que solo aplica desde `rejected`.
 5. `Reject` exige motivo; `RequestMoreInfo` y `Reopen` exigen notas. `Approve` acepta notas vacías.
 6. `Approve` exige cuenta bancaria con moneda: es la moneda del comercio en `approved.v1` (no hay default).
+7. `Approve` **verifica la cuenta bancaria** (`verified = true`): el operador la revisa como parte de la solicitud. Payout solo desembolsa a cuentas verificadas. Si después se reabre y se reemplaza la cuenta, la nueva nace sin verificar hasta la próxima aprobación.
 
 ### 4.4 Value Objects y catálogos
 
@@ -367,7 +368,7 @@ Todos se ejecutan en `cmd/worker`.
 
 ### 7.2 Lectura directa desde Payout
 
-[`payout/.../outbound/onboarding/bank_account_provider.go`](../../context/payout/infrastructure/adapters/outbound/onboarding/bank_account_provider.go) consulta **directamente** las tablas `onboarding_bank_accounts` + `onboarding_applications` (solo solicitudes `approved`) para obtener la cuenta de desembolso. Es la única integración síncrona con este BC y acopla Payout al esquema de Onboarding: **cualquier cambio en esas tablas debe coordinarse con Payout**. No filtra por `verified`.
+[`payout/.../outbound/onboarding/bank_account_provider.go`](../../context/payout/infrastructure/adapters/outbound/onboarding/bank_account_provider.go) consulta **directamente** las tablas `onboarding_bank_accounts` + `onboarding_applications` (solo solicitudes `approved`, cuentas `verified` y en la moneda del payout) para obtener la cuenta de desembolso. Es la única integración síncrona con este BC y acopla Payout al esquema de Onboarding: **cualquier cambio en esas tablas debe coordinarse con Payout**. No filtra por `verified`.
 
 ---
 
@@ -446,7 +447,7 @@ Consecuencias:
 
 - Documentos y personas son **append-only** en DB: no se pueden editar ni borrar.
 - `Update` reescribe todas las colecciones en cada llamada (N inserts idempotentes). Aceptable con volúmenes de KYC.
-- Al reemplazar la cuenta bancaria, el upsert **conserva el `id` original** de la fila (el `id` nuevo del dominio se descarta) y no modifica `verified`.
+- Al reemplazar la cuenta bancaria, el upsert **conserva el `id` original** de la fila (el `id` nuevo del dominio se descarta) y escribe el `verified` del dominio: una cuenta nueva vuelve a `false`, y la aprobación la pasa a `true`.
 
 ---
 
@@ -465,7 +466,7 @@ Consecuencias:
 | # | Tema | Detalle | Impacto |
 |---|---|---|---|
 | 1 | `BusinessInfo` no editable | No hay caso de uso para corregir razón social, CUIT, rubro o domicilio. Combinado con `street` opcional en HTTP (§6.1) puede dejar una solicitud imposible de enviar. | Funcional |
-| 2 | Sin verificación de documentos ni cuenta | `DocumentStatus` y `BankAccount.verified` existen en el modelo y en DB pero ningún caso de uso los modifica. | Funcional |
+| 2 | Sin verificación de documentos | `DocumentStatus` existe en el modelo y en DB pero ningún caso de uso lo modifica. (La cuenta bancaria se verifica al aprobar la solicitud.) | Funcional |
 | 3 | Sin vista de operador | No hay endpoint para listar solicitudes `in_review` ni para ver el detalle (documentos, personas, cuenta). El operador necesita el `application_id` por otro medio (p. ej. evento `sent_for_review.v1`). | Funcional |
 | 4 | Acoplamiento Payout ↔ esquema | Payout lee las tablas de Onboarding directamente (§7.2). | Arquitectura |
 

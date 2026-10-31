@@ -135,11 +135,13 @@ func (b *fakeBalanceChecker) GetAvailableBalance(ctx context.Context, tenantID d
 
 // fakeBankProvider devuelve una cuenta bancaria fija o un error.
 type fakeBankProvider struct {
-	account domain.BankAccountInfo
-	err     error
+	account      domain.BankAccountInfo
+	err          error
+	lastCurrency string
 }
 
-func (b *fakeBankProvider) GetBankAccount(ctx context.Context, tenantID domain.TenantID) (domain.BankAccountInfo, error) {
+func (b *fakeBankProvider) GetBankAccount(ctx context.Context, tenantID domain.TenantID, currency string) (domain.BankAccountInfo, error) {
+	b.lastCurrency = currency
 	if b.err != nil {
 		return domain.BankAccountInfo{}, b.err
 	}

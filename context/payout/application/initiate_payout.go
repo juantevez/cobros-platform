@@ -87,7 +87,7 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 
 	// ── 2. Obtener cuenta bancaria verificada ─────────────────────────────────
 
-	bankAccount, err := uc.bankProvider.GetBankAccount(ctx, tenantID)
+	bankAccount, err := uc.bankProvider.GetBankAccount(ctx, tenantID, currency)
 	if err != nil {
 		return InitiatePayoutResult{}, fmt.Errorf("get bank account: %w", err)
 	}

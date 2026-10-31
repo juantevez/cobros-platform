@@ -79,7 +79,7 @@ func (b fakeBalance) GetAvailableBalance(ctx context.Context, t domain.TenantID,
 
 type fakeBank struct{ account domain.BankAccountInfo }
 
-func (b fakeBank) GetBankAccount(ctx context.Context, t domain.TenantID) (domain.BankAccountInfo, error) {
+func (b fakeBank) GetBankAccount(ctx context.Context, t domain.TenantID, currency string) (domain.BankAccountInfo, error) {
 	return b.account, nil
 }
 
