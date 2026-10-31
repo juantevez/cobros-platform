@@ -27,8 +27,16 @@ func NewPaymentRepository(pool postgres.Conn) *pgPaymentRepository {
 	return &pgPaymentRepository{pool: pool}
 }
 
+// Cada método corre en la sesión RLS del tenant que corresponde (withTenant):
+// el de la entidad al escribir, el del llamador en las búsquedas por ID.
+
 func (r *pgPaymentRepository) Save(ctx context.Context, p *domain.Payment) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, p.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return save(ctx, conn, p)
+	})
+}
+
+func save(ctx context.Context, conn postgres.Conn, p *domain.Payment) error {
 	meta, _ := json.Marshal(p.Metadata())
 
 	_, err := conn.Exec(ctx, `
@@ -67,8 +75,12 @@ func (r *pgPaymentRepository) Save(ctx context.Context, p *domain.Payment) error
 }
 
 func (r *pgPaymentRepository) Update(ctx context.Context, p *domain.Payment, from domain.PaymentStatus) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, p.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return update(ctx, conn, p, from)
+	})
+}
 
+func update(ctx context.Context, conn postgres.Conn, p *domain.Payment, from domain.PaymentStatus) error {
 	// Condicional al estado de partida: el request original y el recuperador
 	// pueden resolver el mismo pago en processing; solo uno escribe.
 	tag, err := conn.Exec(ctx, `
@@ -101,8 +113,16 @@ func (r *pgPaymentRepository) Update(ctx context.Context, p *domain.Payment, fro
 // El UPDATE condicional es atómico: entre ejecuciones concurrentes del mismo
 // pago, solo una afecta la fila y llega al PSP.
 func (r *pgPaymentRepository) ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	var claimed bool
+	err := withTenant(ctx, r.pool, p.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		claimed, err = claimProcessing(ctx, conn, p)
+		return err
+	})
+	return claimed, err
+}
 
+func claimProcessing(ctx context.Context, conn postgres.Conn, p *domain.Payment) (bool, error) {
 	tag, err := conn.Exec(ctx, `
 		UPDATE payments SET status=$2, updated_at=$3, platform_fee=$5
 		WHERE id=$1 AND status=$4`,
@@ -116,21 +136,40 @@ func (r *pgPaymentRepository) ClaimProcessing(ctx context.Context, p *domain.Pay
 }
 
 func (r *pgPaymentRepository) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, baseSelect+" WHERE id=$1", id.String())
-	return scanPayment(row)
+	var p *domain.Payment
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		p, err = scanPayment(conn.QueryRow(ctx, baseSelect+" WHERE id=$1", id.String()))
+		return err
+	})
+	return p, err
 }
 
 func (r *pgPaymentRepository) FindByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, key string) (*domain.Payment, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, baseSelect+" WHERE tenant_id=$1 AND idempotency_key=$2",
-		tenantID.String(), key)
-	return scanPayment(row)
+	var p *domain.Payment
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		p, err = scanPayment(conn.QueryRow(ctx, baseSelect+" WHERE tenant_id=$1 AND idempotency_key=$2",
+			tenantID.String(), key))
+		return err
+	})
+	return p, err
 }
 
-// ListStuckProcessing es cross-tenant (lo usa el recuperador del worker).
+// ListStuckProcessing es cross-tenant (lo usa el recuperador del worker):
+// corre con la política de operador, de solo lectura.
 func (r *pgPaymentRepository) ListStuckProcessing(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payment, error) {
-	rows, err := r.pool.Query(ctx,
+	var out []*domain.Payment
+	err := asPlatformOperator(ctx, r.pool, func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		out, err = listStuckProcessing(ctx, conn, olderThan, limit)
+		return err
+	})
+	return out, err
+}
+
+func listStuckProcessing(ctx context.Context, conn postgres.Conn, olderThan time.Time, limit int) ([]*domain.Payment, error) {
+	rows, err := conn.Query(ctx,
 		baseSelect+" WHERE status=$1 AND updated_at < $2 ORDER BY updated_at LIMIT $3",
 		domain.StatusProcessing.String(), olderThan, limit)
 	if err != nil {

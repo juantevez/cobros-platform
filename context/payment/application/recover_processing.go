@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/payment/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 const (
@@ -116,6 +117,9 @@ func (r *ProcessingRecoverer) recover(ctx context.Context, p *domain.Payment, no
 		return nil // el PSP todavía puede reflejarla: próximo ciclo
 	}
 
+	// ListStuckProcessing es cross-tenant; la escritura corre con el tenant
+	// del pago (RLS).
+	ctx = pkgpostgres.WithTenantID(ctx, p.TenantID().String())
 	err = r.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		if err := r.repo.Update(ctx, p, domain.StatusProcessing); err != nil {
 			return err

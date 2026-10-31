@@ -344,7 +344,8 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 - `UNIQUE (tenant_id, idempotency_key)`.
 - Índices `(tenant_id, status, created_at DESC)` y `psp_reference` (parcial).
-- RLS por `tenant_id` con `NULLIF` (no filtra mientras la app conecte como owner). Política de operador de solo lectura para que Dispute lea el pago disputado (migración 000043).
+- RLS (migración 000043): aislamiento por `NULLIF(current_setting('app.current_tenant', true), '')::uuid` y política de operador de plataforma de **solo lectura** (la usan Dispute, para leer el pago disputado, y el recuperador, para listar los trabados).
+- Cada método del repo corre en la sesión RLS ([rls.go](../../context/payment/infrastructure/adapters/outbound/postgres/rls.go)): con el tenant del pago al escribir y el del llamador en `FindByID`. `ListStuckProcessing` corre como operador, y el recuperador escribe cada pago con su tenant. El aislamiento se verifica con un rol sin `BYPASSRLS` (§11).
 - `Update` reescribe solo estado, PSP, comisiones, motivo y fechas, y es **condicional al estado de partida** (`WHERE id=$1 AND status=<from>`): si otra ejecución ya movió el pago, no escribe y devuelve `ErrPaymentChanged`. `metadata` y los datos del pagador son inmutables.
 - `ClaimProcessing` persiste la comisión de la plataforma junto con el paso a `processing`.
 - `ListStuckProcessing` (recuperador) lista los pagos en `processing` con `updated_at` anterior al corte, de todos los tenants.
@@ -357,7 +358,7 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 - **PII:** nombre, email y documento del pagador se guardan **en claro** en `payments`. No viajan en los eventos, pero no hay cifrado en reposo ni política de retención.
 - **Autorización:** cobrar requiere `admin`/`operator` o una key con `payments:write`. Reembolsar requiere `admin` o una key con `payments:write`. Consultar está abierto a todos los roles y a keys con `payments:read`/`write`.
 - **Habilitación:** solo tenants `active` (KYC aprobado, no suspendidos) pueden cobrar. Los **reembolsos no se bloquean** por estado del tenant, para no perjudicar al pagador.
-- **Aislamiento:** `Get` y `Refund` verifican el tenant del pago. `Process` lo toma del token.
+- **Aislamiento:** `Get` y `Refund` verifican el tenant del pago. `Process` lo toma del token. Además, RLS en `payments` (§8).
 
 ---
 
@@ -365,13 +366,12 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | RLS no efectiva | La política de `payments` tiene `NULLIF` y operador de lectura (000043), pero el repo y `TenantGate` usan el pool fuera de la sesión RLS (`Save`, `FindByID`, `FindByIdempotencyKey`, `ClaimProcessing`). Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
-| 2 | Baja | Contrato de respuesta inconsistente | `ProcessPaymentResult` y `RefundPaymentResult` no tienen tags JSON (PascalCase, y `WasExisting` interno), mientras `PaymentView` usa snake_case. |
-| 3 | Baja | Error crudo del PSP expuesto | `failure_reason` guarda el texto del error del PSP y lo expone en `GET /payments/:id`, en `payment.failed.v1` y, por ende, en el email y el webhook al comercio. |
-| 4 | Baja | Rechazo por riesgo indistinguible y duplicable | El rechazo por riesgo emite `payment.failed.v1`, igual que el del PSP. Dos ejecuciones concurrentes de un mismo pago en `initiated` pueden rechazarlo dos veces (evento duplicado): `RejectByRisk` se persiste con un `Update` no condicional. |
-| 5 | Baja | IDs mal formados → 500 | `GET`/`POST /payments/abc[/refund]`: el error de parseo cae en el `default` de `respondDomainError`. |
-| 6 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
-| 7 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
+| 1 | Baja | Contrato de respuesta inconsistente | `ProcessPaymentResult` y `RefundPaymentResult` no tienen tags JSON (PascalCase, y `WasExisting` interno), mientras `PaymentView` usa snake_case. |
+| 2 | Baja | Error crudo del PSP expuesto | `failure_reason` guarda el texto del error del PSP y lo expone en `GET /payments/:id`, en `payment.failed.v1` y, por ende, en el email y el webhook al comercio. |
+| 3 | Baja | Rechazo por riesgo indistinguible y duplicable | El rechazo por riesgo emite `payment.failed.v1`, igual que el del PSP. Dos ejecuciones concurrentes de un mismo pago en `initiated` pueden rechazarlo dos veces (evento duplicado): `RejectByRisk` se persiste con un `Update` no condicional. |
+| 4 | Baja | IDs mal formados → 500 | `GET`/`POST /payments/abc[/refund]`: el error de parseo cae en el `default` de `respondDomainError`. |
+| 5 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
+| 6 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
 
 ---
 
@@ -380,17 +380,17 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/*_test.go` | FSM, `Money`, eventos. |
-| Aplicación | `application/process_payment_test.go`, `refund_payment_test.go` (+ `mocks_test.go`) | Casos de uso con fakes. |
+| Aplicación | `application/process_payment_test.go`, `refund_payment_test.go`, `recover_processing_test.go` (+ `mocks_test.go`) | Casos de uso y recuperador con fakes. |
 | HTTP | `inbound/http/payment_handler_test.go` | Handlers y mapeo de errores. |
 | Fees | `outbound/fees/fees_test.go` | `FixedRateCalculator` y `BillingFeeCalculator` (con Billing real y fakes). |
 | PSP / Riesgo | `outbound/psp/**`, `outbound/risk` | Mock, router y evaluador permisivo. |
-| Postgres | `outbound/postgres/payment_repo_test.go` | Integración (`DATABASE_URL`); se saltan si no hay DB. |
+| Postgres | `outbound/postgres/payment_repo_test.go`, `integration_test.go`, `rls_test.go` | `pgxmock` para el SQL (dentro de una tx simulada) y la sesión RLS. Integración contra PostgreSQL (`DATABASE_URL`; se saltan si no hay DB): carrera captura/fallo en `processing` (gana uno), comisión persistida en el claim, `ListStuckProcessing`, clave duplicada contra la constraint, reembolsos concurrentes. RLS con un rol sin `BYPASSRLS` (`payment_rls_probe`): aislamiento entre tenants, operador que lista pero no escribe, y los flujos cobrar → reembolsar y `TIMEOUT` → recuperador → `failed`. |
 
 ```bash
 go test ./context/payment/...
 ```
 
-Cubierto: rechazo del PSP (402) vs resultado desconocido (202, el pago queda en `processing`), recuperador (capturado, rechazado, sin registro antes y después de 30 min, error de consulta, resuelto mientras tanto), transiciones condicionales al estado de partida, tenant inactivo (también al retomar), reanudación de un pago en `initiated` (incluido el reintento tras un error de Billing), claim perdido sin llamar al PSP, 402 sin filtrar el detalle del PSP, guards por ruta y adaptador `TenantGate` (con pgxmock). Faltan casos de timeout del PSP (#1) y de refunds concurrentes (#8).
+Cubierto: rechazo del PSP (402) vs resultado desconocido (202, el pago queda en `processing`), recuperador (capturado, rechazado, sin registro antes y después de 30 min, error de consulta, resuelto mientras tanto), transiciones condicionales al estado de partida, tenant inactivo (también al retomar), reanudación de un pago en `initiated` (incluido el reintento tras un error de Billing), claim perdido sin llamar al PSP, 402 sin filtrar el detalle del PSP, guards por ruta y adaptador `TenantGate` (con pgxmock). También: idempotencia (carrera y clave reusada con otros datos → 409), reembolso concurrente (el perdedor no publica), validación de comisiones.
 
 ---
 
@@ -412,7 +412,7 @@ context/payment/
 └── infrastructure/adapters/
     ├── inbound/http/payment_handler.go
     └── outbound/
-        ├── postgres/payment_repo.go
+        ├── postgres/payment_repo.go, rls.go   # cada método en la sesión RLS
         ├── psp/        # router.go + mock/
         ├── fees/       # billing_calculator.go (cableado), fixed_rate.go
         ├── risk/       # permissive.go
