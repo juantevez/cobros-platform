@@ -271,15 +271,34 @@ func TestInitiate(t *testing.T) {
 		}
 	})
 
-	t.Run("transfer failure returns 500 without leaking details", func(t *testing.T) {
+	// Antes, rechazo y resultado desconocido respondían 500 sin payout_id.
+	t.Run("bank rejection returns 422 with the failed payout, without leaking details", func(t *testing.T) {
 		o := defaultOpts()
-		o.transferErr = errors.New("bank secret detail")
+		o.transferErr = fmt.Errorf("%w: bank secret detail", application.ErrBankRejected)
 		rec := postPayout(newHandler(newRepo(), o), tid, `{"amount":100}`)
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500", rec.Code)
+		var body struct {
+			Error    string `json:"error"`
+			PayoutID string `json:"payout_id"`
+			Status   string `json:"status"`
 		}
-		if got := errorBody(t, rec); got != "internal server error" {
-			t.Errorf("error = %q", got)
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != http.StatusUnprocessableEntity || body.Status != "failed" || body.PayoutID == "" ||
+			body.Error != domain.ErrPayoutRejected.Error() || strings.Contains(rec.Body.String(), "secret") {
+			t.Errorf("status = %d body = %s", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("unknown transfer outcome returns 202 with the unknown payout", func(t *testing.T) {
+		o := defaultOpts()
+		o.transferErr = errors.New("dial tcp 10.0.0.9:443: i/o timeout")
+		rec := postPayout(newHandler(newRepo(), o), tid, `{"amount":100}`)
+		var body struct {
+			PayoutID string `json:"payout_id"`
+			Status   string `json:"status"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != http.StatusAccepted || body.Status != "unknown" || body.PayoutID == "" || strings.Contains(rec.Body.String(), "10.0.0.9") {
+			t.Errorf("status = %d body = %s", rec.Code, rec.Body)
 		}
 	})
 }

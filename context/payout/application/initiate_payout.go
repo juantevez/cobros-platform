@@ -230,7 +230,9 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 			// Ahora lo resuelve el recuperador consultando al banco.
 			return InitiatePayoutResult{}, fmt.Errorf("persist transfer failure: %w (transfer failed: %w)", err, transferErr)
 		}
-		return InitiatePayoutResult{}, fmt.Errorf("transfer failed: %w", transferErr)
+		// Se devuelve el resultado con el error: el handler responde 422 con
+		// el payout_id y el estado, sin el detalle del banco.
+		return resultOf(payout, false), fmt.Errorf("%w: %w", domain.ErrPayoutRejected, transferErr)
 	}
 
 	if err := payout.Confirm(transferResult.BankReference); err != nil {

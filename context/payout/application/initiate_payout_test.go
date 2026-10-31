@@ -335,9 +335,13 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		d := newInitiateDeps()
 		d.transfer.err = fmt.Errorf("%w: account closed", ErrBankRejected)
 
-		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
-		if err == nil || !strings.Contains(err.Error(), "transfer failed") {
-			t.Fatalf("expected transfer failed error, got %v", err)
+		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
+		if !errors.Is(err, domain.ErrPayoutRejected) {
+			t.Fatalf("expected ErrPayoutRejected, got %v", err)
+		}
+		// El resultado acompaña al error: el handler responde 422 con el id.
+		if res.Status != domain.StatusFailed.String() || res.PayoutID == "" {
+			t.Errorf("result = %+v, want the failed payout", res)
 		}
 		if !errors.Is(err, d.transfer.err) {
 			t.Errorf("transfer error not wrapped: %v", err)

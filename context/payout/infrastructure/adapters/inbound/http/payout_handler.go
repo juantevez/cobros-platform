@@ -61,7 +61,26 @@ func (h *PayoutHandler) Initiate(c *gin.Context) {
 		Currency:       req.Currency,
 		IdempotencyKey: key,
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, domain.ErrPayoutRejected):
+		// El payout existe y quedó failed (el saldo vuelve al comercio). El
+		// detalle del banco no se expone.
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":     domain.ErrPayoutRejected.Error(),
+			"payout_id": result.PayoutID,
+			"status":    result.Status,
+		})
+		return
+	case errors.Is(err, domain.ErrBankTransferUnknown):
+		// El banco no confirmó: el payout queda unknown y lo resuelve el
+		// recuperador. 202 con su id para consultarlo.
+		c.JSON(http.StatusAccepted, gin.H{
+			"payout_id": result.PayoutID,
+			"status":    result.Status,
+			"detail":    domain.ErrBankTransferUnknown.Error(),
+		})
+		return
+	case err != nil:
 		respondDomainError(c, err)
 		return
 	}
