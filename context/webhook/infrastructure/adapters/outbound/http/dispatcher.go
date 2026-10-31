@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,25 +19,45 @@ import (
 // Headers enviados al comercio:
 //
 //	Content-Type:          application/json
-//	X-Cobros-Signature:    sha256=<hex(HMAC-SHA256(secret, body))>
+//	X-Cobros-Signature:    t=<unix>,v1=<hex(HMAC-SHA256(secret, "<unix>." + body))>
 //	X-Cobros-Event:        payment.captured
 //	X-Cobros-Delivery:     <delivery_id>
-//	X-Cobros-Timestamp:    <unix_timestamp>
+//	X-Cobros-Timestamp:    <unix> (el mismo t de la firma)
 //
-// El comercio debe verificar la firma:
+// El comercio debe verificar la firma y la frescura:
 //
-//	expected = HMAC-SHA256(secret, raw_body)
-//	received = request.Header("X-Cobros-Signature")[7:]  // quita "sha256="
-//	assert hmac.Equal(expected, received)
+//	t, v1    = parse(request.Header("X-Cobros-Signature"))
+//	expected = HMAC-SHA256(secret, t + "." + raw_body)
+//	assert hmac.Equal(expected, v1) && |now - t| <= 5 min
 type Dispatcher struct {
 	client *http.Client
 }
 
-// NewDispatcher crea un Dispatcher con timeout de 30s.
-func NewDispatcher() *Dispatcher {
+// NewDispatcher crea un Dispatcher con timeout de 30s que no sigue redirects y
+// que solo conecta a las IPs que acepta guard (ver DestinationGuard). No usa
+// el proxy del entorno: con proxy, el dialer validaría la IP del proxy y no la
+// del destino.
+//
+// Ante 301/302/303 el http.Client repite el request como GET sin body: el
+// destino podía responder 2xx y la delivery quedaba entregada sin que el
+// comercio recibiera el evento. Un 3xx es un intento fallido; el comercio
+// tiene que registrar la URL final.
+func NewDispatcher(guard *DestinationGuard) *Dispatcher {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   guard.control,
+	}).DialContext
+
 	return &Dispatcher{
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -47,8 +68,8 @@ func (d *Dispatcher) Dispatch(
 	delivery *domain.WebhookDelivery,
 ) (domain.DeliveryAttempt, error) {
 	payload := delivery.Payload()
-	signature := endpoint.ComputeSignature(payload)
 	timestamp := time.Now().Unix()
+	signature := endpoint.SignatureHeader(timestamp, payload)
 	start := time.Now()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL(), bytes.NewReader(payload))
@@ -62,7 +83,7 @@ func (d *Dispatcher) Dispatch(
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Cobros-Signature", "sha256="+signature)
+	req.Header.Set("X-Cobros-Signature", signature)
 	req.Header.Set("X-Cobros-Event", delivery.EventType())
 	req.Header.Set("X-Cobros-Delivery", delivery.ID().String())
 	req.Header.Set("X-Cobros-Timestamp", strconv.FormatInt(timestamp, 10))
@@ -83,11 +104,16 @@ func (d *Dispatcher) Dispatch(
 	// Leer hasta 500 bytes de la respuesta para debugging.
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 
+	var errMsg string
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		errMsg = fmt.Sprintf("redirect not followed (Location: %q): register the final URL", resp.Header.Get("Location"))
+	}
+
 	attempt := domain.NewDeliveryAttempt(
 		delivery.AttemptCount()+1,
 		resp.StatusCode,
 		string(bodyBytes),
-		"",
+		errMsg,
 		elapsed,
 	)
 	return attempt, nil

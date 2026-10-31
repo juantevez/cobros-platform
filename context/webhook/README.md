@@ -97,7 +97,7 @@ failed  → exhausted   (agotados todos los reintentos)
 4. HTTPDispatcher
    → POST <url_comercio> con:
        Content-Type:       application/json
-       X-Cobros-Signature: sha256=<hmac>
+       X-Cobros-Signature: t=<unix>,v1=<hmac de "<unix>.<body>">
        X-Cobros-Event:     payment.captured
        X-Cobros-Delivery:  <delivery_id>
        X-Cobros-Timestamp: <unix>
@@ -111,24 +111,40 @@ failed  → exhausted   (agotados todos los reintentos)
 
 ## Firma HMAC — verificación en el comercio
 
+`X-Cobros-Signature: t=<unix>,v1=<hex>`, donde `v1 = HMAC-SHA256(secret, "<t>." + body crudo)`. El timestamp va firmado: el comercio debe rechazar los requests fuera de su tolerancia (se recomiendan 5 minutos) para que uno capturado no se pueda reenviar. Hay que verificar sobre el **body crudo**, antes de parsear el JSON.
+
 ```python
 # Python
-import hmac, hashlib
+import hmac, hashlib, time
 
-signature_header = request.headers["X-Cobros-Signature"]  # "sha256=abc123..."
-received_sig     = signature_header[7:]                   # quita "sha256="
-expected_sig     = hmac.new(secret.encode(), request.body, hashlib.sha256).hexdigest()
+TOLERANCE = 300  # segundos
 
-if not hmac.compare_digest(expected_sig, received_sig):
-    return 401  # firma inválida
+def verify(secret: str, header: str, raw_body: bytes, now: float) -> bool:
+    parts = dict(p.split("=", 1) for p in header.split(","))  # {"t": "...", "v1": "..."}
+    t, received = parts.get("t", ""), parts.get("v1", "")
+    if not t.isdigit() or abs(now - int(t)) > TOLERANCE:
+        return False  # viejo (posible replay) o mal formado
+    expected = hmac.new(secret.encode(), t.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, received)
+
+# if not verify(secret, request.headers["X-Cobros-Signature"], request.body, time.time()): return 401
 ```
 
 ```javascript
 // Node.js
-const sig = crypto.createHmac('sha256', secret).update(rawBody).digest('hex')
-if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(receivedSig))) {
-  return res.status(401).end()
+const crypto = require('crypto')
+const TOLERANCE = 300 // segundos
+
+function verify(secret, header, rawBody, now) {
+  const parts = Object.fromEntries(header.split(',').map(p => p.split(/=(.*)/s).slice(0, 2)))
+  const t = parts.t, received = parts.v1 || ''
+  if (!/^\d+$/.test(t || '') || Math.abs(now - Number(t)) > TOLERANCE) return false
+  const expected = crypto.createHmac('sha256', secret).update(`${t}.`).update(rawBody).digest('hex')
+  return received.length === expected.length &&
+    crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received))
 }
+
+// if (!verify(secret, req.get('X-Cobros-Signature'), rawBody, Date.now() / 1000)) return res.status(401).end()
 ```
 
 ---
@@ -169,7 +185,7 @@ Respuesta (el secret solo se muestra una vez):
 
 ```json
 {
-  "event_type":  "payment.captured",
+  "event_type":  "payment.captured.v1",
   "event_id":    "evt_uuid",
   "delivery_id": "dlv_uuid",
   "occurred_at": "2026-06-01T12:00:00Z",
@@ -188,9 +204,11 @@ Respuesta (el secret solo se muestra una vez):
 | Stream NATS | Filter | Eventos despachados |
 |---|---|---|
 | PAYMENT | `payment.>` | `payment.captured`, `payment.failed`, `payment.refunded` |
-| PAYOUT | `payout.>` | `payout.confirmed`, `payout.failed` |
-| ONBOARDING | `onboarding.>` | `kyc.approved`, `kyc.rejected` |
-| AUTH | `auth.tenant.>` | `auth.tenant.activated`, `auth.tenant.suspended` |
+| PAYOUT | `payout.>` | `payout.initiated`, `payout.confirmed`, `payout.failed`, `payout.unknown` |
+| ONBOARDING | `onboarding.>` | `onboarding.application.{submitted,sent_for_review,approved,rejected,more_info,reopened}` |
+| AUTH | `auth.tenant.>` | `auth.tenant.created`, `auth.tenant.activated`, `auth.tenant.suspended` |
+
+Detalle completo (modelo, API, persistencia, limitaciones) en [docs/technical/WEBHOOK.md](../../docs/technical/WEBHOOK.md).
 
 ---
 

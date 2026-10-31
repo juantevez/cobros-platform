@@ -8,7 +8,12 @@ import (
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
 )
 
-const defaultDeliveryLimit = 50
+const (
+	defaultDeliveryLimit = 50
+	// maxDeliveryLimit acota el listado: sin tope, ?limit=1000000 cargaba
+	// todo el historial del tenant en una respuesta.
+	maxDeliveryLimit = 200
+)
 
 // ListDeliveriesUseCase lista las deliveries de un tenant.
 type ListDeliveriesUseCase struct {
@@ -27,6 +32,9 @@ func (uc *ListDeliveriesUseCase) Execute(ctx context.Context, q ListDeliveriesQu
 	limit := q.Limit
 	if limit <= 0 {
 		limit = defaultDeliveryLimit
+	}
+	if limit > maxDeliveryLimit {
+		limit = maxDeliveryLimit
 	}
 
 	deliveries, err := uc.deliveryRepo.ListByTenant(ctx, tenantID, limit)

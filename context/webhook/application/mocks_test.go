@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 var errBoom = errors.New("boom")
@@ -93,6 +94,13 @@ type idempotencyKey struct {
 	eventID    string
 }
 
+type claimCall struct {
+	tenant       string // tenant del contexto (RLS)
+	id           domain.DeliveryID
+	attemptCount int
+	now, until   time.Time
+}
+
 type fakeDeliveryRepo struct {
 	mu         sync.Mutex
 	byID       map[domain.DeliveryID]*domain.WebhookDelivery
@@ -104,9 +112,17 @@ type fakeDeliveryRepo struct {
 	saveErrFor map[domain.EndpointID]error // Save falla sólo para esos endpoints
 	idemErrFor map[domain.EndpointID]error // FindByEventAndEndpoint falla sólo para esos
 	updateErr  error
-	findErr    error
-	listErr    error
-	dueErr     error
+	// Claim / Update: reclamos pedidos, deliveries que no se pueden reclamar
+	// y attempt_count esperado en cada Update.
+	claims       []claimCall
+	notClaimable map[domain.DeliveryID]bool
+	claimErr     error
+	prevAttempts []int
+	// updatedInTx: el último Update corrió dentro de fakeTx.RunInTx.
+	updatedInTx bool
+	findErr     error
+	listErr     error
+	dueErr      error
 
 	// capturados para aserciones
 	lastTenant domain.TenantID
@@ -134,10 +150,25 @@ func (r *fakeDeliveryRepo) Save(ctx context.Context, d *domain.WebhookDelivery) 
 	return nil
 }
 
-func (r *fakeDeliveryRepo) Update(ctx context.Context, d *domain.WebhookDelivery) error {
+// Claim reclama salvo que notClaimable lo impida; registra el attemptCount
+// con el que se pidió y el vencimiento.
+func (r *fakeDeliveryRepo) Claim(ctx context.Context, id domain.DeliveryID, attemptCount int, now, until time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	tenant, _ := pkgpostgres.TenantIDFromContext(ctx)
+	r.claims = append(r.claims, claimCall{tenant: tenant, id: id, attemptCount: attemptCount, now: now, until: until})
+	if r.claimErr != nil {
+		return false, r.claimErr
+	}
+	return !r.notClaimable[id], nil
+}
+
+func (r *fakeDeliveryRepo) Update(ctx context.Context, d *domain.WebhookDelivery, prevAttemptCount int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.updates = append(r.updates, d.Status())
+	r.prevAttempts = append(r.prevAttempts, prevAttemptCount)
+	r.updatedInTx = inFakeTx(ctx)
 	return r.updateErr
 }
 
@@ -225,6 +256,16 @@ func (f *fakeDispatcher) calls() int {
 	return len(f.delivered)
 }
 
+type fakeGuard struct {
+	err  error
+	urls []string
+}
+
+func (g *fakeGuard) Check(_ context.Context, rawURL string) error {
+	g.urls = append(g.urls, rawURL)
+	return g.err
+}
+
 type fakeSecretGen struct {
 	secret string
 	err    error
@@ -237,29 +278,41 @@ func (g *fakeSecretGen) Generate() (string, error) {
 }
 
 type fakeTx struct {
+	mu    sync.Mutex // el poller despacha en paralelo
 	calls int
 	err   error
 }
 
+// fakeTxKey marca el contexto que fakeTx le pasa a fn, para que los fakes
+// verifiquen que una escritura ocurrió dentro de la transacción.
+type fakeTxKey struct{}
+
+func inFakeTx(ctx context.Context) bool { return ctx.Value(fakeTxKey{}) != nil }
+
 func (tx *fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	tx.mu.Lock()
 	tx.calls++
-	if tx.err != nil {
-		return tx.err
+	err := tx.err
+	tx.mu.Unlock()
+	if err != nil {
+		return err
 	}
-	return fn(ctx)
+	return fn(context.WithValue(ctx, fakeTxKey{}, true))
 }
 
 type fakePublisher struct {
-	mu     sync.Mutex
-	events []domain.Event
-	calls  int
-	err    error
+	mu            sync.Mutex
+	events        []domain.Event
+	calls         int
+	err           error
+	publishedInTx bool
 }
 
 func (p *fakePublisher) Publish(ctx context.Context, events ...domain.Event) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	p.publishedInTx = inFakeTx(ctx)
 	if p.err != nil {
 		return p.err
 	}

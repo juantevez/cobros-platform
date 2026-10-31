@@ -1,9 +1,11 @@
 package domain
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -42,6 +44,10 @@ func TestParseIDs(t *testing.T) {
 				got, err := p.parse(in)
 				if err == nil || !strings.Contains(err.Error(), p.errText) || got != "" {
 					t.Errorf("parse(%q) = %q, %v; want %q error", in, got, err, p.errText)
+				}
+				// El handler lo mapea a 400 por errors.Is.
+				if !errors.Is(err, ErrInvalidID) {
+					t.Errorf("parse(%q) error %v is not ErrInvalidID", in, err)
 				}
 			}
 		})
@@ -128,6 +134,30 @@ func TestNewDeliveryAttempt_TruncatesBody(t *testing.T) {
 	exact := strings.Repeat("y", 500)
 	if got := NewDeliveryAttempt(1, 500, exact, "", 1).ResponseBody(); got != exact {
 		t.Error("500-char body should be kept intact")
+	}
+}
+
+// Postgres rechaza UTF-8 inválido y NUL en TEXT: el corte a 500 bytes partía
+// una "ñ" y el INSERT del intento fallaba (SQLSTATE 22021).
+func TestNewDeliveryAttempt_StorableBody(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"cut does not split a multibyte rune", strings.Repeat("a", 499) + "ñ", strings.Repeat("a", 499)},
+		{"rune ending exactly at the limit is kept", strings.Repeat("a", 498) + "ñ", strings.Repeat("a", 498) + "ñ"},
+		{"invalid utf-8 is replaced", "ok\xff\xfe", "ok\uFFFD"},
+		{"nul bytes are removed", "a\x00b", "ab"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NewDeliveryAttempt(1, 200, tc.body, "", 1).ResponseBody()
+			if got != tc.want || !utf8.ValidString(got) || len(got) > 500 {
+				t.Errorf("body = %q (len %d), want %q", got, len(got), tc.want)
+			}
+		})
+	}
+	if got := NewDeliveryAttempt(1, 0, "", "dial \xff\x00", 1).ErrMsg(); got != "dial \uFFFD" {
+		t.Errorf("errMsg = %q", got)
 	}
 }
 

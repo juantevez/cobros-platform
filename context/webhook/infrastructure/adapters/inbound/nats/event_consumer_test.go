@@ -6,12 +6,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/webhook/application"
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 var errBoom = errors.New("boom")
@@ -24,6 +26,8 @@ type fakeEndpoints struct {
 	active        []*domain.WebhookEndpoint
 	err           error
 	lastEventType string
+	// ctxTenant: tenant del contexto con el que se buscaron endpoints (RLS).
+	ctxTenant string
 }
 
 func (f *fakeEndpoints) Save(context.Context, *domain.WebhookEndpoint) error   { return nil }
@@ -36,6 +40,7 @@ func (f *fakeEndpoints) FindByTenant(context.Context, domain.TenantID) ([]*domai
 }
 func (f *fakeEndpoints) FindActiveByTenantAndEvent(ctx context.Context, t domain.TenantID, eventType string) ([]*domain.WebhookEndpoint, error) {
 	f.lastEventType = eventType
+	f.ctxTenant, _ = pkgpostgres.TenantIDFromContext(ctx)
 	return f.active, f.err
 }
 
@@ -45,7 +50,10 @@ func (f *fakeDeliveries) Save(ctx context.Context, d *domain.WebhookDelivery) er
 	f.saved = append(f.saved, d)
 	return nil
 }
-func (f *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery) error { return nil }
+func (f *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery, int) error { return nil }
+func (f *fakeDeliveries) Claim(context.Context, domain.DeliveryID, int, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
 func (f *fakeDeliveries) FindByID(context.Context, domain.DeliveryID) (*domain.WebhookDelivery, error) {
 	return nil, domain.ErrDeliveryNotFound
 }
@@ -151,6 +159,11 @@ func TestHandle(t *testing.T) {
 		if e.endpoints.lastEventType != "payment.captured.v1" {
 			t.Errorf("event type = %q", e.endpoints.lastEventType)
 		}
+		// Sin el tenant en el contexto, con un rol sin BYPASSRLS los repos no
+		// verían endpoints y el evento se descartaría en silencio.
+		if e.endpoints.ctxTenant != tenantA {
+			t.Errorf("tenant in context = %q, want %q", e.endpoints.ctxTenant, tenantA)
+		}
 		env := e.envelope(t)
 		if env.EventType != "payment.captured.v1" || env.EventID != "evt-1" || string(env.Data) != payload {
 			t.Errorf("envelope = %+v", env)
@@ -249,4 +262,30 @@ func TestHandle(t *testing.T) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
 	})
+}
+
+// Cada tipo del catálogo suscribible tiene que llegar por alguno de los
+// durables (el filtro real de cada Start*): si no, el comercio podría
+// suscribirse a algo que nunca recibe.
+func TestSubscribableEventsPassConsumerFilters(t *testing.T) {
+	var filters []string
+	for _, start := range []func(*EventConsumer, context.Context) error{
+		(*EventConsumer).StartPaymentConsumer, (*EventConsumer).StartPayoutConsumer,
+		(*EventConsumer).StartOnboardingConsumer, (*EventConsumer).StartAuthConsumer,
+	} {
+		bus := &fakeBus{}
+		_ = start(newEnv(bus).consumer, context.Background())
+		filters = append(filters, bus.cfg.FilterSubject)
+	}
+
+	for _, ev := range domain.SubscribableEvents {
+		subject := ev + ".v1"
+		matched := false
+		for _, f := range filters {
+			matched = matched || strings.HasPrefix(subject, strings.TrimSuffix(f, ">"))
+		}
+		if !matched {
+			t.Errorf("%s is subscribable but no consumer filter %v forwards it", ev, filters)
+		}
+	}
 }

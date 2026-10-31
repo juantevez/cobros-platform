@@ -23,17 +23,19 @@ func NewEndpointRepository(pool pkgpostgres.Conn) *pgEndpointRepository {
 }
 
 func (r *pgEndpointRepository) Save(ctx context.Context, e *domain.WebhookEndpoint) error {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	_, err := conn.Exec(ctx, `
+	err := withTenant(ctx, r.pool, e.TenantID().String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		_, err := conn.Exec(ctx, `
 		INSERT INTO webhook_endpoints
 			(id, tenant_id, url, secret, secret_hint, events, active, description, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		e.ID().String(), e.TenantID().String(),
-		e.URL(), e.Secret(), e.SecretHint(),
-		toTextArray(e.Events()),
-		e.Active(), e.Description(),
-		e.CreatedAt(), e.UpdatedAt(),
-	)
+			e.ID().String(), e.TenantID().String(),
+			e.URL(), e.Secret(), e.SecretHint(),
+			toTextArray(e.Events()),
+			e.Active(), e.Description(),
+			e.CreatedAt(), e.UpdatedAt(),
+		)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("endpoint repo: save: %w", err)
 	}
@@ -41,11 +43,13 @@ func (r *pgEndpointRepository) Save(ctx context.Context, e *domain.WebhookEndpoi
 }
 
 func (r *pgEndpointRepository) Update(ctx context.Context, e *domain.WebhookEndpoint) error {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	_, err := conn.Exec(ctx, `
-		UPDATE webhook_endpoints SET active=$2, updated_at=$3 WHERE id=$1`,
-		e.ID().String(), e.Active(), e.UpdatedAt(),
-	)
+	err := withTenant(ctx, r.pool, e.TenantID().String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		_, err := conn.Exec(ctx, `
+			UPDATE webhook_endpoints SET active=$2, updated_at=$3 WHERE id=$1`,
+			e.ID().String(), e.Active(), e.UpdatedAt(),
+		)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("endpoint repo: update: %w", err)
 	}
@@ -53,21 +57,29 @@ func (r *pgEndpointRepository) Update(ctx context.Context, e *domain.WebhookEndp
 }
 
 func (r *pgEndpointRepository) FindByID(ctx context.Context, id domain.EndpointID) (*domain.WebhookEndpoint, error) {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, baseEndpointSelect+" WHERE id=$1", id.String())
-	return scanEndpoint(row)
+	var e *domain.WebhookEndpoint
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		var err error
+		e, err = scanEndpoint(conn.QueryRow(ctx, baseEndpointSelect+" WHERE id=$1", id.String()))
+		return err
+	})
+	return e, err
 }
 
 func (r *pgEndpointRepository) FindByTenant(ctx context.Context, tenantID domain.TenantID) ([]*domain.WebhookEndpoint, error) {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	rows, err := conn.Query(ctx,
-		baseEndpointSelect+" WHERE tenant_id=$1 ORDER BY created_at DESC",
-		tenantID.String())
-	if err != nil {
-		return nil, fmt.Errorf("endpoint repo: list: %w", err)
-	}
-	defer rows.Close()
-	return scanEndpoints(rows)
+	var result []*domain.WebhookEndpoint
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		rows, err := conn.Query(ctx,
+			baseEndpointSelect+" WHERE tenant_id=$1 ORDER BY created_at DESC",
+			tenantID.String())
+		if err != nil {
+			return fmt.Errorf("endpoint repo: list: %w", err)
+		}
+		defer rows.Close()
+		result, err = scanEndpoints(rows)
+		return err
+	})
+	return result, err
 }
 
 func (r *pgEndpointRepository) FindActiveByTenantAndEvent(
@@ -77,19 +89,23 @@ func (r *pgEndpointRepository) FindActiveByTenantAndEvent(
 ) ([]*domain.WebhookEndpoint, error) {
 	// Busca endpoints suscritos al event_type con o sin sufijo de versión.
 	// events @> ARRAY[$2] verifica que el array contenga ese elemento.
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
 	stripped := stripVersion(eventType)
-	rows, err := conn.Query(ctx,
-		baseEndpointSelect+`
-		WHERE tenant_id=$1 AND active=true
-		  AND (events @> ARRAY[$2::text] OR events @> ARRAY[$3::text])`,
-		tenantID.String(), eventType, stripped,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("endpoint repo: find active by event: %w", err)
-	}
-	defer rows.Close()
-	return scanEndpoints(rows)
+	var result []*domain.WebhookEndpoint
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		rows, err := conn.Query(ctx,
+			baseEndpointSelect+`
+			WHERE tenant_id=$1 AND active=true
+			  AND (events @> ARRAY[$2::text] OR events @> ARRAY[$3::text])`,
+			tenantID.String(), eventType, stripped,
+		)
+		if err != nil {
+			return fmt.Errorf("endpoint repo: find active by event: %w", err)
+		}
+		defer rows.Close()
+		result, err = scanEndpoints(rows)
+		return err
+	})
+	return result, err
 }
 
 const baseEndpointSelect = `

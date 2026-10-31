@@ -27,7 +27,13 @@ type EndpointRepository interface {
 // DeliveryRepository persiste y recupera WebhookDeliveries.
 type DeliveryRepository interface {
 	Save(ctx context.Context, d *domain.WebhookDelivery) error
-	Update(ctx context.Context, d *domain.WebhookDelivery) error
+	// Claim reclama la delivery para despacharla hasta until: solo tiene éxito
+	// si sigue pending/failed con attemptCount intentos y nadie la tiene
+	// reclamada (o el reclamo venció antes de now). false = otro proceso.
+	Claim(ctx context.Context, id domain.DeliveryID, attemptCount int, now, until time.Time) (bool, error)
+	// Update guarda el estado y el último intento y libera el reclamo, solo si
+	// attempt_count sigue siendo prevAttemptCount (si no, ErrDeliveryInProgress).
+	Update(ctx context.Context, d *domain.WebhookDelivery, prevAttemptCount int) error
 	FindByID(ctx context.Context, id domain.DeliveryID) (*domain.WebhookDelivery, error)
 	// FindByEventAndEndpoint verifica idempotencia.
 	FindByEventAndEndpoint(ctx context.Context, endpointID domain.EndpointID, eventID string) (*domain.WebhookDelivery, error)
@@ -40,6 +46,12 @@ type DeliveryRepository interface {
 // HTTPDispatcher ejecuta la llamada HTTP hacia el endpoint del comercio.
 type HTTPDispatcher interface {
 	Dispatch(ctx context.Context, endpoint *domain.WebhookEndpoint, delivery *domain.WebhookDelivery) (domain.DeliveryAttempt, error)
+}
+
+// DestinationGuard rechaza URLs que apuntan a la red interna de la plataforma
+// (SSRF). El dispatcher vuelve a validar la IP resuelta en cada conexión.
+type DestinationGuard interface {
+	Check(ctx context.Context, rawURL string) error
 }
 
 // SecretGenerator genera el secret HMAC para nuevos endpoints.

@@ -70,8 +70,11 @@ type fakeDeliveries struct {
 	lastLimit int
 }
 
-func (r *fakeDeliveries) Save(context.Context, *domain.WebhookDelivery) error   { return nil }
-func (r *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery) error { return nil }
+func (r *fakeDeliveries) Save(context.Context, *domain.WebhookDelivery) error        { return nil }
+func (r *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery, int) error { return nil }
+func (r *fakeDeliveries) Claim(context.Context, domain.DeliveryID, int, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
 func (r *fakeDeliveries) FindByID(ctx context.Context, id domain.DeliveryID) (*domain.WebhookDelivery, error) {
 	d, ok := r.byID[id]
 	if !ok {
@@ -129,12 +132,12 @@ func newEnv() *env {
 	dispatcher := &fakeDispatcher{}
 	secretGen := &fakeSecretGen{}
 	h := NewWebhookHandler(
-		application.NewRegisterEndpointUseCase(endpoints, secretGen, fakeTx{}, fakePublisher{}),
+		application.NewRegisterEndpointUseCase(endpoints, &allowAll{}, secretGen, fakeTx{}, fakePublisher{}),
 		application.NewDeactivateEndpointUseCase(endpoints, fakeTx{}, fakePublisher{}),
 		application.NewListEndpointsUseCase(endpoints),
 		application.NewListDeliveriesUseCase(deliveries),
 		application.NewGetDeliveryUseCase(deliveries),
-		application.NewRetryDeliveryUseCase(endpoints, deliveries, dispatcher, fakePublisher{}, fixedClock{}),
+		application.NewRetryDeliveryUseCase(endpoints, deliveries, dispatcher, fakeTx{}, fakePublisher{}, fixedClock{}),
 	)
 	return &env{endpoints: endpoints, deliveries: deliveries, dispatcher: dispatcher, secretGen: secretGen, h: h}
 }
@@ -383,6 +386,31 @@ func TestRetryDelivery(t *testing.T) {
 
 // ── respondError / RegisterRoutes ─────────────────────────────────────────────
 
+// allowAll acepta cualquier destino: los handlers no prueban el filtro SSRF.
+type allowAll struct{}
+
+func (allowAll) Check(context.Context, string) error { return nil }
+
+// Un ID mal formado en la URL caía en el default de respondError (500).
+func TestMalformedIDReturns400(t *testing.T) {
+	e := newEnv()
+	cases := map[string]struct {
+		h      gin.HandlerFunc
+		method string
+		params gin.Params
+	}{
+		"DELETE /endpoints/abc":      {e.h.DeactivateEndpoint, http.MethodDelete, endpointParam("abc")},
+		"GET /deliveries/abc":        {e.h.GetDelivery, http.MethodGet, deliveryParam("abc")},
+		"POST /deliveries/abc/retry": {e.h.RetryDelivery, http.MethodPost, deliveryParam("abc")},
+	}
+	for name, tc := range cases {
+		rec := doRequest(tc.h, tc.method, "/x", "", tc.params)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(errorBody(t, rec), "invalid id") {
+			t.Errorf("%s: status = %d body = %s, want 400", name, rec.Code, rec.Body)
+		}
+	}
+}
+
 func TestRespondError(t *testing.T) {
 	cases := []struct {
 		err  error
@@ -391,10 +419,14 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrEndpointNotFound, http.StatusNotFound},
 		{domain.ErrDeliveryNotFound, http.StatusNotFound},
 		{domain.ErrDeliveryNotRetryable, http.StatusUnprocessableEntity},
+		{fmt.Errorf("delivery repo: update x: %w", domain.ErrDeliveryInProgress), http.StatusConflict},
 		{domain.ErrEndpointInactive, http.StatusUnprocessableEntity},
 		{domain.ErrEndpointURLEmpty, http.StatusBadRequest},
+		{fmt.Errorf("%w: invalid delivery id: x", domain.ErrInvalidID), http.StatusBadRequest},
 		{fmt.Errorf("%w: missing host", domain.ErrInvalidEndpointURL), http.StatusBadRequest},
 		{domain.ErrNoEventsSubscribed, http.StatusBadRequest},
+		{fmt.Errorf("%w: kyc.approved", domain.ErrUnknownEventType), http.StatusBadRequest},
+		{fmt.Errorf("%w: 127.0.0.1", domain.ErrDestinationNotAllowed), http.StatusBadRequest},
 		{fmt.Errorf("wrapped: %w", domain.ErrDeliveryNotFound), http.StatusNotFound},
 		{errBoom, http.StatusInternalServerError},
 	}
@@ -416,8 +448,11 @@ func TestRespondError(t *testing.T) {
 }
 
 func TestRegisterRoutes(t *testing.T) {
+	denied := 0
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newEnv().h)
+	RegisterRoutes(engine.Group("/api/v1"), newEnv().h, RouteGuards{
+		Manage: func(c *gin.Context) { denied++; c.AbortWithStatus(http.StatusForbidden) },
+	})
 
 	var got []string
 	for _, r := range engine.Routes() {
@@ -435,4 +470,26 @@ func TestRegisterRoutes(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("routes = %v\nwant %v", got, want)
 	}
+
+	// Cada ruta pasa por el guard antes del handler.
+	for _, route := range want {
+		method, path, _ := strings.Cut(route, " ")
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403 from the guard", route, rec.Code)
+		}
+	}
+	if denied != len(want) {
+		t.Errorf("guard ran %d times, want %d", denied, len(want))
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuard(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic")
+		}
+	}()
+	RegisterRoutes(gin.New().Group("/"), newEnv().h, RouteGuards{})
 }

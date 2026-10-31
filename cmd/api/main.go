@@ -294,12 +294,13 @@ func main() {
 	endpointRepo := webhookpg.NewEndpointRepository(pool)
 	deliveryRepo := webhookpg.NewDeliveryRepository(pool)
 	secretGen := webhookcrypto.NewHexSecretGenerator()
-	httpDispatcher := webhookdispatcher.NewDispatcher()
+	destinationGuard := webhookdispatcher.NewDestinationGuard(cfg.WebhookAllowPrivateTargets)
+	httpDispatcher := webhookdispatcher.NewDispatcher(destinationGuard)
 
-	registerEndpoint := webhookapp.NewRegisterEndpointUseCase(endpointRepo, secretGen, txManager, webhookPub)
+	registerEndpoint := webhookapp.NewRegisterEndpointUseCase(endpointRepo, destinationGuard, secretGen, txManager, webhookPub)
 	deactivateEndpoint := webhookapp.NewDeactivateEndpointUseCase(endpointRepo, txManager, webhookPub)
 	dispatchEvent := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
-	retryDelivery := webhookapp.NewRetryDeliveryUseCase(endpointRepo, deliveryRepo, httpDispatcher, webhookPub, clock)
+	retryDelivery := webhookapp.NewRetryDeliveryUseCase(endpointRepo, deliveryRepo, httpDispatcher, txManager, webhookPub, clock)
 	listEndpoints := webhookapp.NewListEndpointsUseCase(endpointRepo)
 	listDeliveries := webhookapp.NewListDeliveriesUseCase(deliveryRepo)
 	getDelivery := webhookapp.NewGetDeliveryUseCase(deliveryRepo)
@@ -309,7 +310,9 @@ func main() {
 	webhookhttp.RegisterRoutes(protected, webhookhttp.NewWebhookHandler(
 		registerEndpoint, deactivateEndpoint, listEndpoints,
 		listDeliveries, getDelivery, retryDelivery,
-	))
+	), webhookhttp.RouteGuards{
+		Manage: authttp.RequirePermission(authdomain.ActionManageWebhooks, authdomain.ScopeWebhooks),
+	})
 
 	// ── Reconciliation ────────────────────────────────────────────────────────
 

@@ -20,9 +20,9 @@ type Config struct {
 	WriteTimeoutSec int
 
 	// ── PostgreSQL ──────────────────────────────────────────────────────────
-	DatabaseURL     string
-	DBMaxConns      int32
-	DBMinConns      int32
+	DatabaseURL string
+	DBMaxConns  int32
+	DBMinConns  int32
 
 	// ── NATS ────────────────────────────────────────────────────────────────
 	NatsURL string
@@ -35,6 +35,11 @@ type Config struct {
 	// ── Outbox relay ────────────────────────────────────────────────────────
 	OutboxInterval  time.Duration
 	OutboxBatchSize int
+
+	// ── Webhooks ────────────────────────────────────────────────────────────
+	// WebhookAllowPrivateTargets permite endpoints en localhost y redes
+	// privadas. Solo para desarrollo: en producción abre SSRF.
+	WebhookAllowPrivateTargets bool
 
 	// SMTP — Email (vacío = LogSender en desarrollo)
 	SMTPHost     string
@@ -69,6 +74,9 @@ func Load() Config {
 		// Outbox relay
 		OutboxInterval:  getDuration("OUTBOX_INTERVAL", 1*time.Second),
 		OutboxBatchSize: getInt("OUTBOX_BATCH_SIZE", 50),
+
+		// Webhooks
+		WebhookAllowPrivateTargets: getStr("WEBHOOK_ALLOW_PRIVATE_TARGETS", "false") == "true",
 
 		// SMTP (vacío = LogSender en desarrollo)
 		SMTPHost:     getStr("SMTP_HOST", ""),

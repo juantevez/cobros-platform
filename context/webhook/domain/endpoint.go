@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -56,6 +57,9 @@ func NewWebhookEndpoint(
 	if len(normalized) == 0 {
 		return nil, ErrNoEventsSubscribed
 	}
+	if err := validateSubscriptions(normalized); err != nil {
+		return nil, err
+	}
 
 	hint := secret
 	if len(hint) > 4 {
@@ -104,7 +108,12 @@ func ReconstituteWebhookEndpoint(
 }
 
 // Deactivate desactiva el endpoint. Las deliveries pendientes no se enviarán.
+// Es idempotente: sobre un endpoint ya inactivo no cambia nada ni vuelve a
+// emitir EndpointDeactivatedEvent.
 func (e *WebhookEndpoint) Deactivate() {
+	if !e.active {
+		return
+	}
 	e.active = false
 	e.updatedAt = time.Now().UTC()
 	e.record(EndpointDeactivatedEvent{
@@ -126,12 +135,23 @@ func (e *WebhookEndpoint) SubscribesTo(eventType string) bool {
 	return false
 }
 
-// ComputeSignature calcula la firma HMAC-SHA256 del payload.
-// Retorna el hex del digest, listo para el header X-Cobros-Signature.
-func (e *WebhookEndpoint) ComputeSignature(payload []byte) string {
+// ComputeSignature calcula la firma HMAC-SHA256 de "<timestamp>.<payload>"
+// y retorna el hex del digest.
+//
+// El timestamp va firmado: sin él, un request capturado se podía reenviar al
+// comercio indefinidamente con una firma válida. El comercio rechaza los que
+// estén fuera de su tolerancia (se recomiendan 5 minutos).
+func (e *WebhookEndpoint) ComputeSignature(timestamp int64, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(e.secret))
+	mac.Write([]byte(strconv.FormatInt(timestamp, 10) + "."))
 	mac.Write(payload)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// SignatureHeader es el valor de X-Cobros-Signature: "t=<unix>,v1=<hex>".
+// v1 identifica el esquema (HMAC-SHA256 de "<t>.<body>").
+func (e *WebhookEndpoint) SignatureHeader(timestamp int64, payload []byte) string {
+	return fmt.Sprintf("t=%d,v1=%s", timestamp, e.ComputeSignature(timestamp, payload))
 }
 
 // ── Getters ───────────────────────────────────────────────────────────────────

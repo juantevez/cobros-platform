@@ -144,7 +144,7 @@ La documentación técnico-funcional de cada contexto (modelo, casos de uso, API
 | Payouts | Desembolsos del saldo del comercio a su banco | [PAYOUT.md](docs/technical/PAYOUT.md) |
 | Billing & Fees | Planes de tarifas, asignación por tenant y cálculo de comisión | [BILLING.md](docs/technical/BILLING.md) |
 | Reconciliation | Conciliación de registros internos contra fuentes externas, con gestión de discrepancias | [RECONCILIATION.md](docs/technical/RECONCILIATION.md) |
-| Webhooks | Entrega de eventos a endpoints del comercio con reintentos | *(pendiente)* |
+| Webhooks | Entrega de eventos a endpoints del comercio con reintentos | [WEBHOOK.md](docs/technical/WEBHOOK.md) |
 | Notifications | Emails transaccionales con preferencias por tenant | [NOTIFICATION.md](docs/technical/NOTIFICATION.md) |
 | Disputes | Disputas y contracargos con impacto en Ledger | [DISPUTE.md](docs/technical/DISPUTE.md) |
 | Dashboard & Reporting | Read-model CQRS de volumen, comisiones y saldos | [REPORTING.md](docs/technical/REPORTING.md) |
@@ -360,6 +360,7 @@ make run-worker
 | `SMTP_PORT` | `587` | Puerto SMTP |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | *(vacío)* | Credenciales SMTP |
 | `SMTP_FROM` | `noreply@cobros-platform.com` | Remitente de los emails |
+| `WEBHOOK_ALLOW_PRIVATE_TARGETS` | `false` | `true` ⇒ los webhooks pueden apuntar a `localhost` y redes privadas. Solo desarrollo: en producción abre SSRF |
 | `SMTP_USE_TLS` | `false` | `true` ⇒ TLS implícito (puerto 465); si no, STARTTLS cuando el servidor lo ofrece |
 
 > ⚠️ **En producción**, `JWT_SECRET` debe generarse con `openssl rand -hex 32` y gestionarse con un secret manager.

@@ -12,6 +12,7 @@ import (
 	"github.com/juantevez/cobros-platform/context/webhook/application"
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
 	"github.com/juantevez/cobros-platform/pkg/eventbus"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // minimalEvent extrae solo los campos comunes de cualquier evento de dominio.
@@ -100,6 +101,8 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 		occurredAt = time.Now().UTC()
 	}
 
+	// RLS: los repos buscan endpoints y deliveries con el tenant del evento.
+	ctx = pkgpostgres.WithTenantID(ctx, ev.TenantID)
 	if err := c.dispatchEvent.Execute(ctx, application.IncomingEvent{
 		TenantID:   ev.TenantID,
 		EventType:  msg.Subject,

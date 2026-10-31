@@ -164,21 +164,39 @@ func respondError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrEndpointNotFound),
 		errors.Is(err, domain.ErrDeliveryNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrDeliveryInProgress):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrDeliveryNotRetryable),
 		errors.Is(err, domain.ErrEndpointInactive):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrEndpointURLEmpty),
+	case errors.Is(err, domain.ErrInvalidID),
+		errors.Is(err, domain.ErrEndpointURLEmpty),
 		errors.Is(err, domain.ErrInvalidEndpointURL),
-		errors.Is(err, domain.ErrNoEventsSubscribed):
+		errors.Is(err, domain.ErrDestinationNotAllowed),
+		errors.Is(err, domain.ErrNoEventsSubscribed),
+		errors.Is(err, domain.ErrUnknownEventType):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
 }
 
+// RouteGuards autoriza las rutas. Se inyecta desde el composition root para no
+// acoplar este contexto con Auth; en producción es
+// RequirePermission(webhooks:manage, webhooks:write). Un solo guard para todo:
+// registrar una URL decide a dónde salen los datos del tenant, y el historial
+// de deliveries expone los payloads completos.
+type RouteGuards struct {
+	Manage gin.HandlerFunc
+}
+
 // RegisterRoutes registra las rutas de Webhooks en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *WebhookHandler) {
-	wh := rg.Group("/webhooks")
+func RegisterRoutes(rg *gin.RouterGroup, h *WebhookHandler, guards RouteGuards) {
+	if guards.Manage == nil {
+		panic("webhook: RegisterRoutes requires a Manage guard")
+	}
+
+	wh := rg.Group("/webhooks", guards.Manage)
 	{
 		wh.POST("/endpoints", h.RegisterEndpoint)
 		wh.GET("/endpoints", h.ListEndpoints)

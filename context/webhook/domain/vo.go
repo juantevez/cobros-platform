@@ -2,7 +2,9 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -20,21 +22,21 @@ func NewAttemptID() AttemptID   { return AttemptID(uuid.NewString()) }
 
 func ParseEndpointID(s string) (EndpointID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid endpoint id: %w", err)
+		return "", fmt.Errorf("%w: invalid endpoint id: %v", ErrInvalidID, err)
 	}
 	return EndpointID(s), nil
 }
 
 func ParseDeliveryID(s string) (DeliveryID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid delivery id: %w", err)
+		return "", fmt.Errorf("%w: invalid delivery id: %v", ErrInvalidID, err)
 	}
 	return DeliveryID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: invalid tenant id: %v", ErrInvalidID, err)
 	}
 	return TenantID(s), nil
 }
@@ -107,19 +109,35 @@ type DeliveryAttempt struct {
 }
 
 func NewDeliveryAttempt(num, httpStatus int, responseBody, errMsg string, durationMs int64) DeliveryAttempt {
-	body := responseBody
-	if len(body) > 500 {
-		body = body[:500]
-	}
 	return DeliveryAttempt{
 		id:           NewAttemptID(),
 		attemptNum:   num,
 		httpStatus:   httpStatus,
-		responseBody: body,
-		errMsg:       errMsg,
+		responseBody: storableText(responseBody, maxResponseBody),
+		errMsg:       storableText(errMsg, 0),
 		durationMs:   durationMs,
 		attemptedAt:  time.Now().UTC(),
 	}
+}
+
+// maxResponseBody es cuánto de la respuesta del comercio se guarda (bytes).
+const maxResponseBody = 500
+
+// storableText deja s apto para una columna TEXT de Postgres, que rechaza
+// UTF-8 inválido y el byte NUL: la respuesta del comercio es arbitraria (puede
+// ser binaria) y cortarla en un número fijo de bytes puede partir un carácter
+// multibyte. Si max > 0, corta en el último carácter completo antes de max.
+func storableText(s string, max int) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	s = strings.ReplaceAll(s, "\x00", "")
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func ReconstituteAttempt(id AttemptID, num, httpStatus int, body, errMsg string, durationMs int64, at time.Time) DeliveryAttempt {

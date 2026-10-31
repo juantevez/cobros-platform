@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/juantevez/cobros-platform/context/webhook/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 var errBoom = errors.New("boom")
@@ -22,6 +24,22 @@ var (
 	tenantA  = domain.TenantID("11111111-1111-1111-1111-111111111111")
 	testTime = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 )
+
+// newTxMock devuelve el mock y un contexto con una tx abierta sobre él, como
+// el de TxManager.RunInTx: RunWithAppTenant delega en esa tx (las variables
+// RLS ya las fijó el TxManager) y las queries llegan al mock igual que sin
+// sesión. El seteo de la sesión se prueba en TestRLSSession y la aislación
+// real contra Postgres en rls_test.go.
+func newTxMock(t *testing.T) (pgxmock.PgxPoolIface, context.Context) {
+	t.Helper()
+	mock := newMock(t)
+	mock.ExpectBegin()
+	tx, err := mock.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	return mock, pkgpostgres.WithTx(context.Background(), tx)
+}
 
 func newMock(t *testing.T) pgxmock.PgxPoolIface {
 	t.Helper()
@@ -116,7 +134,7 @@ func newEndpoint(t *testing.T) *domain.WebhookEndpoint {
 
 func TestEndpointRepository_Save(t *testing.T) {
 	t.Run("inserts endpoint with events array", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		e := newEndpoint(t)
 
 		mock.ExpectExec("INSERT INTO webhook_endpoints").WithArgs(
@@ -126,7 +144,7 @@ func TestEndpointRepository_Save(t *testing.T) {
 			true, "main", e.CreatedAt(), e.UpdatedAt(),
 		).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-		if err := NewEndpointRepository(mock).Save(context.Background(), e); err != nil {
+		if err := NewEndpointRepository(mock).Save(ctx, e); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -135,10 +153,10 @@ func TestEndpointRepository_Save(t *testing.T) {
 	})
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectExec("INSERT INTO webhook_endpoints").WithArgs(anyArgs(10)...).WillReturnError(errBoom)
 
-		err := NewEndpointRepository(mock).Save(context.Background(), newEndpoint(t))
+		err := NewEndpointRepository(mock).Save(ctx, newEndpoint(t))
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "endpoint repo: save") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -147,7 +165,7 @@ func TestEndpointRepository_Save(t *testing.T) {
 
 func TestEndpointRepository_Update(t *testing.T) {
 	t.Run("updates active flag", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		e := newEndpoint(t)
 		e.Deactivate()
 
@@ -155,7 +173,7 @@ func TestEndpointRepository_Update(t *testing.T) {
 			WithArgs(e.ID().String(), false, e.UpdatedAt()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := NewEndpointRepository(mock).Update(context.Background(), e); err != nil {
+		if err := NewEndpointRepository(mock).Update(ctx, e); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -164,10 +182,10 @@ func TestEndpointRepository_Update(t *testing.T) {
 	})
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectExec("UPDATE webhook_endpoints").WithArgs(anyArgs(3)...).WillReturnError(errBoom)
 
-		err := NewEndpointRepository(mock).Update(context.Background(), newEndpoint(t))
+		err := NewEndpointRepository(mock).Update(ctx, newEndpoint(t))
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "endpoint repo: update") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -178,11 +196,11 @@ func TestEndpointRepository_FindByID(t *testing.T) {
 	id := uuid.NewString()
 
 	t.Run("reconstitutes endpoint", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_endpoints WHERE id=").WithArgs(id).
 			WillReturnRows(pgxmock.NewRows(endpointCols).AddRow(endpointRow(id, "payment.captured", "payout.confirmed")...))
 
-		e, err := NewEndpointRepository(mock).FindByID(context.Background(), domain.EndpointID(id))
+		e, err := NewEndpointRepository(mock).FindByID(ctx, domain.EndpointID(id))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -199,7 +217,7 @@ func TestEndpointRepository_FindByID(t *testing.T) {
 	})
 
 	t.Run("NULL array elements are dropped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		row := endpointRow(id)
 		row[5] = pgtype.Array[pgtype.Text]{
 			Elements: []pgtype.Text{{String: "a.b", Valid: true}, {Valid: false}},
@@ -208,27 +226,27 @@ func TestEndpointRepository_FindByID(t *testing.T) {
 		}
 		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(id).WillReturnRows(pgxmock.NewRows(endpointCols).AddRow(row...))
 
-		e, err := NewEndpointRepository(mock).FindByID(context.Background(), domain.EndpointID(id))
+		e, err := NewEndpointRepository(mock).FindByID(ctx, domain.EndpointID(id))
 		if err != nil || !reflect.DeepEqual(e.Events(), []string{"a.b"}) {
 			t.Fatalf("got %v, %v", e, err)
 		}
 	})
 
 	t.Run("no rows maps to ErrEndpointNotFound", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(id).WillReturnRows(pgxmock.NewRows(endpointCols))
 
-		_, err := NewEndpointRepository(mock).FindByID(context.Background(), domain.EndpointID(id))
+		_, err := NewEndpointRepository(mock).FindByID(ctx, domain.EndpointID(id))
 		if !errors.Is(err, domain.ErrEndpointNotFound) {
 			t.Fatalf("expected ErrEndpointNotFound, got %v", err)
 		}
 	})
 
 	t.Run("query error is wrapped as scan error", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(id).WillReturnError(errBoom)
 
-		_, err := NewEndpointRepository(mock).FindByID(context.Background(), domain.EndpointID(id))
+		_, err := NewEndpointRepository(mock).FindByID(ctx, domain.EndpointID(id))
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "endpoint repo: scan") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -237,46 +255,46 @@ func TestEndpointRepository_FindByID(t *testing.T) {
 
 func TestEndpointRepository_FindByTenant(t *testing.T) {
 	t.Run("lists endpoints of tenant", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("WHERE tenant_id=\\$1 ORDER BY created_at DESC").WithArgs(tenantA.String()).
 			WillReturnRows(pgxmock.NewRows(endpointCols).
 				AddRow(endpointRow(uuid.NewString(), "a.b")...).
 				AddRow(endpointRow(uuid.NewString(), "c.d")...))
 
-		got, err := NewEndpointRepository(mock).FindByTenant(context.Background(), tenantA)
+		got, err := NewEndpointRepository(mock).FindByTenant(ctx, tenantA)
 		if err != nil || len(got) != 2 {
 			t.Fatalf("got %v, %v", got, err)
 		}
 	})
 
 	t.Run("query error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(tenantA.String()).WillReturnError(errBoom)
 
-		_, err := NewEndpointRepository(mock).FindByTenant(context.Background(), tenantA)
+		_, err := NewEndpointRepository(mock).FindByTenant(ctx, tenantA)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "endpoint repo: list") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
 
 	t.Run("scan error aborts listing", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		bad := endpointRow(uuid.NewString())
 		bad[6] = "not-a-bool"
 		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(tenantA.String()).WillReturnRows(pgxmock.NewRows(endpointCols).AddRow(bad...))
 
-		_, err := NewEndpointRepository(mock).FindByTenant(context.Background(), tenantA)
+		_, err := NewEndpointRepository(mock).FindByTenant(ctx, tenantA)
 		if err == nil || !strings.Contains(err.Error(), "endpoint repo: scan") {
 			t.Fatalf("expected scan error, got %v", err)
 		}
 	})
 
 	t.Run("rows error is returned", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(tenantA.String()).
 			WillReturnRows(pgxmock.NewRows(endpointCols).AddRow(endpointRow(uuid.NewString())...).RowError(0, errBoom))
 
-		_, err := NewEndpointRepository(mock).FindByTenant(context.Background(), tenantA)
+		_, err := NewEndpointRepository(mock).FindByTenant(ctx, tenantA)
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -285,12 +303,12 @@ func TestEndpointRepository_FindByTenant(t *testing.T) {
 
 func TestEndpointRepository_FindActiveByTenantAndEvent(t *testing.T) {
 	t.Run("matches versioned and unversioned event type", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("WHERE tenant_id=\\$1 AND active=true\\s+AND \\(events @> ARRAY\\[\\$2::text\\] OR events @> ARRAY\\[\\$3::text\\]\\)").
 			WithArgs(tenantA.String(), "payment.captured.v1", "payment.captured").
 			WillReturnRows(pgxmock.NewRows(endpointCols).AddRow(endpointRow(uuid.NewString(), "payment.captured")...))
 
-		got, err := NewEndpointRepository(mock).FindActiveByTenantAndEvent(context.Background(), tenantA, "payment.captured.v1")
+		got, err := NewEndpointRepository(mock).FindActiveByTenantAndEvent(ctx, tenantA, "payment.captured.v1")
 		if err != nil || len(got) != 1 {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -300,10 +318,10 @@ func TestEndpointRepository_FindActiveByTenantAndEvent(t *testing.T) {
 	})
 
 	t.Run("query error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(anyArgs(3)...).WillReturnError(errBoom)
 
-		_, err := NewEndpointRepository(mock).FindActiveByTenantAndEvent(context.Background(), tenantA, "x.y")
+		_, err := NewEndpointRepository(mock).FindActiveByTenantAndEvent(ctx, tenantA, "x.y")
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "find active by event") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -331,7 +349,7 @@ func newDelivery() *domain.WebhookDelivery {
 
 func TestDeliveryRepository_Save(t *testing.T) {
 	t.Run("inserts delivery", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		d := newDelivery()
 
 		mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs(
@@ -340,7 +358,7 @@ func TestDeliveryRepository_Save(t *testing.T) {
 			"pending", 0, d.NextRetryAt(), d.CreatedAt(), d.UpdatedAt(),
 		).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-		if err := NewDeliveryRepository(mock).Save(context.Background(), d); err != nil {
+		if err := NewDeliveryRepository(mock).Save(ctx, d); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -349,10 +367,10 @@ func TestDeliveryRepository_Save(t *testing.T) {
 	})
 
 	t.Run("exec error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs(anyArgs(11)...).WillReturnError(errBoom)
 
-		err := NewDeliveryRepository(mock).Save(context.Background(), newDelivery())
+		err := NewDeliveryRepository(mock).Save(ctx, newDelivery())
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "delivery repo: save") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -361,21 +379,21 @@ func TestDeliveryRepository_Save(t *testing.T) {
 
 func TestDeliveryRepository_Update(t *testing.T) {
 	t.Run("updates state and inserts only the last attempt", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		d := newDelivery()
 		_ = d.RecordAttempt(domain.NewDeliveryAttempt(1, 500, "boom", "", 10), testTime)
 		_ = d.RecordAttempt(domain.NewDeliveryAttempt(2, 0, "", "timeout", 30000), testTime)
 		last := d.Attempts()[1]
 
-		mock.ExpectExec("UPDATE webhook_deliveries SET").
-			WithArgs(d.ID().String(), "failed", 2, d.NextRetryAt(), d.UpdatedAt()).
+		mock.ExpectExec("UPDATE webhook_deliveries SET.*claimed_until=NULL\\s+WHERE id=\\$1 AND attempt_count=\\$6").
+			WithArgs(d.ID().String(), "failed", 2, d.NextRetryAt(), d.UpdatedAt(), 1).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectExec("INSERT INTO webhook_delivery_attempts.*ON CONFLICT \\(id\\) DO NOTHING").WithArgs(
-			last.ID().String(), d.ID().String(), 2, 0,
+			last.ID().String(), d.ID().String(), d.TenantID().String(), 2, 0,
 			(*string)(nil), strPtr("timeout"), int64(30000), last.AttemptedAt(),
 		).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-		if err := NewDeliveryRepository(mock).Update(context.Background(), d); err != nil {
+		if err := NewDeliveryRepository(mock).Update(ctx, d, 1); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -384,10 +402,10 @@ func TestDeliveryRepository_Update(t *testing.T) {
 	})
 
 	t.Run("without attempts only updates the delivery", func(t *testing.T) {
-		mock := newMock(t)
-		mock.ExpectExec("UPDATE webhook_deliveries SET").WithArgs(anyArgs(5)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock, ctx := newTxMock(t)
+		mock.ExpectExec("UPDATE webhook_deliveries SET").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := NewDeliveryRepository(mock).Update(context.Background(), newDelivery()); err != nil {
+		if err := NewDeliveryRepository(mock).Update(ctx, newDelivery(), 0); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -396,23 +414,38 @@ func TestDeliveryRepository_Update(t *testing.T) {
 	})
 
 	t.Run("update error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
-		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(5)...).WillReturnError(errBoom)
+		mock, ctx := newTxMock(t)
+		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(6)...).WillReturnError(errBoom)
 
-		err := NewDeliveryRepository(mock).Update(context.Background(), newDelivery())
+		err := NewDeliveryRepository(mock).Update(ctx, newDelivery(), 0)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "delivery repo: update") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
 
-	t.Run("attempt insert error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+	t.Run("attempt_count changed by another process", func(t *testing.T) {
+		mock, ctx := newTxMock(t)
 		d := newDelivery()
 		_ = d.RecordAttempt(domain.NewDeliveryAttempt(1, 200, "ok", "", 5), testTime)
-		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(5)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-		mock.ExpectExec("INSERT INTO webhook_delivery_attempts").WithArgs(anyArgs(8)...).WillReturnError(errBoom)
+		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
-		err := NewDeliveryRepository(mock).Update(context.Background(), d)
+		err := NewDeliveryRepository(mock).Update(ctx, d, 0)
+		if !errors.Is(err, domain.ErrDeliveryInProgress) {
+			t.Fatalf("expected ErrDeliveryInProgress, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("attempt must not be inserted: %v", err)
+		}
+	})
+
+	t.Run("attempt insert error is wrapped", func(t *testing.T) {
+		mock, ctx := newTxMock(t)
+		d := newDelivery()
+		_ = d.RecordAttempt(domain.NewDeliveryAttempt(1, 200, "ok", "", 5), testTime)
+		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("INSERT INTO webhook_delivery_attempts").WithArgs(anyArgs(9)...).WillReturnError(errBoom)
+
+		err := NewDeliveryRepository(mock).Update(ctx, d, 0)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "save attempt") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -423,14 +456,14 @@ func TestDeliveryRepository_FindByID(t *testing.T) {
 	id := uuid.NewString()
 
 	t.Run("loads delivery with attempts in order", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries d WHERE d.id=").WithArgs(id).
 			WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(id)...))
 		mock.ExpectQuery("FROM webhook_delivery_attempts\\s+WHERE delivery_id=\\$1 ORDER BY attempt_num").WithArgs(id).
 			WillReturnRows(pgxmock.NewRows(attemptCols).
 				AddRow("a1", 1, 500, "oops", "", int64(10), testTime))
 
-		d, err := NewDeliveryRepository(mock).FindByID(context.Background(), domain.DeliveryID(id))
+		d, err := NewDeliveryRepository(mock).FindByID(ctx, domain.DeliveryID(id))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -453,43 +486,43 @@ func TestDeliveryRepository_FindByID(t *testing.T) {
 	})
 
 	t.Run("no rows maps to ErrDeliveryNotFound", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(id).WillReturnRows(pgxmock.NewRows(deliveryCols))
 
-		_, err := NewDeliveryRepository(mock).FindByID(context.Background(), domain.DeliveryID(id))
+		_, err := NewDeliveryRepository(mock).FindByID(ctx, domain.DeliveryID(id))
 		if !errors.Is(err, domain.ErrDeliveryNotFound) {
 			t.Fatalf("expected ErrDeliveryNotFound, got %v", err)
 		}
 	})
 
 	t.Run("query error is wrapped as scan error", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(id).WillReturnError(errBoom)
 
-		_, err := NewDeliveryRepository(mock).FindByID(context.Background(), domain.DeliveryID(id))
+		_, err := NewDeliveryRepository(mock).FindByID(ctx, domain.DeliveryID(id))
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "delivery repo: scan") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
 
 	t.Run("attempts query error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(id).WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(id)...))
 		mock.ExpectQuery("FROM webhook_delivery_attempts").WithArgs(id).WillReturnError(errBoom)
 
-		_, err := NewDeliveryRepository(mock).FindByID(context.Background(), domain.DeliveryID(id))
+		_, err := NewDeliveryRepository(mock).FindByID(ctx, domain.DeliveryID(id))
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "load attempts") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
 
 	t.Run("attempt scan error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(id).WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(id)...))
 		mock.ExpectQuery("FROM webhook_delivery_attempts").WithArgs(id).
 			WillReturnRows(pgxmock.NewRows(attemptCols).AddRow("a1", "x", 500, "", "", int64(1), testTime))
 
-		_, err := NewDeliveryRepository(mock).FindByID(context.Background(), domain.DeliveryID(id))
+		_, err := NewDeliveryRepository(mock).FindByID(ctx, domain.DeliveryID(id))
 		if err == nil || !strings.Contains(err.Error(), "scan attempt") {
 			t.Fatalf("expected scan attempt error, got %v", err)
 		}
@@ -500,33 +533,33 @@ func TestDeliveryRepository_FindByEventAndEndpoint(t *testing.T) {
 	endpointID := domain.NewEndpointID()
 
 	t.Run("returns existing delivery", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		id := uuid.NewString()
 		mock.ExpectQuery("WHERE d.endpoint_id=\\$1 AND d.event_id=\\$2").WithArgs(endpointID.String(), "evt-1").
 			WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(id)...))
 		mock.ExpectQuery("FROM webhook_delivery_attempts").WithArgs(id).WillReturnRows(pgxmock.NewRows(attemptCols))
 
-		d, err := NewDeliveryRepository(mock).FindByEventAndEndpoint(context.Background(), endpointID, "evt-1")
+		d, err := NewDeliveryRepository(mock).FindByEventAndEndpoint(ctx, endpointID, "evt-1")
 		if err != nil || d.ID().String() != id {
 			t.Fatalf("got %v, %v", d, err)
 		}
 	})
 
 	t.Run("missing delivery returns ErrDeliveryNotFound", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("WHERE d.endpoint_id").WithArgs(endpointID.String(), "evt-1").WillReturnRows(pgxmock.NewRows(deliveryCols))
 
-		_, err := NewDeliveryRepository(mock).FindByEventAndEndpoint(context.Background(), endpointID, "evt-1")
+		_, err := NewDeliveryRepository(mock).FindByEventAndEndpoint(ctx, endpointID, "evt-1")
 		if !errors.Is(err, domain.ErrDeliveryNotFound) {
 			t.Fatalf("expected ErrDeliveryNotFound, got %v", err)
 		}
 	})
 
 	t.Run("other errors are returned", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("WHERE d.endpoint_id").WithArgs(endpointID.String(), "evt-1").WillReturnError(errBoom)
 
-		_, err := NewDeliveryRepository(mock).FindByEventAndEndpoint(context.Background(), endpointID, "evt-1")
+		_, err := NewDeliveryRepository(mock).FindByEventAndEndpoint(ctx, endpointID, "evt-1")
 		if !errors.Is(err, errBoom) || errors.Is(err, domain.ErrDeliveryNotFound) {
 			t.Fatalf("expected errBoom, got %v", err)
 		}
@@ -535,11 +568,11 @@ func TestDeliveryRepository_FindByEventAndEndpoint(t *testing.T) {
 
 func TestDeliveryRepository_ListByTenant(t *testing.T) {
 	t.Run("lists deliveries without attempts", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("WHERE d.tenant_id=\\$1 ORDER BY d.created_at DESC LIMIT \\$2").WithArgs(tenantA.String(), 20).
 			WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(uuid.NewString())...).AddRow(deliveryRow(uuid.NewString())...))
 
-		got, err := NewDeliveryRepository(mock).ListByTenant(context.Background(), tenantA, 20)
+		got, err := NewDeliveryRepository(mock).ListByTenant(ctx, tenantA, 20)
 		if err != nil || len(got) != 2 {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -552,36 +585,64 @@ func TestDeliveryRepository_ListByTenant(t *testing.T) {
 	})
 
 	t.Run("query error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(tenantA.String(), 20).WillReturnError(errBoom)
 
-		_, err := NewDeliveryRepository(mock).ListByTenant(context.Background(), tenantA, 20)
+		_, err := NewDeliveryRepository(mock).ListByTenant(ctx, tenantA, 20)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "delivery repo: list") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
 
 	t.Run("scan error aborts listing", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		bad := deliveryRow(uuid.NewString())
 		bad[7] = "x"
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(tenantA.String(), 20).WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(bad...))
 
-		_, err := NewDeliveryRepository(mock).ListByTenant(context.Background(), tenantA, 20)
+		_, err := NewDeliveryRepository(mock).ListByTenant(ctx, tenantA, 20)
 		if err == nil || !strings.Contains(err.Error(), "delivery repo: scan") {
 			t.Fatalf("expected scan error, got %v", err)
 		}
 	})
 }
 
+func TestDeliveryRepository_Claim(t *testing.T) {
+	id := domain.NewDeliveryID()
+	until := testTime.Add(2 * time.Minute)
+	for _, tc := range []struct {
+		rows int64
+		want bool
+	}{{1, true}, {0, false}} {
+		mock, ctx := newTxMock(t)
+		mock.ExpectExec("UPDATE webhook_deliveries SET claimed_until=\\$4\\s+WHERE id=\\$1\\s+AND status IN \\('pending','failed'\\)\\s+AND attempt_count=\\$2\\s+AND \\(claimed_until IS NULL OR claimed_until < \\$3\\)").
+			WithArgs(id.String(), 3, testTime, until).
+			WillReturnResult(pgxmock.NewResult("UPDATE", tc.rows))
+
+		got, err := NewDeliveryRepository(mock).Claim(ctx, id, 3, testTime, until)
+		if err != nil || got != tc.want {
+			t.Errorf("rows %d: Claim = %v, %v; want %v", tc.rows, got, err, tc.want)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	}
+
+	mock, ctx := newTxMock(t)
+	mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(4)...).WillReturnError(errBoom)
+	if _, err := NewDeliveryRepository(mock).Claim(ctx, id, 3, testTime, until); !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "delivery repo: claim") {
+		t.Errorf("expected wrapped errBoom, got %v", err)
+	}
+}
+
 func TestDeliveryRepository_ListDueForRetry(t *testing.T) {
 	t.Run("lists pending and failed due deliveries", func(t *testing.T) {
-		mock := newMock(t)
-		mock.ExpectQuery("JOIN webhook_endpoints e ON e.id = d.endpoint_id AND e.active = true\\s+WHERE d.status IN \\('pending','failed'\\)\\s+AND d.next_retry_at <= \\$1\\s+ORDER BY d.next_retry_at ASC\\s+LIMIT \\$2").
+		mock, ctx := newTxMock(t)
+		mock.ExpectQuery("JOIN webhook_endpoints e ON e.id = d.endpoint_id AND e.active = true\\s+WHERE d.status IN \\('pending','failed'\\)\\s+AND d.next_retry_at <= \\$1\\s+AND \\(d.claimed_until IS NULL OR d.claimed_until < \\$1\\)\\s+ORDER BY d.next_retry_at ASC\\s+LIMIT \\$2").
 			WithArgs(testTime, 50).
 			WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(uuid.NewString())...))
 
-		got, err := NewDeliveryRepository(mock).ListDueForRetry(context.Background(), testTime, 50)
+		got, err := NewDeliveryRepository(mock).ListDueForRetry(ctx, testTime, 50)
 		if err != nil || len(got) != 1 {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -591,35 +652,86 @@ func TestDeliveryRepository_ListDueForRetry(t *testing.T) {
 	})
 
 	t.Run("query error is wrapped", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(testTime, 50).WillReturnError(errBoom)
 
-		_, err := NewDeliveryRepository(mock).ListDueForRetry(context.Background(), testTime, 50)
+		_, err := NewDeliveryRepository(mock).ListDueForRetry(ctx, testTime, 50)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "list due") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
 	})
 
 	t.Run("scan error aborts listing", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		bad := deliveryRow(uuid.NewString())
 		bad[9] = "not-a-time"
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(testTime, 50).WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(bad...))
 
-		_, err := NewDeliveryRepository(mock).ListDueForRetry(context.Background(), testTime, 50)
+		_, err := NewDeliveryRepository(mock).ListDueForRetry(ctx, testTime, 50)
 		if err == nil || !strings.Contains(err.Error(), "delivery repo: scan") {
 			t.Fatalf("expected scan error, got %v", err)
 		}
 	})
 
 	t.Run("rows error is returned", func(t *testing.T) {
-		mock := newMock(t)
+		mock, ctx := newTxMock(t)
 		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(testTime, 50).
 			WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(uuid.NewString())...).RowError(0, errBoom))
 
-		_, err := NewDeliveryRepository(mock).ListDueForRetry(context.Background(), testTime, 50)
+		_, err := NewDeliveryRepository(mock).ListDueForRetry(ctx, testTime, 50)
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("expected errBoom, got %v", err)
+		}
+	})
+}
+
+// Fuera de una tx, cada método abre una sesión efímera con la variable RLS
+// que corresponde: el tenant de la entidad o, para el poller, el operador.
+func TestRLSSession(t *testing.T) {
+	t.Run("save sets the tenant of the delivery", func(t *testing.T) {
+		mock := newMock(t)
+		d := newDelivery()
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(rlsTenantKey, d.TenantID().String()).WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectExec("INSERT INTO webhook_deliveries").WithArgs(anyArgs(11)...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit()
+
+		if err := NewDeliveryRepository(mock).Save(context.Background(), d); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("find by id uses the caller tenant", func(t *testing.T) {
+		mock := newMock(t)
+		ctx := pkgpostgres.WithTenantID(context.Background(), tenantA.String())
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(rlsTenantKey, tenantA.String()).WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectQuery("FROM webhook_endpoints").WithArgs(anyArgs(1)...).WillReturnError(pgx.ErrNoRows)
+		mock.ExpectRollback()
+
+		if _, err := NewEndpointRepository(mock).FindByID(ctx, domain.NewEndpointID()); !errors.Is(err, domain.ErrEndpointNotFound) {
+			t.Fatalf("expected ErrEndpointNotFound, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	t.Run("list due runs as platform operator", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		mock.ExpectExec("set_config").WithArgs(pkgpostgres.PlatformOperatorKey, "on").WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectQuery("FROM webhook_deliveries").WithArgs(testTime, 50).WillReturnRows(pgxmock.NewRows(deliveryCols))
+		mock.ExpectCommit()
+
+		if _, err := NewDeliveryRepository(mock).ListDueForRetry(context.Background(), testTime, 50); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
 		}
 	})
 }

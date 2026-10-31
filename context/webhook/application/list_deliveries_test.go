@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,18 @@ func TestListDeliveriesUseCase_Execute(t *testing.T) {
 			}
 			if repo.lastLimit != defaultDeliveryLimit {
 				t.Errorf("limit = %d, want %d", repo.lastLimit, defaultDeliveryLimit)
+			}
+		})
+	}
+
+	for limit, want := range map[int]int{maxDeliveryLimit: maxDeliveryLimit, maxDeliveryLimit + 1: maxDeliveryLimit, 1000000: maxDeliveryLimit} {
+		t.Run("limit "+strconv.Itoa(limit)+" is capped", func(t *testing.T) {
+			repo := newDeliveryRepo()
+			if _, err := NewListDeliveriesUseCase(repo).Execute(ctx, ListDeliveriesQuery{TenantID: tenantA, Limit: limit}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if repo.lastLimit != want {
+				t.Errorf("limit = %d, want %d", repo.lastLimit, want)
 			}
 		})
 	}
