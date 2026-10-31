@@ -55,7 +55,7 @@ func reconstituteWithStatus(st PaymentStatus) *Payment {
 		testPayer(), MethodCard,
 		"", "", st, "", nil,
 		nil, nil, nil,
-		now, now, "", nil,
+		now, now, "", nil, "",
 	)
 }
 
@@ -274,11 +274,15 @@ func TestPayment_Fail(t *testing.T) {
 	t.Run("from processing", func(t *testing.T) {
 		p := newProcessingPayment(t)
 
-		if err := p.Fail("mock", "card declined"); err != nil {
+		if err := p.Fail("mock", "declined by the payment provider", "card 4111 declined"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if p.Status() != StatusFailed || p.FailureReason() != "card declined" || p.PSPName() != "mock" {
+		if p.Status() != StatusFailed || p.FailureReason() != "declined by the payment provider" || p.PSPName() != "mock" {
 			t.Errorf("status=%q reason=%q psp=%q", p.Status(), p.FailureReason(), p.PSPName())
+		}
+		// El error crudo del PSP queda solo para diagnóstico.
+		if p.PSPFailureDetail() != "card 4111 declined" {
+			t.Errorf("psp failure detail = %q", p.PSPFailureDetail())
 		}
 		if p.FailedAt() == nil || !p.UpdatedAt().Equal(*p.FailedAt()) {
 			t.Errorf("failedAt=%v updatedAt=%v", p.FailedAt(), p.UpdatedAt())
@@ -296,7 +300,7 @@ func TestPayment_Fail(t *testing.T) {
 			t.Fatalf("expected PaymentFailedEvent, got %T", evs[0])
 		}
 		if ev.PaymentID != p.ID().String() || ev.TenantID != testTenant.String() || ev.Amount != 10_000 ||
-			ev.Currency != "ARS" || ev.FailureReason != "card declined" || ev.PaymentMethod != "card" {
+			ev.Currency != "ARS" || ev.FailureReason != "declined by the payment provider" || ev.PaymentMethod != "card" {
 			t.Errorf("event fields not set: %+v", ev)
 		}
 	})
@@ -304,7 +308,7 @@ func TestPayment_Fail(t *testing.T) {
 	for _, st := range allStatusesExcept(StatusProcessing) {
 		t.Run("rejected from "+st.String(), func(t *testing.T) {
 			p := reconstituteWithStatus(st)
-			if err := p.Fail("mock", "x"); !errors.Is(err, ErrInvalidTransition) {
+			if err := p.Fail("mock", "x", ""); !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("expected ErrInvalidTransition, got %v", err)
 			}
 			if p.Status() != st || len(p.PullEvents()) != 0 {
@@ -386,7 +390,7 @@ func TestReconstitutePayment(t *testing.T) {
 		testPayer(), MethodQR,
 		"mercadopago", "MP-1", StatusCaptured, "", meta,
 		&authorized, &captured, nil,
-		created, captured, "", nil,
+		created, captured, "", nil, "",
 	)
 
 	if p.ID() != id || p.TenantID() != testTenant || p.IdempotencyKey() != "idem-9" || p.CheckoutID() != "chk-1" {

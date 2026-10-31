@@ -80,7 +80,7 @@ func TestRLS_Payments(t *testing.T) {
 	// Escribir un pago ajeno desde la sesión de otro tenant no toca la fila.
 	foreign := domain.ReconstitutePayment(a.ID(), b.TenantID(), a.IdempotencyKey(), "",
 		a.Amount(), a.PlatformFee(), a.PSPFee(), a.PayerInfo(), a.Method(), "", "",
-		domain.StatusProcessing, "", nil, nil, nil, nil, a.CreatedAt(), time.Now().UTC(), "", nil)
+		domain.StatusProcessing, "", nil, nil, nil, nil, a.CreatedAt(), time.Now().UTC(), "", nil, "")
 	if err := repo.Update(context.Background(), foreign, domain.StatusInitiated); !errors.Is(err, domain.ErrPaymentChanged) {
 		t.Errorf("update of A through B's session = %v, want ErrPaymentChanged (row not visible)", err)
 	}

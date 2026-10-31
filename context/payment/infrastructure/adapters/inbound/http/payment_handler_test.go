@@ -154,7 +154,7 @@ func seedPayment(r *fakeRepo, tenantID string, status domain.PaymentStatus) *dom
 		domain.NewPaymentID(), domain.TenantID(tenantID), "seed-"+uuid.NewString(), "",
 		domain.ReconstituteMoney(10_000, "ARS"), domain.ReconstituteMoney(300, "ARS"), domain.ReconstituteMoney(150, "ARS"),
 		domain.PayerInfo{}, domain.MethodCard, "fake", "PSP-1", status, "", nil,
-		nil, &now, nil, now, now, "", nil,
+		nil, &now, nil, now, now, "", nil, "",
 	)
 	r.byID[p.ID()] = p
 	r.byKey[p.IdempotencyKey()] = p
@@ -569,5 +569,24 @@ func TestResponsesUseSnakeCase(t *testing.T) {
 	}
 	if strings.Contains(process.Body.String()+refund.Body.String(), "PaymentID") {
 		t.Errorf("PascalCase keys left: %s %s", process.Body, refund.Body)
+	}
+}
+
+// GET no expone el error crudo del PSP: ni el motivo ni el detalle interno.
+func TestGetDoesNotLeakPSPError(t *testing.T) {
+	tid := uuid.NewString()
+	r := newRepo()
+	o := defaultOpts()
+	o.psp.captureErr = fmt.Errorf("%w: card 4111 declined", application.ErrPSPDeclined)
+	declined := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
+	var body struct {
+		PaymentID string `json:"payment_id"`
+	}
+	_ = json.Unmarshal(declined.Body.Bytes(), &body)
+
+	rec := doRequest(newHandler(r, defaultOpts()).Get, http.MethodGet, "/payments/x", "", tid,
+		gin.Params{{Key: "paymentID", Value: body.PaymentID}})
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "4111") || !strings.Contains(rec.Body.String(), domain.FailureDeclinedByPSP) {
+		t.Errorf("status = %d body = %s", rec.Code, rec.Body)
 	}
 }

@@ -2,6 +2,10 @@ package domain
 
 import "errors"
 
+// FailureDeclinedByPSP es el motivo público de un rechazo del PSP: el error
+// crudo puede filtrar datos del PSP o de la tarjeta.
+const FailureDeclinedByPSP = "declined by the payment provider"
+
 var (
 	ErrPaymentNotFound      = errors.New("payment not found")
 	ErrPaymentAlreadyExists = errors.New("payment with this idempotency key already exists")

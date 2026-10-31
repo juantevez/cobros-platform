@@ -239,7 +239,7 @@ func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Pa
 		return toResult(payment, wasExisting), fmt.Errorf("%w: %w", domain.ErrPaymentPending, pspErr)
 	}
 	if pspErr != nil {
-		_ = payment.Fail(psp.Name(), pspErr.Error())
+		_ = payment.Fail(psp.Name(), domain.FailureDeclinedByPSP, pspErr.Error())
 		if updateErr := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 			if err := uc.repo.Update(ctx, payment, domain.StatusProcessing); err != nil {
 				return err

@@ -31,7 +31,7 @@ func stuckPayment(stuckSince time.Time) *domain.Payment {
 		"", "",
 		domain.StatusProcessing, "", nil,
 		nil, nil, nil,
-		stuckSince.Add(-time.Second), stuckSince, "", nil,
+		stuckSince.Add(-time.Second), stuckSince, "", nil, "",
 	)
 }
 

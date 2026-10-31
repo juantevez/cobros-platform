@@ -54,7 +54,7 @@ func TestPaymentRepository_ProcessingResolution(t *testing.T) {
 	a, _ := repo.FindByID(ctx, p.ID())
 	b, _ := repo.FindByID(ctx, p.ID())
 	_ = a.Capture("mock", "PSP-1", a.PlatformFee(), domain.ReconstituteMoney(150, "ARS"))
-	_ = b.Fail("mock", "no record")
+	_ = b.Fail("mock", "no record", "")
 	results := make(chan error, 2)
 	var wg sync.WaitGroup
 	for _, x := range []*domain.Payment{a, b} {
@@ -151,5 +151,23 @@ func TestPaymentRepository_ConcurrentRefund(t *testing.T) {
 	got, _ := repo.FindByID(ctx, p.ID())
 	if got.Status() != domain.StatusRefunded || got.RefundPSPReference() != "REF-A" || got.RefundedAt() == nil {
 		t.Errorf("status = %q ref = %q at = %v", got.Status(), got.RefundPSPReference(), got.RefundedAt())
+	}
+}
+
+// El detalle crudo del PSP se persiste aparte del motivo público.
+func TestPaymentRepository_PSPFailureDetail(t *testing.T) {
+	pool := requireDB(t)
+	ctx := context.Background()
+	repo := NewPaymentRepository(pool)
+	p := savedPayment(t)
+	_ = p.MarkProcessing(domain.ReconstituteMoney(300, "ARS"))
+	_, _ = repo.ClaimProcessing(ctx, p)
+	_ = p.Fail("mock", domain.FailureDeclinedByPSP, "card 4111 declined: insufficient funds")
+	if err := repo.Update(ctx, p, domain.StatusProcessing); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ := repo.FindByID(ctx, p.ID())
+	if got.FailureReason() != domain.FailureDeclinedByPSP || got.PSPFailureDetail() != "card 4111 declined: insufficient funds" {
+		t.Errorf("reason = %q detail = %q", got.FailureReason(), got.PSPFailureDetail())
 	}
 }

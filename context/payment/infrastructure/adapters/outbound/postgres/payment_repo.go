@@ -89,7 +89,8 @@ func update(ctx context.Context, conn postgres.Conn, p *domain.Payment, from dom
 			platform_fee=$5, psp_fee=$6,
 			failure_reason=$7,
 			authorized_at=$8, captured_at=$9, failed_at=$10,
-			updated_at=$11, refund_psp_reference=$13, refunded_at=$14
+			updated_at=$11, refund_psp_reference=$13, refunded_at=$14,
+			psp_failure_detail=$15
 		WHERE id=$1 AND status=$12`,
 		p.ID().String(),
 		p.Status().String(), nullStr(p.PSPName()), nullStr(p.PSPReference()),
@@ -99,6 +100,7 @@ func update(ctx context.Context, conn postgres.Conn, p *domain.Payment, from dom
 		p.UpdatedAt(),
 		from.String(),
 		nullStr(p.RefundPSPReference()), p.RefundedAt(),
+		nullStr(p.PSPFailureDetail()),
 	)
 	if err != nil {
 		return fmt.Errorf("payment repo: update: %w", err)
@@ -195,7 +197,7 @@ const baseSelect = `
 	       status, failure_reason, metadata,
 	       authorized_at, captured_at, failed_at,
 	       created_at, updated_at,
-	       refund_psp_reference, refunded_at
+	       refund_psp_reference, refunded_at, psp_failure_detail
 	FROM payments`
 
 func scanPayment(row pgx.Row) (*domain.Payment, error) {
@@ -210,6 +212,7 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		createdAt, updatedAt                         time.Time
 		refundRef                                    *string
 		refundedAt                                   *time.Time
+		pspFailureDetail                             *string
 	)
 
 	if err := row.Scan(
@@ -220,7 +223,7 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		&status, &failReason, &metaJSON,
 		&authorizedAt, &capturedAt, &failedAt,
 		&createdAt, &updatedAt,
-		&refundRef, &refundedAt,
+		&refundRef, &refundedAt, &pspFailureDetail,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrPaymentNotFound
@@ -255,7 +258,7 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		deref(failReason),
 		metadata,
 		authorizedAt, capturedAt, failedAt,
-		createdAt.UTC(), updatedAt.UTC(), deref(refundRef), refundedAt,
+		createdAt.UTC(), updatedAt.UTC(), deref(refundRef), refundedAt, deref(pspFailureDetail),
 	), nil
 }
 

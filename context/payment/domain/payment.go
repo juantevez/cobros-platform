@@ -41,8 +41,11 @@ type Payment struct {
 	// refundPSPReference y refundedAt: el reembolso en el PSP (vacío/nil si no hubo).
 	refundPSPReference string
 	refundedAt         *time.Time
-	createdAt          time.Time
-	updatedAt          time.Time
+	// pspFailureDetail: error crudo del PSP al rechazar. Interno: no se
+	// expone (failureReason es el motivo público).
+	pspFailureDetail string
+	createdAt        time.Time
+	updatedAt        time.Time
 
 	events []Event
 }
@@ -94,6 +97,7 @@ func ReconstitutePayment(
 	authorizedAt, capturedAt, failedAt *time.Time,
 	createdAt, updatedAt time.Time,
 	refundPSPReference string, refundedAt *time.Time,
+	pspFailureDetail string,
 ) *Payment {
 	return &Payment{
 		id: id, tenantID: tenantID,
@@ -106,6 +110,7 @@ func ReconstitutePayment(
 		authorizedAt: authorizedAt, capturedAt: capturedAt, failedAt: failedAt,
 		createdAt: createdAt, updatedAt: updatedAt,
 		refundPSPReference: refundPSPReference, refundedAt: refundedAt,
+		pspFailureDetail: pspFailureDetail,
 	}
 }
 
@@ -187,8 +192,10 @@ func (p *Payment) RejectByRisk(reason string) error {
 	return nil
 }
 
-// Fail marca el pago como fallido por el PSP.
-func (p *Payment) Fail(pspName, reason string) error {
+// Fail marca el pago como fallido por el PSP. reason es el motivo público
+// (vista, evento, email y webhook al comercio); detail, el error crudo del
+// PSP, que se guarda solo para diagnóstico.
+func (p *Payment) Fail(pspName, reason, detail string) error {
 	if p.status != StatusProcessing {
 		return fmt.Errorf("%w: cannot fail from %q", ErrInvalidTransition, p.status)
 	}
@@ -197,6 +204,7 @@ func (p *Payment) Fail(pspName, reason string) error {
 	p.status = StatusFailed
 	p.pspName = pspName
 	p.failureReason = reason
+	p.pspFailureDetail = detail
 	p.failedAt = &now
 	p.updatedAt = now
 
@@ -278,6 +286,7 @@ func (p *Payment) FailedAt() *time.Time        { return p.failedAt }
 func (p *Payment) CreatedAt() time.Time        { return p.createdAt }
 func (p *Payment) RefundPSPReference() string  { return p.refundPSPReference }
 func (p *Payment) RefundedAt() *time.Time      { return p.refundedAt }
+func (p *Payment) PSPFailureDetail() string    { return p.pspFailureDetail }
 func (p *Payment) UpdatedAt() time.Time        { return p.updatedAt }
 
 func (p *Payment) PullEvents() []Event {

@@ -346,8 +346,13 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 
 		p := d.repo.saved[0]
-		if p.Status() != domain.StatusFailed || !strings.Contains(p.FailureReason(), "card declined") || p.PSPName() != "fakepsp" {
+		// El motivo público es genérico: el error del PSP (que puede traer
+		// datos de la tarjeta) va al email y al webhook del comercio.
+		if p.Status() != domain.StatusFailed || p.FailureReason() != domain.FailureDeclinedByPSP || p.PSPName() != "fakepsp" {
 			t.Errorf("payment not failed: status=%q reason=%q psp=%q", p.Status(), p.FailureReason(), p.PSPName())
+		}
+		if !strings.Contains(p.PSPFailureDetail(), "card declined") {
+			t.Errorf("psp failure detail = %q", p.PSPFailureDetail())
 		}
 		wantUpdates := []domain.PaymentStatus{domain.StatusProcessing, domain.StatusFailed}
 		if !reflect.DeepEqual(d.repo.updates, wantUpdates) {

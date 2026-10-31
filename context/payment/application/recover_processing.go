@@ -106,11 +106,11 @@ func (r *ProcessingRecoverer) recover(ctx context.Context, p *domain.Payment, no
 			return err
 		}
 	case lookup.Found:
-		if err := p.Fail(psp.Name(), "declined by the payment provider"); err != nil {
+		if err := p.Fail(psp.Name(), domain.FailureDeclinedByPSP, ""); err != nil {
 			return err
 		}
 	case now.Sub(p.UpdatedAt()) >= notFoundAfter:
-		if err := p.Fail(psp.Name(), "the payment provider has no record of the payment"); err != nil {
+		if err := p.Fail(psp.Name(), "the payment provider has no record of the payment", ""); err != nil {
 			return err
 		}
 	default:
