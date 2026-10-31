@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -15,6 +16,10 @@ const (
 	// retryConcurrency limita los despachos HTTP simultáneos por ciclo: un
 	// endpoint lento (timeout de 30s) no frena al resto del batch.
 	retryConcurrency = 10
+	// claimLease es cuánto dura el reclamo de una delivery: tiene que cubrir
+	// el POST (timeout de 30s) y la escritura del resultado. Si el proceso
+	// muere a mitad del envío, la delivery vuelve a estar disponible al vencer.
+	claimLease = 2 * time.Minute
 )
 
 // RetryDeliveryUseCase despacha una delivery hacia el endpoint del comercio.
@@ -84,17 +89,28 @@ func (uc *RetryDeliveryUseCase) dispatch(ctx context.Context, delivery *domain.W
 		return domain.ErrEndpointInactive
 	}
 
+	// Reclamo antes del POST: el poller, el reintento manual y otra réplica
+	// del worker pueden tener la misma delivery; solo uno la despacha.
+	prevAttempts := delivery.AttemptCount()
+	now := uc.clock.Now()
+	claimed, err := uc.deliveryRepo.Claim(ctx, delivery.ID(), prevAttempts, now, now.Add(claimLease))
+	if err != nil {
+		return fmt.Errorf("claim delivery: %w", err)
+	}
+	if !claimed {
+		return domain.ErrDeliveryInProgress
+	}
+
 	attempt, _ := uc.dispatcher.Dispatch(ctx, endpoint, delivery)
 
-	now := uc.clock.Now()
-	_ = delivery.RecordAttempt(attempt, now)
+	_ = delivery.RecordAttempt(attempt, uc.clock.Now())
 
 	// Estado, intento y DeliveryExhaustedEvent se guardan juntos: si algo
 	// falla no queda una delivery agotada sin su evento ni un estado sin el
 	// intento que lo explica. La delivery sigue como estaba en la base y el
 	// poller la vuelve a despachar (at-least-once).
 	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-		if err := uc.deliveryRepo.Update(ctx, delivery); err != nil {
+		if err := uc.deliveryRepo.Update(ctx, delivery, prevAttempts); err != nil {
 			return fmt.Errorf("update delivery: %w", err)
 		}
 		if evs := delivery.PullEvents(); len(evs) > 0 {
@@ -171,7 +187,11 @@ func (p *RetryPoller) runCycle(ctx context.Context) {
 		go func(d *domain.WebhookDelivery) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := p.retryUC.dispatch(ctx, d); err != nil {
+			err := p.retryUC.dispatch(ctx, d)
+			if errors.Is(err, domain.ErrDeliveryInProgress) {
+				return // la despacha otro proceso
+			}
+			if err != nil {
 				p.logger.Error("retry poller: dispatch failed",
 					"delivery_id", d.ID(),
 					"event_type", d.EventType(),

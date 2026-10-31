@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -116,6 +117,52 @@ func TestRetryDeliveryUseCase_Execute(t *testing.T) {
 		}
 		if d.pub.calls != 1 || d.tx.calls != 1 {
 			t.Errorf("publish calls = %d tx calls = %d, want 1 and 1", d.pub.calls, d.tx.calls)
+		}
+	})
+
+	// El poller, el reintento manual y otra réplica del worker podían
+	// despachar la misma delivery: ahora se reclama antes del POST.
+	t.Run("claims the delivery before dispatching and guards the update", func(t *testing.T) {
+		d := newRetryDeps()
+		del := d.seed(domain.StatusFailed, 2)
+
+		if err := d.uc().Execute(ctx, RetryDeliveryCmd{TenantID: tenantA, DeliveryID: del.ID().String()}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []claimCall{{id: del.ID(), attemptCount: 2, now: testNow, until: testNow.Add(claimLease)}}
+		if !reflect.DeepEqual(d.deliveries.claims, want) {
+			t.Errorf("claims = %+v, want %+v", d.deliveries.claims, want)
+		}
+		if !reflect.DeepEqual(d.deliveries.prevAttempts, []int{2}) {
+			t.Errorf("update prevAttempts = %v, want [2]", d.deliveries.prevAttempts)
+		}
+	})
+
+	t.Run("delivery claimed by another process is not dispatched", func(t *testing.T) {
+		d := newRetryDeps()
+		del := d.seed(domain.StatusPending, 0)
+		d.deliveries.notClaimable = map[domain.DeliveryID]bool{del.ID(): true}
+
+		err := d.uc().Execute(ctx, RetryDeliveryCmd{TenantID: tenantA, DeliveryID: del.ID().String()})
+		if !errors.Is(err, domain.ErrDeliveryInProgress) {
+			t.Fatalf("expected ErrDeliveryInProgress, got %v", err)
+		}
+		if len(d.dispatcher.delivered) != 0 || len(d.deliveries.updates) != 0 {
+			t.Errorf("dispatched = %d updates = %d, want none", len(d.dispatcher.delivered), len(d.deliveries.updates))
+		}
+	})
+
+	t.Run("claim error is wrapped and nothing is dispatched", func(t *testing.T) {
+		d := newRetryDeps()
+		del := d.seed(domain.StatusPending, 0)
+		d.deliveries.claimErr = errBoom
+
+		err := d.uc().Execute(ctx, RetryDeliveryCmd{TenantID: tenantA, DeliveryID: del.ID().String()})
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "claim delivery") {
+			t.Fatalf("expected wrapped errBoom, got %v", err)
+		}
+		if len(d.dispatcher.delivered) != 0 {
+			t.Error("dispatcher must not be called")
 		}
 	})
 
@@ -276,6 +323,25 @@ func TestRetryPoller_RunCycle(t *testing.T) {
 
 		if ok.Status() != domain.StatusDelivered {
 			t.Errorf("second delivery status = %q, want delivered", ok.Status())
+		}
+	})
+
+	t.Run("delivery claimed by another process is skipped without error log", func(t *testing.T) {
+		d := newRetryDeps()
+		taken := deliveryWith(d.endpoint, domain.StatusPending, 0)
+		free := deliveryWith(d.endpoint, domain.StatusPending, 0)
+		d.deliveries.due = []*domain.WebhookDelivery{taken, free}
+		d.deliveries.notClaimable = map[domain.DeliveryID]bool{taken.ID(): true}
+
+		var logs strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logs, nil))
+		NewRetryPoller(d.uc(), d.deliveries, time.Second, logger).runCycle(ctx)
+
+		if len(d.dispatcher.delivered) != 1 || d.dispatcher.delivered[0] != free {
+			t.Errorf("dispatched %d deliveries, want only the free one", len(d.dispatcher.delivered))
+		}
+		if strings.Contains(logs.String(), "level=ERROR") {
+			t.Errorf("unexpected error log: %s", logs.String())
 		}
 	})
 

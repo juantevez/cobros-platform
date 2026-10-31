@@ -71,7 +71,10 @@ type fakeDeliveries struct {
 }
 
 func (r *fakeDeliveries) Save(context.Context, *domain.WebhookDelivery) error   { return nil }
-func (r *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery) error { return nil }
+func (r *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery, int) error { return nil }
+func (r *fakeDeliveries) Claim(context.Context, domain.DeliveryID, int, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
 func (r *fakeDeliveries) FindByID(ctx context.Context, id domain.DeliveryID) (*domain.WebhookDelivery, error) {
 	d, ok := r.byID[id]
 	if !ok {
@@ -396,6 +399,7 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrEndpointNotFound, http.StatusNotFound},
 		{domain.ErrDeliveryNotFound, http.StatusNotFound},
 		{domain.ErrDeliveryNotRetryable, http.StatusUnprocessableEntity},
+		{fmt.Errorf("delivery repo: update x: %w", domain.ErrDeliveryInProgress), http.StatusConflict},
 		{domain.ErrEndpointInactive, http.StatusUnprocessableEntity},
 		{domain.ErrEndpointURLEmpty, http.StatusBadRequest},
 		{fmt.Errorf("%w: missing host", domain.ErrInvalidEndpointURL), http.StatusBadRequest},

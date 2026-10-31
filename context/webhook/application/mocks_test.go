@@ -93,6 +93,12 @@ type idempotencyKey struct {
 	eventID    string
 }
 
+type claimCall struct {
+	id           domain.DeliveryID
+	attemptCount int
+	now, until   time.Time
+}
+
 type fakeDeliveryRepo struct {
 	mu         sync.Mutex
 	byID       map[domain.DeliveryID]*domain.WebhookDelivery
@@ -104,6 +110,12 @@ type fakeDeliveryRepo struct {
 	saveErrFor map[domain.EndpointID]error // Save falla sólo para esos endpoints
 	idemErrFor map[domain.EndpointID]error // FindByEventAndEndpoint falla sólo para esos
 	updateErr  error
+	// Claim / Update: reclamos pedidos, deliveries que no se pueden reclamar
+	// y attempt_count esperado en cada Update.
+	claims       []claimCall
+	notClaimable map[domain.DeliveryID]bool
+	claimErr     error
+	prevAttempts []int
 	// updatedInTx: el último Update corrió dentro de fakeTx.RunInTx.
 	updatedInTx bool
 	findErr     error
@@ -136,10 +148,23 @@ func (r *fakeDeliveryRepo) Save(ctx context.Context, d *domain.WebhookDelivery) 
 	return nil
 }
 
-func (r *fakeDeliveryRepo) Update(ctx context.Context, d *domain.WebhookDelivery) error {
+// Claim reclama salvo que notClaimable lo impida; registra el attemptCount
+// con el que se pidió y el vencimiento.
+func (r *fakeDeliveryRepo) Claim(ctx context.Context, id domain.DeliveryID, attemptCount int, now, until time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.claims = append(r.claims, claimCall{id: id, attemptCount: attemptCount, now: now, until: until})
+	if r.claimErr != nil {
+		return false, r.claimErr
+	}
+	return !r.notClaimable[id], nil
+}
+
+func (r *fakeDeliveryRepo) Update(ctx context.Context, d *domain.WebhookDelivery, prevAttemptCount int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.updates = append(r.updates, d.Status())
+	r.prevAttempts = append(r.prevAttempts, prevAttemptCount)
 	r.updatedInTx = inFakeTx(ctx)
 	return r.updateErr
 }
@@ -250,6 +275,7 @@ func (g *fakeSecretGen) Generate() (string, error) {
 }
 
 type fakeTx struct {
+	mu    sync.Mutex // el poller despacha en paralelo
 	calls int
 	err   error
 }
@@ -261,9 +287,12 @@ type fakeTxKey struct{}
 func inFakeTx(ctx context.Context) bool { return ctx.Value(fakeTxKey{}) != nil }
 
 func (tx *fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	tx.mu.Lock()
 	tx.calls++
-	if tx.err != nil {
-		return tx.err
+	err := tx.err
+	tx.mu.Unlock()
+	if err != nil {
+		return err
 	}
 	return fn(context.WithValue(ctx, fakeTxKey{}, true))
 }

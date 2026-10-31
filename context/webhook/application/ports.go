@@ -27,7 +27,13 @@ type EndpointRepository interface {
 // DeliveryRepository persiste y recupera WebhookDeliveries.
 type DeliveryRepository interface {
 	Save(ctx context.Context, d *domain.WebhookDelivery) error
-	Update(ctx context.Context, d *domain.WebhookDelivery) error
+	// Claim reclama la delivery para despacharla hasta until: solo tiene éxito
+	// si sigue pending/failed con attemptCount intentos y nadie la tiene
+	// reclamada (o el reclamo venció antes de now). false = otro proceso.
+	Claim(ctx context.Context, id domain.DeliveryID, attemptCount int, now, until time.Time) (bool, error)
+	// Update guarda el estado y el último intento y libera el reclamo, solo si
+	// attempt_count sigue siendo prevAttemptCount (si no, ErrDeliveryInProgress).
+	Update(ctx context.Context, d *domain.WebhookDelivery, prevAttemptCount int) error
 	FindByID(ctx context.Context, id domain.DeliveryID) (*domain.WebhookDelivery, error)
 	// FindByEventAndEndpoint verifica idempotencia.
 	FindByEventAndEndpoint(ctx context.Context, endpointID domain.EndpointID, eventID string) (*domain.WebhookDelivery, error)

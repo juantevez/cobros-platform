@@ -164,6 +164,8 @@ func respondError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrEndpointNotFound),
 		errors.Is(err, domain.ErrDeliveryNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, domain.ErrDeliveryInProgress):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrDeliveryNotRetryable),
 		errors.Is(err, domain.ErrEndpointInactive):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})

@@ -13,4 +13,7 @@ var (
 	ErrDeliveryNotFound      = errors.New("webhook delivery not found")
 	ErrDeliveryNotRetryable  = errors.New("delivery cannot be retried: already delivered or exhausted")
 	ErrDuplicateDelivery     = errors.New("delivery already exists for this event")
+	// ErrDeliveryInProgress: otro proceso tiene reclamada la delivery o la
+	// actualizó mientras se despachaba.
+	ErrDeliveryInProgress = errors.New("delivery is being dispatched by another process")
 )

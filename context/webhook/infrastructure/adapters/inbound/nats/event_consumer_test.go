@@ -45,7 +45,10 @@ func (f *fakeDeliveries) Save(ctx context.Context, d *domain.WebhookDelivery) er
 	f.saved = append(f.saved, d)
 	return nil
 }
-func (f *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery) error { return nil }
+func (f *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery, int) error { return nil }
+func (f *fakeDeliveries) Claim(context.Context, domain.DeliveryID, int, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
 func (f *fakeDeliveries) FindByID(context.Context, domain.DeliveryID) (*domain.WebhookDelivery, error) {
 	return nil, domain.ErrDeliveryNotFound
 }

@@ -367,15 +367,15 @@ func TestDeliveryRepository_Update(t *testing.T) {
 		_ = d.RecordAttempt(domain.NewDeliveryAttempt(2, 0, "", "timeout", 30000), testTime)
 		last := d.Attempts()[1]
 
-		mock.ExpectExec("UPDATE webhook_deliveries SET").
-			WithArgs(d.ID().String(), "failed", 2, d.NextRetryAt(), d.UpdatedAt()).
+		mock.ExpectExec("UPDATE webhook_deliveries SET.*claimed_until=NULL\\s+WHERE id=\\$1 AND attempt_count=\\$6").
+			WithArgs(d.ID().String(), "failed", 2, d.NextRetryAt(), d.UpdatedAt(), 1).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectExec("INSERT INTO webhook_delivery_attempts.*ON CONFLICT \\(id\\) DO NOTHING").WithArgs(
 			last.ID().String(), d.ID().String(), 2, 0,
 			(*string)(nil), strPtr("timeout"), int64(30000), last.AttemptedAt(),
 		).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-		if err := NewDeliveryRepository(mock).Update(context.Background(), d); err != nil {
+		if err := NewDeliveryRepository(mock).Update(context.Background(), d, 1); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -385,9 +385,9 @@ func TestDeliveryRepository_Update(t *testing.T) {
 
 	t.Run("without attempts only updates the delivery", func(t *testing.T) {
 		mock := newMock(t)
-		mock.ExpectExec("UPDATE webhook_deliveries SET").WithArgs(anyArgs(5)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("UPDATE webhook_deliveries SET").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := NewDeliveryRepository(mock).Update(context.Background(), newDelivery()); err != nil {
+		if err := NewDeliveryRepository(mock).Update(context.Background(), newDelivery(), 0); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -397,11 +397,26 @@ func TestDeliveryRepository_Update(t *testing.T) {
 
 	t.Run("update error is wrapped", func(t *testing.T) {
 		mock := newMock(t)
-		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(5)...).WillReturnError(errBoom)
+		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(6)...).WillReturnError(errBoom)
 
-		err := NewDeliveryRepository(mock).Update(context.Background(), newDelivery())
+		err := NewDeliveryRepository(mock).Update(context.Background(), newDelivery(), 0)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "delivery repo: update") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
+		}
+	})
+
+	t.Run("attempt_count changed by another process", func(t *testing.T) {
+		mock := newMock(t)
+		d := newDelivery()
+		_ = d.RecordAttempt(domain.NewDeliveryAttempt(1, 200, "ok", "", 5), testTime)
+		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err := NewDeliveryRepository(mock).Update(context.Background(), d, 0)
+		if !errors.Is(err, domain.ErrDeliveryInProgress) {
+			t.Fatalf("expected ErrDeliveryInProgress, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("attempt must not be inserted: %v", err)
 		}
 	})
 
@@ -409,10 +424,10 @@ func TestDeliveryRepository_Update(t *testing.T) {
 		mock := newMock(t)
 		d := newDelivery()
 		_ = d.RecordAttempt(domain.NewDeliveryAttempt(1, 200, "ok", "", 5), testTime)
-		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(5)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectExec("INSERT INTO webhook_delivery_attempts").WithArgs(anyArgs(8)...).WillReturnError(errBoom)
 
-		err := NewDeliveryRepository(mock).Update(context.Background(), d)
+		err := NewDeliveryRepository(mock).Update(context.Background(), d, 0)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "save attempt") {
 			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
@@ -574,10 +589,38 @@ func TestDeliveryRepository_ListByTenant(t *testing.T) {
 	})
 }
 
+func TestDeliveryRepository_Claim(t *testing.T) {
+	id := domain.NewDeliveryID()
+	until := testTime.Add(2 * time.Minute)
+	for _, tc := range []struct {
+		rows int64
+		want bool
+	}{{1, true}, {0, false}} {
+		mock := newMock(t)
+		mock.ExpectExec("UPDATE webhook_deliveries SET claimed_until=\\$4\\s+WHERE id=\\$1\\s+AND status IN \\('pending','failed'\\)\\s+AND attempt_count=\\$2\\s+AND \\(claimed_until IS NULL OR claimed_until < \\$3\\)").
+			WithArgs(id.String(), 3, testTime, until).
+			WillReturnResult(pgxmock.NewResult("UPDATE", tc.rows))
+
+		got, err := NewDeliveryRepository(mock).Claim(context.Background(), id, 3, testTime, until)
+		if err != nil || got != tc.want {
+			t.Errorf("rows %d: Claim = %v, %v; want %v", tc.rows, got, err, tc.want)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+	}
+
+	mock := newMock(t)
+	mock.ExpectExec("UPDATE webhook_deliveries").WithArgs(anyArgs(4)...).WillReturnError(errBoom)
+	if _, err := NewDeliveryRepository(mock).Claim(context.Background(), id, 3, testTime, until); !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "delivery repo: claim") {
+		t.Errorf("expected wrapped errBoom, got %v", err)
+	}
+}
+
 func TestDeliveryRepository_ListDueForRetry(t *testing.T) {
 	t.Run("lists pending and failed due deliveries", func(t *testing.T) {
 		mock := newMock(t)
-		mock.ExpectQuery("JOIN webhook_endpoints e ON e.id = d.endpoint_id AND e.active = true\\s+WHERE d.status IN \\('pending','failed'\\)\\s+AND d.next_retry_at <= \\$1\\s+ORDER BY d.next_retry_at ASC\\s+LIMIT \\$2").
+		mock.ExpectQuery("JOIN webhook_endpoints e ON e.id = d.endpoint_id AND e.active = true\\s+WHERE d.status IN \\('pending','failed'\\)\\s+AND d.next_retry_at <= \\$1\\s+AND \\(d.claimed_until IS NULL OR d.claimed_until < \\$1\\)\\s+ORDER BY d.next_retry_at ASC\\s+LIMIT \\$2").
 			WithArgs(testTime, 50).
 			WillReturnRows(pgxmock.NewRows(deliveryCols).AddRow(deliveryRow(uuid.NewString())...))
 
