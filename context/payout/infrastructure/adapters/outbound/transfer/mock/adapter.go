@@ -17,9 +17,14 @@ func New() *Adapter { return &Adapter{} }
 func (a *Adapter) Name() string { return "mock_bank" }
 
 func (a *Adapter) Transfer(_ context.Context, req application.TransferRequest) (application.TransferResult, error) {
-	// Simular rechazo para cuenta especial en tests
-	if req.AccountNumber == "REJECT" {
-		return application.TransferResult{}, fmt.Errorf("mock bank: account rejected")
+	// Cuentas especiales para probar los dos tipos de fallo:
+	//   REJECT  → rechazo definitivo del banco.
+	//   TIMEOUT → resultado desconocido (simula un timeout).
+	switch req.AccountNumber {
+	case "REJECT":
+		return application.TransferResult{}, fmt.Errorf("%w: mock bank: account rejected", application.ErrBankRejected)
+	case "TIMEOUT":
+		return application.TransferResult{}, fmt.Errorf("mock bank: request timed out")
 	}
 
 	return application.TransferResult{

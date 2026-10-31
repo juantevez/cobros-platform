@@ -52,6 +52,8 @@ type PayoutGate interface {
 }
 
 // BankTransferAdapter abstrae la ejecución de transferencias bancarias.
+// Un rechazo definitivo del banco debe envolver ErrBankRejected; cualquier
+// otro error se trata como resultado desconocido.
 // En Fase 3: implementación Mock.
 // En Fase 4: se conecta con el banco real, MP Transfers, o Prex.
 type BankTransferAdapter interface {

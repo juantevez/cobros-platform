@@ -204,11 +204,12 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 	// ── 5. Resultado de la transferencia ──────────────────────────────────────
 
 	if transferErr != nil {
-		// Timeout / cancelación / error de red: resultado INDETERMINADO.
+		// Cualquier error que no sea un rechazo explícito del banco
+		// (timeout, red, 5xx, error imprevisto): resultado INDETERMINADO.
 		// Fallarlo sería peligroso: el banco puede haber acreditado los fondos
 		// y la reversa del asiento dejaría al comercio pagando un dinero que
 		// efectivamente recibió. Se marca unknown y se delega a reconciliación.
-		if isIndeterminate(transferErr) {
+		if !errors.Is(transferErr, ErrBankRejected) {
 			if err := payout.MarkUnknown(transferErr.Error()); err != nil {
 				log.Printf("payout %s: mark unknown: %v", payout.ID(), err)
 			}

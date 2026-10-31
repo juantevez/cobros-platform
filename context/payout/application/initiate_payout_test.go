@@ -333,7 +333,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 
 	t.Run("transfer failure marks payout failed and publishes failed event", func(t *testing.T) {
 		d := newInitiateDeps()
-		d.transfer.err = errors.New("account closed")
+		d.transfer.err = fmt.Errorf("%w: account closed", ErrBankRejected)
 
 		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if err == nil || !strings.Contains(err.Error(), "transfer failed") {
@@ -347,7 +347,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		if saved.Status() != domain.StatusFailed {
 			t.Errorf("status = %q, want failed", saved.Status())
 		}
-		if saved.FailureReason() != "account closed" {
+		if !strings.Contains(saved.FailureReason(), "account closed") {
 			t.Errorf("failure reason = %q", saved.FailureReason())
 		}
 
@@ -363,7 +363,7 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 
 	t.Run("transfer failure still returns transfer error when fail-persist fails", func(t *testing.T) {
 		d := newInitiateDeps()
-		d.transfer.err = errors.New("rejected")
+		d.transfer.err = fmt.Errorf("%w: rejected", ErrBankRejected)
 		d.repo.updateErr = errBoom
 		d.repo.updateErrAt = 2
 		d.pub.err = errBoom
@@ -513,22 +513,29 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("network error classified as indeterminate also goes to unknown", func(t *testing.T) {
-		d := newInitiateDeps()
-		d.transfer.err = errors.New("dial tcp: i/o timeout")
+	// Un error que no es un rechazo explícito (5xx, error imprevisto del
+	// SDK) revertía el asiento aunque el banco hubiera pagado.
+	for _, transferErr := range []error{errors.New("dial tcp: i/o timeout"), errors.New("bank api: 503 service unavailable"), errors.New("sdk: unexpected response")} {
+		t.Run("error that is not an explicit rejection goes to unknown: "+transferErr.Error(), func(t *testing.T) {
+			d := newInitiateDeps()
+			d.transfer.err = transferErr
 
-		res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
-		if !errors.Is(err, domain.ErrBankTransferUnknown) {
-			t.Fatalf("expected ErrBankTransferUnknown, got %v", err)
-		}
-		if res.Status != domain.StatusUnknown.String() {
-			t.Errorf("status = %q, want unknown", res.Status)
-		}
-	})
+			res, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
+			if !errors.Is(err, domain.ErrBankTransferUnknown) {
+				t.Fatalf("expected ErrBankTransferUnknown, got %v", err)
+			}
+			if res.Status != domain.StatusUnknown.String() {
+				t.Errorf("status = %q, want unknown", res.Status)
+			}
+			if got := d.pub.eventTypes(); len(got) != 2 || got[1] != "payout.unknown.v1" {
+				t.Errorf("events = %v, want initiated + unknown (no reversal)", got)
+			}
+		})
+	}
 
-	t.Run("known rejection still fails definitively", func(t *testing.T) {
+	t.Run("explicit rejection fails definitively", func(t *testing.T) {
 		d := newInitiateDeps()
-		d.transfer.err = errors.New("CBU invalido")
+		d.transfer.err = fmt.Errorf("%w: CBU invalido", ErrBankRejected)
 
 		_, err := d.uc().Execute(ctx, InitiatePayoutCmd{TenantID: tenantA, Amount: 100, IdempotencyKey: "k1"})
 		if errors.Is(err, domain.ErrBankTransferUnknown) {
