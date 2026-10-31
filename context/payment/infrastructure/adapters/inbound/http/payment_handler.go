@@ -155,7 +155,6 @@ func respondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrRiskRejected):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrNotCaptured),
-		errors.Is(err, domain.ErrAlreadyCaptured),
 		errors.Is(err, domain.ErrInvalidTransition):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidID),

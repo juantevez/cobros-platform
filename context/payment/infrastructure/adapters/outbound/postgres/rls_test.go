@@ -78,9 +78,9 @@ func TestRLS_Payments(t *testing.T) {
 	}
 
 	// Escribir un pago ajeno desde la sesión de otro tenant no toca la fila.
-	foreign := domain.ReconstitutePayment(a.ID(), b.TenantID(), a.IdempotencyKey(), "",
+	foreign := domain.ReconstitutePayment(a.ID(), b.TenantID(), a.IdempotencyKey(),
 		a.Amount(), a.PlatformFee(), a.PSPFee(), a.PayerInfo(), a.Method(), "", "",
-		domain.StatusProcessing, "", nil, nil, nil, nil, a.CreatedAt(), time.Now().UTC(), "", nil, "")
+		domain.StatusProcessing, "", nil, nil, nil, a.CreatedAt(), time.Now().UTC(), "", nil, "")
 	if err := repo.Update(context.Background(), foreign, domain.StatusInitiated); !errors.Is(err, domain.ErrPaymentChanged) {
 		t.Errorf("update of A through B's session = %v, want ErrPaymentChanged (row not visible)", err)
 	}
@@ -132,7 +132,9 @@ func TestRLS_PaymentFlows(t *testing.T) {
 	admin := requireDB(t)
 	repo, tx := NewPaymentRepository(rls), pkgpostgres.NewTxManager(rls)
 	merchant := domain.TenantID(uuid.NewString())
-	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DELETE FROM payments WHERE tenant_id=$1`, merchant.String()) })
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `DELETE FROM payments WHERE tenant_id=$1`, merchant.String())
+	})
 	process := application.NewProcessPaymentUseCase(repo, openGate{}, psp.NewRouter(), risk.NewPermissiveEvaluator(),
 		fees.NewFixedRateCalculator(300), tx, noopPublisher{})
 	cmd := func(key, token string) application.ProcessPaymentCmd {

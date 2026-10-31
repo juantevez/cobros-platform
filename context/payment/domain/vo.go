@@ -99,15 +99,6 @@ func (m Money) Amount() int64    { return m.amount }
 func (m Money) Currency() string { return m.currency }
 func (m Money) IsZero() bool     { return m.amount == 0 }
 
-func (m Money) Sub(other Money) (Money, error) {
-	if m.currency != other.currency {
-		return Money{}, fmt.Errorf("cannot subtract money with different currencies")
-	}
-	if other.amount > m.amount {
-		return Money{}, ErrRefundExceedsAmount
-	}
-	return Money{amount: m.amount - other.amount, currency: m.currency}, nil
-}
 
 func (m Money) String() string { return fmt.Sprintf("%d %s", m.amount, m.currency) }
 

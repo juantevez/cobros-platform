@@ -24,7 +24,6 @@ type Payment struct {
 	id             PaymentID
 	tenantID       TenantID
 	idempotencyKey string
-	checkoutID     string // referencia al Checkout (Fase 3); vacío en Fase 2
 	amount         Money
 	platformFee    Money // calculado al capturar
 	pspFee         Money // informado por el PSP
@@ -35,7 +34,6 @@ type Payment struct {
 	status         PaymentStatus
 	failureReason  string
 	metadata       map[string]string
-	authorizedAt   *time.Time
 	capturedAt     *time.Time
 	failedAt       *time.Time
 	// refundPSPReference y refundedAt: el reembolso en el PSP (vacío/nil si no hubo).
@@ -86,7 +84,7 @@ func NewPayment(
 // ReconstitutePayment reconstruye un Payment desde el repositorio.
 func ReconstitutePayment(
 	id PaymentID, tenantID TenantID,
-	idempotencyKey, checkoutID string,
+	idempotencyKey string,
 	amount, platformFee, pspFee Money,
 	payerInfo PayerInfo,
 	method PaymentMethod,
@@ -94,20 +92,20 @@ func ReconstitutePayment(
 	status PaymentStatus,
 	failureReason string,
 	metadata map[string]string,
-	authorizedAt, capturedAt, failedAt *time.Time,
+	capturedAt, failedAt *time.Time,
 	createdAt, updatedAt time.Time,
 	refundPSPReference string, refundedAt *time.Time,
 	pspFailureDetail string,
 ) *Payment {
 	return &Payment{
 		id: id, tenantID: tenantID,
-		idempotencyKey: idempotencyKey, checkoutID: checkoutID,
-		amount: amount, platformFee: platformFee, pspFee: pspFee,
+		idempotencyKey: idempotencyKey,
+		amount:         amount, platformFee: platformFee, pspFee: pspFee,
 		payerInfo: payerInfo, method: method,
 		pspName: pspName, pspReference: pspReference,
 		status: status, failureReason: failureReason,
-		metadata:     metadata,
-		authorizedAt: authorizedAt, capturedAt: capturedAt, failedAt: failedAt,
+		metadata:   metadata,
+		capturedAt: capturedAt, failedAt: failedAt,
 		createdAt: createdAt, updatedAt: updatedAt,
 		refundPSPReference: refundPSPReference, refundedAt: refundedAt,
 		pspFailureDetail: pspFailureDetail,
@@ -271,7 +269,6 @@ func (p *Payment) NetAmount() int64 {
 func (p *Payment) ID() PaymentID               { return p.id }
 func (p *Payment) TenantID() TenantID          { return p.tenantID }
 func (p *Payment) IdempotencyKey() string      { return p.idempotencyKey }
-func (p *Payment) CheckoutID() string          { return p.checkoutID }
 func (p *Payment) Amount() Money               { return p.amount }
 func (p *Payment) PlatformFee() Money          { return p.platformFee }
 func (p *Payment) PSPFee() Money               { return p.pspFee }
@@ -282,7 +279,6 @@ func (p *Payment) PSPReference() string        { return p.pspReference }
 func (p *Payment) Status() PaymentStatus       { return p.status }
 func (p *Payment) FailureReason() string       { return p.failureReason }
 func (p *Payment) Metadata() map[string]string { return p.metadata }
-func (p *Payment) AuthorizedAt() *time.Time    { return p.authorizedAt }
 func (p *Payment) CapturedAt() *time.Time      { return p.capturedAt }
 func (p *Payment) FailedAt() *time.Time        { return p.failedAt }
 func (p *Payment) CreatedAt() time.Time        { return p.createdAt }

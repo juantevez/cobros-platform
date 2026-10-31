@@ -41,25 +41,25 @@ func save(ctx context.Context, conn postgres.Conn, p *domain.Payment) error {
 
 	_, err := conn.Exec(ctx, `
 		INSERT INTO payments (
-			id, tenant_id, idempotency_key, checkout_id,
+			id, tenant_id, idempotency_key,
 			amount, currency, platform_fee, psp_fee,
 			payer_name, payer_email, payer_doc_type, payer_doc_num,
 			payment_method, psp_name, psp_reference,
 			status, failure_reason, metadata,
-			authorized_at, captured_at, failed_at,
+			captured_at, failed_at,
 			created_at, updated_at
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-			$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+			$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
 		)`,
-		p.ID().String(), p.TenantID().String(), p.IdempotencyKey(), nullStr(p.CheckoutID()),
+		p.ID().String(), p.TenantID().String(), p.IdempotencyKey(),
 		p.Amount().Amount(), p.Amount().Currency(),
 		p.PlatformFee().Amount(), p.PSPFee().Amount(),
 		nullStr(p.PayerInfo().Name), nullStr(p.PayerInfo().Email),
 		nullStr(p.PayerInfo().DocType), nullStr(p.PayerInfo().DocNum),
 		p.Method().String(), nullStr(p.PSPName()), nullStr(p.PSPReference()),
 		p.Status().String(), nullStr(p.FailureReason()), meta,
-		p.AuthorizedAt(), p.CapturedAt(), p.FailedAt(),
+		p.CapturedAt(), p.FailedAt(),
 		p.CreatedAt(), p.UpdatedAt(),
 	)
 	if err != nil {
@@ -88,15 +88,15 @@ func update(ctx context.Context, conn postgres.Conn, p *domain.Payment, from dom
 			status=$2, psp_name=$3, psp_reference=$4,
 			platform_fee=$5, psp_fee=$6,
 			failure_reason=$7,
-			authorized_at=$8, captured_at=$9, failed_at=$10,
-			updated_at=$11, refund_psp_reference=$13, refunded_at=$14,
-			psp_failure_detail=$15
-		WHERE id=$1 AND status=$12`,
+			captured_at=$8, failed_at=$9,
+			updated_at=$10, refund_psp_reference=$12, refunded_at=$13,
+			psp_failure_detail=$14
+		WHERE id=$1 AND status=$11`,
 		p.ID().String(),
 		p.Status().String(), nullStr(p.PSPName()), nullStr(p.PSPReference()),
 		p.PlatformFee().Amount(), p.PSPFee().Amount(),
 		nullStr(p.FailureReason()),
-		p.AuthorizedAt(), p.CapturedAt(), p.FailedAt(),
+		p.CapturedAt(), p.FailedAt(),
 		p.UpdatedAt(),
 		from.String(),
 		nullStr(p.RefundPSPReference()), p.RefundedAt(),
@@ -190,12 +190,12 @@ func listStuckProcessing(ctx context.Context, conn postgres.Conn, olderThan time
 }
 
 const baseSelect = `
-	SELECT id, tenant_id, idempotency_key, checkout_id,
+	SELECT id, tenant_id, idempotency_key,
 	       amount, currency, platform_fee, psp_fee,
 	       payer_name, payer_email, payer_doc_type, payer_doc_num,
 	       payment_method, psp_name, psp_reference,
 	       status, failure_reason, metadata,
-	       authorized_at, captured_at, failed_at,
+	       captured_at, failed_at,
 	       created_at, updated_at,
 	       refund_psp_reference, refunded_at, psp_failure_detail
 	FROM payments`
@@ -203,12 +203,12 @@ const baseSelect = `
 func scanPayment(row pgx.Row) (*domain.Payment, error) {
 	var (
 		idStr, tenantIDStr, idempKey, status, method string
-		checkoutID, pspName, pspRef, failReason      *string
+		pspName, pspRef, failReason                  *string
 		payerName, payerEmail, payerDocType, payerDocNum *string
 		amount, platformFee, pspFee                  int64
 		currency                                     string
 		metaJSON                                     []byte
-		authorizedAt, capturedAt, failedAt           *time.Time
+		capturedAt, failedAt                         *time.Time
 		createdAt, updatedAt                         time.Time
 		refundRef                                    *string
 		refundedAt                                   *time.Time
@@ -216,12 +216,12 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 	)
 
 	if err := row.Scan(
-		&idStr, &tenantIDStr, &idempKey, &checkoutID,
+		&idStr, &tenantIDStr, &idempKey,
 		&amount, &currency, &platformFee, &pspFee,
 		&payerName, &payerEmail, &payerDocType, &payerDocNum,
 		&method, &pspName, &pspRef,
 		&status, &failReason, &metaJSON,
-		&authorizedAt, &capturedAt, &failedAt,
+		&capturedAt, &failedAt,
 		&createdAt, &updatedAt,
 		&refundRef, &refundedAt, &pspFailureDetail,
 	); err != nil {
@@ -242,7 +242,6 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		domain.PaymentID(idStr),
 		domain.TenantID(tenantIDStr),
 		idempKey,
-		deref(checkoutID),
 		domain.ReconstituteMoney(amount, currency),
 		domain.ReconstituteMoney(platformFee, currency),
 		domain.ReconstituteMoney(pspFee, currency),
@@ -257,7 +256,7 @@ func scanPayment(row pgx.Row) (*domain.Payment, error) {
 		domain.PaymentStatus(status),
 		deref(failReason),
 		metadata,
-		authorizedAt, capturedAt, failedAt,
+		capturedAt, failedAt,
 		createdAt.UTC(), updatedAt.UTC(), deref(refundRef), refundedAt, deref(pspFailureDetail),
 	), nil
 }

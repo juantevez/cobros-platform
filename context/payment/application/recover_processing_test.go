@@ -23,14 +23,14 @@ var recoverNow = time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 func stuckPayment(stuckSince time.Time) *domain.Payment {
 	return domain.ReconstitutePayment(
 		domain.NewPaymentID(), domain.TenantID(tenantA),
-		"order-9", "",
+		"order-9",
 		domain.ReconstituteMoney(10_000, "ARS"),
 		domain.ReconstituteMoney(300, "ARS"),
 		domain.ReconstituteMoney(0, "ARS"),
 		testPayer(), domain.MethodCard,
 		"", "",
 		domain.StatusProcessing, "", nil,
-		nil, nil, nil,
+		nil, nil,
 		stuckSince.Add(-time.Second), stuckSince, "", nil, "",
 	)
 }

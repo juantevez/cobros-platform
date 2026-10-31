@@ -151,10 +151,10 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 func seedPayment(r *fakeRepo, tenantID string, status domain.PaymentStatus) *domain.Payment {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	p := domain.ReconstitutePayment(
-		domain.NewPaymentID(), domain.TenantID(tenantID), "seed-"+uuid.NewString(), "",
+		domain.NewPaymentID(), domain.TenantID(tenantID), "seed-"+uuid.NewString(),
 		domain.ReconstituteMoney(10_000, "ARS"), domain.ReconstituteMoney(300, "ARS"), domain.ReconstituteMoney(150, "ARS"),
 		domain.PayerInfo{}, domain.MethodCard, "fake", "PSP-1", status, "", nil,
-		nil, &now, nil, now, now, "", nil, "",
+		&now, nil, now, now, "", nil, "",
 	)
 	r.byID[p.ID()] = p
 	r.byKey[p.IdempotencyKey()] = p
@@ -427,7 +427,6 @@ func TestRespondDomainError(t *testing.T) {
 		{domain.ErrPaymentAlreadyExists, http.StatusConflict},
 		{domain.ErrRiskRejected, http.StatusUnprocessableEntity},
 		{domain.ErrNotCaptured, http.StatusUnprocessableEntity},
-		{domain.ErrAlreadyCaptured, http.StatusUnprocessableEntity},
 		{domain.ErrInvalidTransition, http.StatusUnprocessableEntity},
 		{domain.ErrInvalidAmount, http.StatusBadRequest},
 		{domain.ErrInvalidCurrency, http.StatusBadRequest},
@@ -436,7 +435,7 @@ func TestRespondDomainError(t *testing.T) {
 		{domain.ErrPaymentDeclined, http.StatusPaymentRequired},
 		{domain.ErrIdempotencyKeyConflict, http.StatusConflict},
 		{fmt.Errorf("find payment: %w", domain.ErrPaymentNotFound), http.StatusNotFound},
-		{domain.ErrRefundExceedsAmount, http.StatusInternalServerError},
+		{errors.New("unexpected"), http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},
 	}
 	for _, tc := range cases {

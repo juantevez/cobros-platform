@@ -273,14 +273,14 @@ func buildPayment(tenantID string, status domain.PaymentStatus) *domain.Payment 
 	captured := testTime.Add(time.Minute)
 	return domain.ReconstitutePayment(
 		domain.NewPaymentID(), domain.TenantID(tenantID),
-		"idem-1", "",
+		"idem-1",
 		domain.ReconstituteMoney(10_000, "ARS"),
 		domain.ReconstituteMoney(300, "ARS"),
 		domain.ReconstituteMoney(150, "ARS"),
 		testPayer(), domain.MethodCard,
 		"fakepsp", "PSP-REF-1",
 		status, "", nil,
-		nil, &captured, nil,
+		&captured, nil,
 		testTime, captured, "", nil, "",
 	)
 }

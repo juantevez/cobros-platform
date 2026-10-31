@@ -28,9 +28,7 @@ var (
 	ErrPaymentPending = errors.New("payment outcome is pending confirmation from the payment provider")
 	// ErrPaymentChanged: el pago ya no estaba en el estado del que partía la
 	// transición (otra ejecución lo resolvió antes).
-	ErrPaymentChanged      = errors.New("payment was modified concurrently")
-	ErrTenantNotActive     = errors.New("tenant is not enabled to process payments")
-	ErrAlreadyCaptured     = errors.New("payment is already captured")
-	ErrNotCaptured         = errors.New("payment is not captured; cannot refund")
-	ErrRefundExceedsAmount = errors.New("refund amount exceeds original payment amount")
+	ErrPaymentChanged  = errors.New("payment was modified concurrently")
+	ErrTenantNotActive = errors.New("tenant is not enabled to process payments")
+	ErrNotCaptured     = errors.New("payment is not captured; cannot refund")
 )

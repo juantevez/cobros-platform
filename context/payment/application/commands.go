@@ -20,9 +20,7 @@ type ProcessPaymentCmd struct {
 	PayerEmail   string
 	PayerDocType string
 	PayerDocNum  string
-	// CheckoutID referencia al Checkout (Fase 3); vacío en Fase 2
-	CheckoutID string
-	Metadata   map[string]string
+	Metadata     map[string]string
 }
 
 // ProcessPaymentResult es también la respuesta HTTP: snake_case, como

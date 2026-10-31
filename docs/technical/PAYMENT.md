@@ -1,7 +1,7 @@
 # Payment Processing — Documentación técnico-funcional
 
 > **Bounded Context:** `context/payment`
-> **Migraciones:** [`000006_payment_init`](../../migrations/000006_payment_init.up.sql), referencia del reembolso en [`000044_payment_refund_reference`](../../migrations/000044_payment_refund_reference.up.sql), detalle interno del error del PSP en [`000045_payment_psp_failure_detail`](../../migrations/000045_payment_psp_failure_detail.up.sql)
+> **Migraciones:** [`000006_payment_init`](../../migrations/000006_payment_init.up.sql), referencia del reembolso en [`000044_payment_refund_reference`](../../migrations/000044_payment_refund_reference.up.sql), detalle interno del error del PSP en [`000045_payment_psp_failure_detail`](../../migrations/000045_payment_psp_failure_detail.up.sql), columnas sin uso eliminadas en [`000046_payment_drop_unused_columns`](../../migrations/000046_payment_drop_unused_columns.up.sql)
 > **Stream NATS:** `PAYMENT` (`payment.>`)
 
 ---
@@ -33,9 +33,9 @@ Payment **no mueve dinero en el Ledger**: publica `payment.captured.v1` y el con
 ### Fuera de alcance (hoy)
 
 - PSPs reales (Mercado Pago, PayPal, adquirentes) y ruteo por método o tenant.
-- Flujo de dos pasos (autorizar y después capturar): `authorized_at` existe pero nunca se setea.
-- Reembolsos parciales: `Money.Sub` y `ErrRefundExceedsAmount` existen pero no se usan.
-- Checkout: `checkout_id` existe pero nunca se setea.
+- Flujo de dos pasos (autorizar y después capturar).
+- Reembolsos parciales.
+- Checkout (referencia a una sesión de checkout).
 - Webhooks entrantes del PSP y listados o búsqueda de pagos.
 
 ---
@@ -155,7 +155,7 @@ Archivo: [domain/errors.go](../../context/payment/domain/errors.go)
 | `ErrIdempotencyKeyConflict` (la clave ya se usó con otro monto, moneda o método) | 409 |
 | `ErrInvalidID` (pago o tenant que no es UUID, p. ej. `GET /payments/abc`) | 400 |
 | `ErrInvalidFee` (comisión negativa, o comisiones que dejan el neto del comercio ≤ 0, que Ledger no puede registrar) | 500: es un error de configuración de Billing o del PSP, no del cliente |
-| `ErrRiskRejected`, `ErrNotCaptured`, `ErrAlreadyCaptured`, `ErrInvalidTransition` | 422 |
+| `ErrRiskRejected`, `ErrNotCaptured`, `ErrInvalidTransition` | 422 |
 | `ErrInvalidAmount`, `ErrInvalidCurrency`, `ErrInvalidMethod` | 400 |
 | `ErrPaymentDeclined` (el PSP rechazó: su error envuelve `ErrPSPDeclined`) | **402**, con `payment_id` y `status`; el detalle del PSP no se expone |
 | `ErrPaymentPending` (cualquier otro error del PSP: timeout, red, contexto cancelado) | **202**, con `payment_id` y `status: processing`; el pago no se marca `failed` porque el PSP pudo haber capturado |
@@ -333,12 +333,12 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 | Grupo | Columnas |
 |---|---|
-| Identidad | `id` PK, `tenant_id`, `idempotency_key`, `checkout_id` |
+| Identidad | `id` PK, `tenant_id`, `idempotency_key` |
 | Montos | `amount BIGINT > 0`, `currency CHAR(3)`, `platform_fee`, `psp_fee` |
 | Pagador | `payer_name`, `payer_email`, `payer_doc_type`, `payer_doc_num` (PII en claro) |
 | PSP | `payment_method`, `psp_name`, `psp_reference` |
 | Estado | `status` (CHECK con los 6 estados), `failure_reason`, `metadata JSONB` |
-| Tiempos | `authorized_at`, `captured_at`, `failed_at`, `created_at`, `updated_at` |
+| Tiempos | `captured_at`, `failed_at`, `created_at`, `updated_at` (`authorized_at` y `checkout_id`, que nunca se escribían, se eliminaron en 000046) |
 | Reembolso | `refund_psp_reference`, `refunded_at` (000044) |
 | Diagnóstico | `psp_failure_detail` (000045): error crudo del PSP al rechazar; interno |
 
@@ -366,8 +366,7 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
-| 2 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
+| 1 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
 
 ---
 

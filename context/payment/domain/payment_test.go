@@ -50,11 +50,11 @@ func reconstituteWithStatus(st PaymentStatus) *Payment {
 	now := time.Now().UTC()
 	zero := ReconstituteMoney(0, "ARS")
 	return ReconstitutePayment(
-		NewPaymentID(), testTenant, "idem-1", "",
+		NewPaymentID(), testTenant, "idem-1",
 		ReconstituteMoney(10_000, "ARS"), zero, zero,
 		testPayer(), MethodCard,
 		"", "", st, "", nil,
-		nil, nil, nil,
+		nil, nil,
 		now, now, "", nil, "",
 	)
 }
@@ -104,10 +104,10 @@ func TestNewPayment(t *testing.T) {
 		if p.NetAmount() != 10_000 {
 			t.Errorf("net amount = %d, want 10000", p.NetAmount())
 		}
-		if p.CheckoutID() != "" || p.PSPName() != "" || p.PSPReference() != "" || p.FailureReason() != "" {
+		if p.PSPName() != "" || p.PSPReference() != "" || p.FailureReason() != "" {
 			t.Error("optional strings should be empty")
 		}
-		if p.AuthorizedAt() != nil || p.CapturedAt() != nil || p.FailedAt() != nil {
+		if p.CapturedAt() != nil || p.FailedAt() != nil {
 			t.Error("lifecycle timestamps should be nil")
 		}
 		if p.CreatedAt().Before(before) || !p.CreatedAt().Equal(p.UpdatedAt()) || p.CreatedAt().Location() != time.UTC {
@@ -379,21 +379,21 @@ func TestPayment_PullEvents(t *testing.T) {
 
 func TestReconstitutePayment(t *testing.T) {
 	id := NewPaymentID()
-	authorized := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-	captured := authorized.Add(time.Second)
-	created := authorized.Add(-time.Minute)
+	base := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	captured := base.Add(time.Second)
+	created := base.Add(-time.Minute)
 	meta := map[string]string{"k": "v"}
 
 	p := ReconstitutePayment(
-		id, testTenant, "idem-9", "chk-1",
+		id, testTenant, "idem-9",
 		ReconstituteMoney(5000, "USD"), ReconstituteMoney(100, "USD"), ReconstituteMoney(50, "USD"),
 		testPayer(), MethodQR,
 		"mercadopago", "MP-1", StatusCaptured, "", meta,
-		&authorized, &captured, nil,
+		&captured, nil,
 		created, captured, "", nil, "",
 	)
 
-	if p.ID() != id || p.TenantID() != testTenant || p.IdempotencyKey() != "idem-9" || p.CheckoutID() != "chk-1" {
+	if p.ID() != id || p.TenantID() != testTenant || p.IdempotencyKey() != "idem-9" {
 		t.Errorf("identity not restored")
 	}
 	if p.Amount().Amount() != 5000 || p.PlatformFee().Amount() != 100 || p.PSPFee().Amount() != 50 || p.NetAmount() != 4850 {
@@ -405,7 +405,7 @@ func TestReconstitutePayment(t *testing.T) {
 	if p.PSPName() != "mercadopago" || p.PSPReference() != "MP-1" || p.Status() != StatusCaptured {
 		t.Errorf("psp/status not restored")
 	}
-	if p.AuthorizedAt() != &authorized || p.CapturedAt() != &captured || p.FailedAt() != nil {
+	if p.CapturedAt() != &captured || p.FailedAt() != nil {
 		t.Error("lifecycle timestamps not restored")
 	}
 	if !p.CreatedAt().Equal(created) || !p.UpdatedAt().Equal(captured) {

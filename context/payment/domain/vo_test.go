@@ -139,39 +139,3 @@ func TestReconstituteMoney(t *testing.T) {
 	}
 }
 
-func TestMoney_Sub(t *testing.T) {
-	ars := func(n int64) Money { return ReconstituteMoney(n, "ARS") }
-
-	t.Run("subtracts same currency", func(t *testing.T) {
-		got, err := ars(1000).Sub(ars(300))
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if got != ars(700) {
-			t.Errorf("got %v, want 700 ARS", got)
-		}
-	})
-
-	t.Run("equal amounts give zero", func(t *testing.T) {
-		got, err := ars(500).Sub(ars(500))
-		if err != nil || !got.IsZero() || got.Currency() != "ARS" {
-			t.Errorf("got %v, %v", got, err)
-		}
-	})
-
-	t.Run("exceeding amount rejected", func(t *testing.T) {
-		if _, err := ars(100).Sub(ars(101)); !errors.Is(err, ErrRefundExceedsAmount) {
-			t.Fatalf("expected ErrRefundExceedsAmount, got %v", err)
-		}
-	})
-
-	t.Run("different currencies rejected", func(t *testing.T) {
-		_, err := ars(100).Sub(ReconstituteMoney(10, "USD"))
-		if err == nil {
-			t.Fatal("expected currency mismatch error")
-		}
-		if errors.Is(err, ErrRefundExceedsAmount) {
-			t.Error("currency mismatch should not be ErrRefundExceedsAmount")
-		}
-	})
-}
