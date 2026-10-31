@@ -318,7 +318,7 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 - `UNIQUE (tenant_id, idempotency_key)`.
 - Índices `(tenant_id, status, created_at DESC)` y `psp_reference` (parcial).
-- RLS por `tenant_id` (no filtra mientras la app conecte como owner).
+- RLS por `tenant_id` con `NULLIF` (no filtra mientras la app conecte como owner). Política de operador de solo lectura para que Dispute lea el pago disputado (migración 000043).
 - `Update` reescribe solo estado, PSP, comisiones, motivo y fechas. `metadata` y los datos del pagador son inmutables.
 
 ---

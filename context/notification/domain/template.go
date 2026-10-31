@@ -101,6 +101,26 @@ var Templates = map[string]Template{
 <p>Por favor contacta a soporte para más información.</p>`,
 	},
 
+	"dispute.opened": {
+		Subject: "⚠️ Nueva disputa por {{.amount}} {{.currency}}: respondé antes del {{.deadline}}",
+		Body: `<p>Hola,</p>
+<p>El pagador inició una disputa (contracargo) ante su banco:</p>
+<ul>
+  <li><strong>Monto disputado:</strong> {{.amount}} {{.currency}}</li>
+  <li><strong>Motivo:</strong> {{.reason}}</li>
+  <li><strong>Pago:</strong> {{.payment_id}}</li>
+  <li><strong>Plazo para responder:</strong> {{.deadline}}</li>
+</ul>
+<p>Retuvimos ese monto de tu saldo mientras dure la disputa. Antes del plazo podés contestarla con evidencia (factura, seguimiento del envío, comunicaciones) o aceptarla. <strong>Si no respondés, se cierra a favor del pagador.</strong></p>`,
+	},
+
+	"dispute.resolved": {
+		Subject: "Disputa cerrada por {{.amount}} {{.currency}}",
+		Body: `<p>Hola,</p>
+<p>Se cerró la disputa sobre el pago {{.payment_id}} por {{.amount}} {{.currency}}.</p>
+<p><strong>Resultado:</strong> {{.outcome}}.</p>`,
+	},
+
 	"auth.tenant.suspended": {
 		Subject: "Tu cuenta fue suspendida",
 		Body: `<p>Hola,</p>

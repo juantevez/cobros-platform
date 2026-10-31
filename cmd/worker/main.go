@@ -259,6 +259,11 @@ func main() {
 		}
 	}()
 	go func() {
+		if err := webhookConsumer.StartDisputeConsumer(ctx); err != nil {
+			logger.Error("webhook dispute consumer stopped", "error", err)
+		}
+	}()
+	go func() {
 		if err := retryPoller.Start(ctx); err != nil {
 			logger.Error("webhook retry poller stopped", "error", err)
 		}
@@ -313,6 +318,11 @@ func main() {
 	go func() {
 		if err := notifConsumer.StartAuthConsumer(ctx); err != nil {
 			logger.Error("notification auth consumer stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := notifConsumer.StartDisputeConsumer(ctx); err != nil {
+			logger.Error("notification dispute consumer stopped", "error", err)
 		}
 	}()
 

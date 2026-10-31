@@ -2,8 +2,10 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +86,69 @@ func TestExpiryPoller_runCycle(t *testing.T) {
 		}
 	})
 
+	// El comercio aceptó o contestó justo al vencer: no es un error.
+	t.Run("dispute changed concurrently is skipped without error log", func(t *testing.T) {
+		r := newRepo()
+		r.overdue = []*domain.Dispute{overdueDispute()}
+		r.updateErr = fmt.Errorf("dispute repo: update: %w", domain.ErrOptimisticLock)
+		var logs strings.Builder
+		pub := &fakePublisher{}
+		NewExpiryPoller(r, fakeTx{}, pub, newClock(), slog.New(slog.NewTextHandler(&logs, nil))).runCycle(context.Background())
+		if strings.Contains(logs.String(), "level=ERROR") || len(pub.published) != 0 {
+			t.Errorf("logs = %s published = %d", logs.String(), len(pub.published))
+		}
+	})
+
+	// ListOverdue es cross-tenant (operador); cada vencimiento se escribe con
+	// el tenant de su disputa para pasar RLS.
+	t.Run("each expiry is written with the tenant of its dispute", func(t *testing.T) {
+		r := newRepo()
+		d := overdueDispute()
+		r.overdue = []*domain.Dispute{d}
+		tx := &tenantTx{}
+		NewExpiryPoller(r, tx, &fakePublisher{}, newClock(), discardLogger()).runCycle(context.Background())
+		if tx.tenant != d.TenantID().String() {
+			t.Errorf("tx tenant = %q, want %q", tx.tenant, d.TenantID())
+		}
+	})
+
+	// Antes un ciclo atendía un lote fijo de 100: el resto esperaba una hora.
+	many := func(n int) []*domain.Dispute {
+		out := make([]*domain.Dispute, n)
+		for i := range out {
+			out[i] = overdueDispute()
+		}
+		return out
+	}
+	t.Run("drains overdue disputes in batches", func(t *testing.T) {
+		r := newRepo()
+		r.overdue = many(2*expiryBatch + 50)
+		NewExpiryPoller(r, fakeTx{}, &fakePublisher{}, newClock(), discardLogger()).runCycle(context.Background())
+		if len(r.updated) != 2*expiryBatch+50 || r.overdueCalls != 3 {
+			t.Errorf("updated = %d batches = %d, want %d and 3", len(r.updated), r.overdueCalls, 2*expiryBatch+50)
+		}
+	})
+
+	t.Run("caps the batches per cycle", func(t *testing.T) {
+		r := newRepo()
+		r.overdue = many((maxExpiryBatches + 2) * expiryBatch)
+		NewExpiryPoller(r, fakeTx{}, &fakePublisher{}, newClock(), discardLogger()).runCycle(context.Background())
+		if r.overdueCalls != maxExpiryBatches || len(r.updated) != maxExpiryBatches*expiryBatch {
+			t.Errorf("batches = %d updated = %d", r.overdueCalls, len(r.updated))
+		}
+	})
+
+	// Las que fallan siguen vencidas: pedirlas otra vez daría las mismas.
+	t.Run("stops when a batch makes no progress", func(t *testing.T) {
+		r := newRepo()
+		r.overdue = many(expiryBatch + 10)
+		r.updateErr = errBoom
+		NewExpiryPoller(r, fakeTx{}, &fakePublisher{}, newClock(), discardLogger()).runCycle(context.Background())
+		if r.overdueCalls != 1 {
+			t.Errorf("batches = %d, want 1", r.overdueCalls)
+		}
+	})
+
 	t.Run("update error is logged, does not abort cycle", func(t *testing.T) {
 		r := newRepo()
 		r.overdue = []*domain.Dispute{overdueDispute(), overdueDispute()}
@@ -108,5 +173,25 @@ func TestExpiryPoller_Start_cancelledContext(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not return on cancelled context")
+	}
+}
+
+// El primer ciclo corre al arrancar: antes recién a la hora.
+func TestExpiryPoller_Start_runsFirstCycleImmediately(t *testing.T) {
+	r := newRepo()
+	r.overdue = []*domain.Dispute{domain.ReconstituteDispute(domain.NewDisputeID(), domain.TenantID("t"),
+		"pay-1", "psp", 5000, "ARS", domain.ReasonGeneral, domain.StatusOpen,
+		nil, "", "", testNow.Add(-time.Hour), testNow.Add(-2*time.Hour), nil, nil, 1)}
+	poller := NewExpiryPoller(r, fakeTx{}, &fakePublisher{}, newClock(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = poller.Start(ctx); close(done) }()
+	time.Sleep(50 * time.Millisecond) // muy por debajo de expiryInterval
+	cancel()
+	<-done
+
+	if len(r.updated) != 1 || r.updated[0].Status() != domain.StatusExpired {
+		t.Fatalf("updated = %d, want the overdue dispute expired on start", len(r.updated))
 	}
 }

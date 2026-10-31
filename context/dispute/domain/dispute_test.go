@@ -6,15 +6,17 @@ import (
 	"time"
 )
 
+const testTenant = "11111111-1111-1111-1111-111111111111"
+
 func tenantID(t *testing.T) TenantID {
 	t.Helper()
-	return TenantID("tenant-1")
+	return TenantID(testTenant)
 }
 
 // capturedPayment devuelve un PaymentRef capturado suficiente para crear
 // disputas de hasta 5000 centavos en ARS dentro del mismo tenant.
 func capturedPayment() PaymentRef {
-	return PaymentRef{ID: "pay-1", TenantID: "tenant-1", Status: "captured", Amount: 5000, Currency: "ARS"}
+	return PaymentRef{ID: "pay-1", TenantID: testTenant, Status: "captured", Amount: 5000, Currency: "ARS"}
 }
 
 // openDispute crea una disputa abierta con deadline en el futuro y descarta
@@ -22,7 +24,7 @@ func capturedPayment() PaymentRef {
 func openDispute(t *testing.T, deadline time.Time) *Dispute {
 	t.Helper()
 	now := time.Now()
-	d, err := NewDispute(NewDisputeID(), tenantID(t), capturedPayment(), "psp-1", 5000, "ARS", ReasonFraudulent, deadline, now)
+	d, err := NewDispute(NewDisputeID(), capturedPayment(), "psp-1", 5000, "ARS", ReasonFraudulent, deadline, now)
 	if err != nil {
 		t.Fatalf("new dispute: %v", err)
 	}
@@ -55,7 +57,7 @@ func TestNewDispute(t *testing.T) {
 		id := NewDisputeID()
 		tid := tenantID(t)
 		now := time.Now()
-		d, err := NewDispute(id, tid, capturedPayment(), "psp-9", 5000, "ARS", ReasonDuplicate, deadline, now)
+		d, err := NewDispute(id, capturedPayment(), "psp-9", 5000, "ARS", ReasonDuplicate, deadline, now)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -92,12 +94,36 @@ func TestNewDispute(t *testing.T) {
 		if opened.Amount != 5000 || opened.Currency != "ARS" || opened.Reason != "duplicate" {
 			t.Errorf("event payload mismatch: %+v", opened)
 		}
+		// El comercio necesita el plazo (notificación y webhook).
+		if !opened.Deadline.Equal(deadline) || opened.Deadline.Location() != time.UTC {
+			t.Errorf("event deadline = %v, want %v in UTC", opened.Deadline, deadline)
+		}
+	})
+
+	// La disputa es del dueño del pago: no hay tenant del caller que reasignar.
+	t.Run("tenant comes from the payment", func(t *testing.T) {
+		p := capturedPayment()
+		p.TenantID = "22222222-2222-2222-2222-222222222222"
+		d, err := NewDispute(NewDisputeID(), p, "psp", 5000, "ARS", ReasonGeneral, deadline, time.Now())
+		if err != nil || d.TenantID().String() != p.TenantID {
+			t.Fatalf("tenant = %v, %v; want %s", d, err, p.TenantID)
+		}
+	})
+
+	t.Run("payment without a valid tenant rejected", func(t *testing.T) {
+		for _, tenant := range []string{"", "tenant-1"} {
+			p := capturedPayment()
+			p.TenantID = tenant
+			if _, err := NewDispute(NewDisputeID(), p, "psp", 5000, "ARS", ReasonGeneral, deadline, time.Now()); err == nil {
+				t.Errorf("payment tenant %q: expected error", tenant)
+			}
+		}
 	})
 
 	t.Run("empty payment id rejected", func(t *testing.T) {
 		emptyPayment := capturedPayment()
 		emptyPayment.ID = ""
-		_, err := NewDispute(NewDisputeID(), tenantID(t), emptyPayment, "psp", 5000, "ARS", ReasonGeneral, deadline, time.Now())
+		_, err := NewDispute(NewDisputeID(), emptyPayment, "psp", 5000, "ARS", ReasonGeneral, deadline, time.Now())
 		if err == nil {
 			t.Fatal("expected error for empty payment id")
 		}
@@ -105,7 +131,7 @@ func TestNewDispute(t *testing.T) {
 
 	t.Run("non-positive amount rejected", func(t *testing.T) {
 		for _, amt := range []int64{0, -100} {
-			_, err := NewDispute(NewDisputeID(), tenantID(t), capturedPayment(), "psp", amt, "ARS", ReasonGeneral, deadline, time.Now())
+			_, err := NewDispute(NewDisputeID(), capturedPayment(), "psp", amt, "ARS", ReasonGeneral, deadline, time.Now())
 			if err == nil {
 				t.Errorf("expected error for amount %d", amt)
 			}

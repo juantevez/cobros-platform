@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,6 +249,7 @@ func TestStartConsumers(t *testing.T) {
 		{"payout", (*EventConsumer).StartPayoutConsumer, "PAYOUT", "payout.>", "notification-payout-consumer"},
 		{"onboarding", (*EventConsumer).StartOnboardingConsumer, "ONBOARDING", "onboarding.application.>", "notification-onboarding-consumer"},
 		{"auth", (*EventConsumer).StartAuthConsumer, "AUTH", "auth.tenant.suspended.>", "notification-auth-consumer"},
+		{"dispute", (*EventConsumer).StartDisputeConsumer, "DISPUTE", "dispute.>", "notification-dispute-consumer"},
 	}
 
 	for _, tc := range cases {
@@ -300,3 +302,30 @@ func TestTemplateCatalogConsistency(t *testing.T) {
 type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
+
+// El comercio se enteraba de una disputa solo por el descuento en su saldo:
+// el email de apertura lleva el plazo para responder; el de cierre, el
+// resultado en castellano.
+func TestBuildTemplateData_Disputes(t *testing.T) {
+	deadline := time.Date(2026, 11, 7, 18, 30, 0, 0, time.UTC)
+	opened := buildTemplateData("dispute.opened.v1", eventPayload{
+		TenantID: "t", PaymentID: "pay-1", Amount: 125000, Currency: "ARS", Reason: "fraudulent", Deadline: deadline,
+	})
+	if opened["deadline"] != "07/11/2026 18:30 (UTC)" || opened["amount"] != "1250.00" || opened["reason"] != "fraudulent" {
+		t.Errorf("opened data = %v", opened)
+	}
+	subject, body := domain.Templates["dispute.opened"].Render(opened)
+	if !strings.Contains(subject, "07/11/2026 18:30 (UTC)") || strings.Contains(subject+body, "{{.") {
+		t.Errorf("rendered opened = %q / %q", subject, body)
+	}
+	if noDeadline := buildTemplateData("dispute.opened.v1", eventPayload{TenantID: "t"}); noDeadline["deadline"] != "sin fecha informada" {
+		t.Errorf("missing deadline = %q", noDeadline["deadline"])
+	}
+
+	for outcome, want := range map[string]string{"won": "ganada", "lost": "perdida", "accepted": "aceptada", "expired": "vencida", "raro": "raro"} {
+		data := buildTemplateData("dispute.resolved.v1", eventPayload{TenantID: "t", Outcome: outcome})
+		if !strings.HasPrefix(data["outcome"], want) {
+			t.Errorf("outcome %s → %q, want prefix %q", outcome, data["outcome"], want)
+		}
+	}
+}

@@ -5,7 +5,7 @@
 > [`000016_notification_dedupe`](../../migrations/000016_notification_dedupe.up.sql),
 > [`000028_notification_kyc_template_keys`](../../migrations/000028_notification_kyc_template_keys.up.sql),
 > [`000029_notification_rls_nullif`](../../migrations/000029_notification_rls_nullif.up.sql)
-> **Streams NATS consumidos:** `PAYMENT` (`payment.>`), `PAYOUT` (`payout.>`), `ONBOARDING` (`onboarding.application.>`), `AUTH` (`auth.tenant.suspended.>`)
+> **Streams NATS consumidos:** `PAYMENT` (`payment.>`), `PAYOUT` (`payout.>`), `ONBOARDING` (`onboarding.application.>`), `AUTH` (`auth.tenant.suspended.>`), `DISPUTE` (`dispute.>`)
 
 ---
 
@@ -216,11 +216,12 @@ contexto → **403**.
 | `notification-payout-consumer` | `PAYOUT` | `payout.>` | 3 |
 | `notification-onboarding-consumer` | `ONBOARDING` | `onboarding.application.>` | 3 |
 | `notification-auth-consumer` | `AUTH` | `auth.tenant.suspended.>` | 3 |
+| `notification-dispute-consumer` | `DISPUTE` | `dispute.>` | 3 |
 
 ### 7.2 Matriz evento → template → datos
 
 `eventPayload` extrae: `tenant_id, payment_id, amount, refund_amount, currency,
-failure_reason, payment_method, bank_reference, rejection_reason`.
+failure_reason, payment_method, bank_reference, rejection_reason, reason, outcome, deadline`.
 
 | Subject recibido | Template | Placeholders |
 |---|---|---|
@@ -232,6 +233,8 @@ failure_reason, payment_method, bank_reference, rejection_reason`.
 | `onboarding.application.approved.v1` | `onboarding.application.approved` | — |
 | `onboarding.application.rejected.v1` | `onboarding.application.rejected` | rejection_reason |
 | `auth.tenant.suspended.v1` | `auth.tenant.suspended` | — (motivo genérico, anti tipping-off) |
+| `dispute.opened.v1` | `dispute.opened` | payment_id, amount, currency, reason, deadline (`dd/mm/aaaa hh:mm (UTC)`; sin fecha → "sin fecha informada"). El email explica que el monto quedó retenido y que sin respuesta se pierde. |
+| `dispute.resolved.v1` | `dispute.resolved` | payment_id, amount, currency, outcome (`won`/`lost`/`accepted`/`expired` traducido) |
 | Otros subjects de los streams (`payout.initiated`, `payout.unknown`, `onboarding.application.submitted`, …) | — | ack sin acción |
 
 `TestTemplateCatalogConsistency` exige que cada template sea alcanzable desde su subject
@@ -290,7 +293,7 @@ sin `BYPASSRLS`.
 
 | # | Tema | Detalle | Tipo |
 |---|---|---|---|
-| 1 | Cobertura de eventos | `payout.initiated`, `payout.unknown`, `onboarding.application.submitted`/`more_info`, `dispute.*`, `webhook.*`, `reconciliation.*` no notifican. Qué recibe el comercio por email es una decisión de producto. | Producto |
+| 1 | Cobertura de eventos | `payout.initiated`, `payout.unknown`, `onboarding.application.submitted`/`more_info`, `webhook.*`, `reconciliation.*` no notifican. Qué recibe el comercio por email es una decisión de producto. | Producto |
 | 2 | Templates en el binario | Cambiar un texto requiere redeploy; sin edición por operador ni plantillas por tenant. | Fase 4 |
 | 3 | Moneda e idioma | Monto siempre `/100` con dos decimales (monedas sin subunidad, como CLP, se verían `1000.00`); HTML embebido sin i18n. | Fase 4 |
 

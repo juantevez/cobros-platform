@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // ErrDuplicatePaymentKey es el centinela que el repositorio retorna cuando el
@@ -43,11 +44,6 @@ func NewOpenDisputeUseCase(
 }
 
 func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (OpenDisputeResult, error) {
-	tenantID, err := domain.ParseTenantID(cmd.TenantID)
-	if err != nil {
-		return OpenDisputeResult{}, err
-	}
-
 	reason, err := domain.ParseDisputeReason(cmd.Reason)
 	if err != nil {
 		return OpenDisputeResult{}, err
@@ -83,7 +79,7 @@ func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (
 
 	id := domain.NewDisputeID()
 	dispute, err := domain.NewDispute(
-		id, tenantID,
+		id,
 		payment, cmd.PSPReference,
 		cmd.Amount, cmd.Currency,
 		reason, cmd.Deadline, now,
@@ -92,6 +88,9 @@ func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (
 		return OpenDisputeResult{}, err
 	}
 
+	// La disputa se escribe con el tenant del pago (RLS), no con el del
+	// operador que la abre.
+	ctx = pkgpostgres.WithTenantID(ctx, dispute.TenantID().String())
 	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		if err := uc.repo.Save(ctx, dispute); err != nil {
 			return fmt.Errorf("save dispute: %w", err)
@@ -238,6 +237,9 @@ func (uc *ResolveDisputeUseCase) Execute(ctx context.Context, cmd ResolveDispute
 		return err
 	}
 
+	// El operador lee la disputa con la política de operador (solo lectura);
+	// la escritura corre con el tenant de la disputa (RLS).
+	ctx = pkgpostgres.WithTenantID(ctx, dispute.TenantID().String())
 	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		if err := uc.repo.Update(ctx, dispute); err != nil {
 			return err
@@ -312,7 +314,8 @@ func (uc *ListDisputesUseCase) Execute(ctx context.Context, q ListDisputesQuery)
 // ── ExpiryPoller ─────────────────────────────────────────────────────────────
 
 // ExpiryPoller marca como expired las disputes abiertas cuyo deadline venció.
-// Corre en cmd/worker como goroutine independiente cada hora.
+// Corre en cmd/worker como goroutine independiente: un ciclo al arrancar y
+// después cada expiryInterval.
 type ExpiryPoller struct {
 	repo      DisputeRepository
 	txManager TxManager
@@ -332,11 +335,23 @@ func NewExpiryPoller(
 		clock: clock, logger: logger}
 }
 
-func (p *ExpiryPoller) Start(ctx context.Context) error {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-	p.logger.Info("dispute expiry poller started")
+const (
+	// expiryInterval acota la demora entre el vencimiento y el cierre (antes
+	// era de hasta una hora, y el primer ciclo recién corría a la hora).
+	expiryInterval = 5 * time.Minute
+	expiryBatch    = 100
+	// maxExpiryBatches acota un ciclo: con más vencidas, siguen en el próximo.
+	maxExpiryBatches = 10
+)
 
+func (p *ExpiryPoller) Start(ctx context.Context) error {
+	ticker := time.NewTicker(expiryInterval)
+	defer ticker.Stop()
+	p.logger.Info("dispute expiry poller started", "interval", expiryInterval)
+
+	if ctx.Err() == nil {
+		p.runCycle(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -347,30 +362,58 @@ func (p *ExpiryPoller) Start(ctx context.Context) error {
 	}
 }
 
+// runCycle vence las disputas abiertas con deadline pasado, de a lotes de
+// expiryBatch. Corta con un lote incompleto (no quedan más) o sin avances:
+// las que fallan siguen vencidas y pedirlas otra vez daría siempre las mismas.
 func (p *ExpiryPoller) runCycle(ctx context.Context) {
 	now := p.clock.Now()
-	overdue, err := p.repo.ListOverdue(ctx, now, 100)
-	if err != nil {
-		p.logger.Error("dispute expiry poller: list overdue", "error", err)
-		return
+	total := 0
+	for i := 0; i < maxExpiryBatches; i++ {
+		overdue, err := p.repo.ListOverdue(ctx, now, expiryBatch)
+		if err != nil {
+			p.logger.Error("dispute expiry poller: list overdue", "error", err)
+			break
+		}
+		expired := p.expireBatch(ctx, overdue, now)
+		total += expired
+		if len(overdue) < expiryBatch || expired == 0 {
+			break
+		}
 	}
+	if total > 0 {
+		p.logger.Info("dispute expiry poller: expired", "count", total)
+	}
+}
+
+// expireBatch vence cada disputa del lote y devuelve cuántas cerró.
+func (p *ExpiryPoller) expireBatch(ctx context.Context, overdue []*domain.Dispute, now time.Time) int {
+	expired := 0
 	for _, d := range overdue {
 		if err := d.Expire(now); err != nil {
 			continue
 		}
-		if err := p.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		// ListOverdue es cross-tenant; cada vencimiento se escribe con el
+		// tenant de su disputa (RLS).
+		tctx := pkgpostgres.WithTenantID(ctx, d.TenantID().String())
+		if err := p.txManager.RunInTx(tctx, func(ctx context.Context) error {
 			if err := p.repo.Update(ctx, d); err != nil {
 				return err
 			}
 			return p.publisher.Publish(ctx, d.PullEvents()...)
 		}); err != nil {
+			if errors.Is(err, domain.ErrOptimisticLock) {
+				// El comercio la contestó o aceptó mientras tanto: no vence.
+				p.logger.Info("dispute expiry poller: dispute changed concurrently, skipped",
+					"dispute_id", d.ID())
+				continue
+			}
 			p.logger.Error("dispute expiry poller: expire dispute",
 				"dispute_id", d.ID(), "error", err)
+			continue
 		}
+		expired++
 	}
-	if len(overdue) > 0 {
-		p.logger.Info("dispute expiry poller: expired", "count", len(overdue))
-	}
+	return expired
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -396,6 +439,7 @@ func toView(d *domain.Dispute, now time.Time) DisputeView {
 		Currency:     d.Currency(),
 		Reason:       d.Reason().String(),
 		Status:       d.Status().String(),
+		Version:      d.Version(),
 		Evidence:     ev,
 		ResponseNote: d.ResponseNote(),
 		ResolvedNote: d.ResolvedNote(),

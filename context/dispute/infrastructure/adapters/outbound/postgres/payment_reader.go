@@ -21,18 +21,21 @@ func NewPaymentReader(pool pkgpostgres.Conn) application.PaymentReader {
 	return &paymentReader{pool: pool}
 }
 
-// FindPayment retorna el PaymentRef del pago disputado. El tenant_id se lee
-// desde el contexto (RLS): si el pago pertenece a otro tenant, la consulta no
-// lo devuelve y tratamos el caso como "no encontrado".
+// FindPayment retorna el PaymentRef del pago disputado. Corre en la sesión
+// RLS del contexto: abrir una disputa es del operador de plataforma
+// (WithPlatformOperator), que lee pagos de cualquier tenant con la política
+// de operador de payments. Sin esa marca solo ve los del tenant del llamador.
 func (r *paymentReader) FindPayment(ctx context.Context, paymentID string) (domain.PaymentRef, error) {
 	var ref domain.PaymentRef
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, tenant_id::text, status, amount, currency
-		FROM payments
-		WHERE id = $1`, paymentID).
-		Scan(&ref.ID, &ref.TenantID, &ref.Status, &ref.Amount, &ref.Currency)
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		return conn.QueryRow(ctx, `
+			SELECT id, tenant_id::text, status, amount, currency
+			FROM payments
+			WHERE id = $1`, paymentID).
+			Scan(&ref.ID, &ref.TenantID, &ref.Status, &ref.Amount, &ref.Currency)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.PaymentRef{}, fmt.Errorf("%w: payment %q", domain.ErrDisputeNotFound, paymentID)
+		return domain.PaymentRef{}, fmt.Errorf("%w: %q", domain.ErrPaymentNotFound, paymentID)
 	}
 	if err != nil {
 		return domain.PaymentRef{}, fmt.Errorf("dispute payment reader: find: %w", err)

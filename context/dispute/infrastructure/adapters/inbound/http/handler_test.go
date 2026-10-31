@@ -3,6 +3,8 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,12 +21,17 @@ import (
 
 func init() { gin.SetMode(gin.TestMode) }
 
+// paymentTenant es el dueño de los pagos que devuelve fakePayments.
+var paymentTenant = uuid.NewString()
+
 // ── Fakes de puertos ──────────────────────────────────────────────────────────
 
 type fakeRepo struct {
 	byID      map[domain.DisputeID]*domain.Dispute
 	byPayment map[string]*domain.Dispute
 	listed    []*domain.Dispute
+	// finds registra, por cada búsqueda, si llegó marcada como operador (RLS).
+	finds []bool
 }
 
 func newRepo() *fakeRepo {
@@ -41,6 +48,7 @@ func (r *fakeRepo) Save(ctx context.Context, d *domain.Dispute) error {
 }
 func (r *fakeRepo) Update(ctx context.Context, d *domain.Dispute) error { return nil }
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.DisputeID) (*domain.Dispute, error) {
+	r.finds = append(r.finds, postgres.IsPlatformOperator(ctx))
 	d, ok := r.byID[id]
 	if !ok {
 		return nil, domain.ErrDisputeNotFound
@@ -48,6 +56,7 @@ func (r *fakeRepo) FindByID(ctx context.Context, id domain.DisputeID) (*domain.D
 	return d, nil
 }
 func (r *fakeRepo) FindByPaymentID(ctx context.Context, paymentID string) (*domain.Dispute, error) {
+	r.finds = append(r.finds, postgres.IsPlatformOperator(ctx))
 	d, ok := r.byPayment[paymentID]
 	if !ok {
 		return nil, domain.ErrDisputeNotFound
@@ -80,7 +89,7 @@ func (fakePayments) FindPayment(ctx context.Context, paymentID string) (domain.P
 	if paymentID == "" {
 		return domain.PaymentRef{}, domain.ErrDisputeNotFound
 	}
-	return domain.PaymentRef{ID: paymentID, Status: "captured", Amount: 5000, Currency: "ARS"}, nil
+	return domain.PaymentRef{ID: paymentID, TenantID: paymentTenant, Status: "captured", Amount: 5000, Currency: "ARS"}, nil
 }
 
 type fixedClock struct{}
@@ -127,8 +136,8 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 // seedOpen crea una disputa abierta con deadline futuro.
 func seedOpen(r *fakeRepo, tid domain.TenantID) *domain.Dispute {
 	now := time.Now()
-	d, _ := domain.NewDispute(domain.NewDisputeID(), tid,
-		domain.PaymentRef{ID: "pay-1", Status: "captured", Amount: 5000, Currency: "ARS"},
+	d, _ := domain.NewDispute(domain.NewDisputeID(),
+		domain.PaymentRef{ID: "pay-1", TenantID: tid.String(), Status: "captured", Amount: 5000, Currency: "ARS"},
 		"psp-1", 5000, "ARS",
 		domain.ReasonFraudulent, now.Add(48*time.Hour), now)
 	d.PullEvents()
@@ -176,6 +185,37 @@ func TestOpen(t *testing.T) {
 			tid.String(), nil)
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", rec.Code)
+		}
+	})
+
+	t.Run("malformed deadline yields 400 and opens nothing", func(t *testing.T) {
+		r := newRepo()
+		for _, deadline := range []string{"mañana", "2026-11-07", "07/11/2026 18:00"} {
+			rec := doRequest(newHandler(r).Open, http.MethodPost, "/disputes",
+				`{"payment_id":"pay-9","amount":5000,"currency":"ARS","reason":"fraudulent","deadline":"`+deadline+`"}`,
+				tid.String(), nil)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid deadline") {
+				t.Errorf("deadline %q: status = %d body = %s, want 400", deadline, rec.Code, rec.Body)
+			}
+		}
+		if len(r.byID) != 0 {
+			t.Errorf("disputes opened = %d, want 0", len(r.byID))
+		}
+	})
+
+	t.Run("RFC3339 deadline is used", func(t *testing.T) {
+		r := newRepo()
+		deadline := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+		rec := doRequest(newHandler(r).Open, http.MethodPost, "/disputes",
+			`{"payment_id":"pay-9","amount":5000,"currency":"ARS","reason":"fraudulent","deadline":"`+deadline.Format(time.RFC3339)+`"}`,
+			tid.String(), nil)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body)
+		}
+		for _, d := range r.byID {
+			if !d.Deadline().Equal(deadline) {
+				t.Errorf("deadline = %v, want %v", d.Deadline(), deadline)
+			}
 		}
 	})
 
@@ -360,12 +400,128 @@ func TestRegisterRoutes(t *testing.T) {
 		c.Request = c.Request.WithContext(postgres.WithTenantID(c.Request.Context(), tid.String()))
 		c.Next()
 	})
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(r))
+	allow := func(c *gin.Context) { c.Next() }
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(r), RouteGuards{Operator: allow, Manage: allow, Read: allow})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/disputes", nil)
 	engine.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/disputes status = %d, want 200", rec.Code)
+	}
+}
+
+// Cada ruta pasa por su guard antes del handler: abrir y resolver son del
+// operador de plataforma; contestar y aceptar, de quien gestiona disputas.
+func TestRegisterRoutes_Guards(t *testing.T) {
+	var hit []string
+	deny := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			hit = append(hit, name)
+			c.AbortWithStatus(http.StatusForbidden)
+		}
+	}
+	engine := gin.New()
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo()), RouteGuards{
+		Operator: deny("operator"), Manage: deny("manage"), Read: deny("read"),
+	})
+
+	id := uuid.NewString()
+	cases := []struct{ method, path, guard string }{
+		{http.MethodPost, "/api/v1/disputes", "operator"},
+		{http.MethodPost, "/api/v1/disputes/" + id + "/resolve", "operator"},
+		{http.MethodPost, "/api/v1/disputes/" + id + "/contest", "manage"},
+		{http.MethodPost, "/api/v1/disputes/" + id + "/accept", "manage"},
+		{http.MethodGet, "/api/v1/disputes", "read"},
+		{http.MethodGet, "/api/v1/disputes/" + id, "read"},
+	}
+	for _, tc := range cases {
+		hit = nil
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusForbidden || len(hit) != 1 || hit[0] != tc.guard {
+			t.Errorf("%s %s: status = %d guards = %v, want 403 from %s", tc.method, tc.path, rec.Code, hit, tc.guard)
+		}
+	}
+	if got := len(engine.Routes()); got != len(cases) {
+		t.Errorf("routes = %d, want %d", got, len(cases))
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	allow := func(c *gin.Context) { c.Next() }
+	for name, g := range map[string]RouteGuards{
+		"operator": {Manage: allow, Read: allow},
+		"manage":   {Operator: allow, Read: allow},
+		"read":     {Operator: allow, Manage: allow},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("missing %s guard: expected panic", name)
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/"), newHandler(newRepo()), g)
+		}()
+	}
+}
+
+// Las validaciones de apertura y de evidencia caían en el default (500).
+func TestRespondError(t *testing.T) {
+	cases := []struct {
+		err  error
+		code int
+	}{
+		{domain.ErrDisputeNotFound, http.StatusNotFound},
+		{fmt.Errorf("%w: \"pay-x\"", domain.ErrPaymentNotFound), http.StatusNotFound},
+		{domain.ErrDuplicateDispute, http.StatusConflict},
+		{fmt.Errorf("dispute repo: update x: %w", domain.ErrOptimisticLock), http.StatusConflict},
+		{domain.ErrInvalidTransition, http.StatusUnprocessableEntity},
+		{domain.ErrPaymentNotCaptured, http.StatusBadRequest},
+		{fmt.Errorf("%w: 9000 > 5000", domain.ErrAmountExceedsPayment), http.StatusBadRequest},
+		{fmt.Errorf("%w: USD != ARS", domain.ErrCurrencyMismatch), http.StatusBadRequest},
+		{fmt.Errorf("%w: already passed", domain.ErrInvalidDeadline), http.StatusBadRequest},
+		{fmt.Errorf("%w: \"selfie\"", domain.ErrInvalidEvidenceType), http.StatusBadRequest},
+		{errors.New("boom"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		respondError(c, tc.err)
+		if rec.Code != tc.code {
+			t.Errorf("%v: status = %d, want %d", tc.err, rec.Code, tc.code)
+		}
+	}
+}
+
+// Abrir y resolver leen disputas (y el pago) de otro tenant: bajo RLS solo
+// pasan con la marca de operador. Contestar es del comercio, sin la marca.
+func TestRegisterRoutes_OperatorScope(t *testing.T) {
+	tid, _ := domain.ParseTenantID(uuid.NewString())
+	r := newRepo()
+	d := seedOpen(r, tid)
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(postgres.WithTenantID(c.Request.Context(), tid.String()))
+		c.Next()
+	})
+	allow := func(c *gin.Context) { c.Next() }
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(r), RouteGuards{Operator: allow, Manage: allow, Read: allow})
+
+	cases := []struct {
+		path, body string
+		operator   bool
+	}{
+		{"/api/v1/disputes", `{"payment_id":"pay-2","amount":5000,"currency":"ARS","reason":"fraudulent"}`, true},
+		{"/api/v1/disputes/" + d.ID().String() + "/contest", `{"evidence":[{"evidence_type":"receipt","reference":"r"}]}`, false},
+		{"/api/v1/disputes/" + d.ID().String() + "/resolve", `{"outcome":"won"}`, true},
+	}
+	for _, tc := range cases {
+		r.finds = nil
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+		if len(r.finds) == 0 || r.finds[0] != tc.operator {
+			t.Errorf("%s: finds as operator = %v, want %v (status %d)", tc.path, r.finds, tc.operator, rec.Code)
+		}
 	}
 }

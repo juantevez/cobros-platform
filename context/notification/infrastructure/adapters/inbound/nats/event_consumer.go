@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/notification/application"
 	"github.com/juantevez/cobros-platform/context/notification/domain"
@@ -23,6 +24,10 @@ type eventPayload struct {
 	PaymentMethod   string `json:"payment_method"`
 	BankReference   string `json:"bank_reference"`
 	RejectionReason string `json:"rejection_reason"`
+	// Disputas (dispute.opened / dispute.resolved).
+	Reason   string    `json:"reason"`
+	Outcome  string    `json:"outcome"`
+	Deadline time.Time `json:"deadline"`
 }
 
 // EventConsumer traduce eventos NATS en comandos de notificación.
@@ -58,6 +63,15 @@ func (c *EventConsumer) StartOnboardingConsumer(ctx context.Context) error {
 	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
 		Stream: "ONBOARDING", Name: "notification-onboarding-consumer",
 		FilterSubject: "onboarding.application.>", MaxDeliver: 3,
+	}, c.handle)
+}
+
+// StartDisputeConsumer avisa al comercio de las disputas abiertas (con su
+// plazo para responder) y de cómo se cerraron.
+func (c *EventConsumer) StartDisputeConsumer(ctx context.Context) error {
+	return c.consumer.Start(ctx, eventbus.ConsumerConfig{
+		Stream: "DISPUTE", Name: "notification-dispute-consumer",
+		FilterSubject: "dispute.>", MaxDeliver: 3,
 	}, c.handle)
 }
 
@@ -118,6 +132,15 @@ var handledSubjects = []string{
 	"payout.confirmed.v1", "payout.failed.v1",
 	"onboarding.application.approved.v1", "onboarding.application.rejected.v1",
 	"auth.tenant.suspended.v1",
+	"dispute.opened.v1", "dispute.resolved.v1",
+}
+
+// disputeOutcomes traduce el outcome de dispute.resolved.v1 para el email.
+var disputeOutcomes = map[string]string{
+	"won":      "ganada: los fondos retenidos vuelven a tu saldo",
+	"lost":     "perdida: el banco devolvió el monto al pagador",
+	"accepted": "aceptada: el monto se devolvió al pagador",
+	"expired":  "vencida sin respuesta: el monto se devolvió al pagador",
 }
 
 // buildTemplateData construye el mapa de datos para el template según el evento.
@@ -172,6 +195,29 @@ func buildTemplateData(subject string, p eventPayload) map[string]string {
 		}
 	case "auth.tenant.suspended.v1":
 		return map[string]string{}
+	case "dispute.opened.v1":
+		deadline := "sin fecha informada"
+		if !p.Deadline.IsZero() {
+			deadline = p.Deadline.UTC().Format("02/01/2006 15:04") + " (UTC)"
+		}
+		return map[string]string{
+			"payment_id": p.PaymentID,
+			"amount":     amountStr,
+			"currency":   p.Currency,
+			"reason":     p.Reason,
+			"deadline":   deadline,
+		}
+	case "dispute.resolved.v1":
+		outcome, ok := disputeOutcomes[p.Outcome]
+		if !ok {
+			outcome = p.Outcome
+		}
+		return map[string]string{
+			"payment_id": p.PaymentID,
+			"amount":     amountStr,
+			"currency":   p.Currency,
+			"outcome":    outcome,
+		}
 	}
 	return nil // sin template para este subject
 }

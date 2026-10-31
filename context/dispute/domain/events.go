@@ -37,6 +37,9 @@ type DisputeOpenedEvent struct {
 	Amount    int64  `json:"amount"`
 	Currency  string `json:"currency"`
 	Reason    string `json:"reason"`
+	// Deadline es el plazo del comercio para contestar o aceptar: lo
+	// necesitan la notificación y el webhook (sin él, la disputa vence sola).
+	Deadline time.Time `json:"deadline"`
 }
 
 func (e DisputeOpenedEvent) EventType() string { return "dispute.opened.v1" }

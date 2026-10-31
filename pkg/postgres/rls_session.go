@@ -52,6 +52,11 @@ func WithPlatformOperator(ctx context.Context) context.Context {
 	return WithAppTenant(ctx, PlatformOperatorKey, "on")
 }
 
+// IsPlatformOperator indica si el contexto fue marcado con WithPlatformOperator.
+func IsPlatformOperator(ctx context.Context) bool {
+	return appVarsFromContext(ctx)[PlatformOperatorKey] == "on"
+}
+
 func appVarsFromContext(ctx context.Context) map[string]string {
 	vars, _ := ctx.Value(appVarsKey{}).(map[string]string)
 	return vars

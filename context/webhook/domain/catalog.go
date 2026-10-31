@@ -8,7 +8,7 @@ import (
 
 // SubscribableEvents es el catálogo de tipos de evento (sin versión) que un
 // endpoint puede suscribir: los que reenvía el consumer de Webhook (filtros
-// payment.>, payout.>, onboarding.> y auth.tenant.>). Una suscripción fuera
+// payment.>, payout.>, onboarding.>, auth.tenant.> y dispute.>). Una suscripción fuera
 // del catálogo (un typo, un tipo que no existe) daba un endpoint que nunca
 // recibía nada, sin error.
 //
@@ -31,6 +31,8 @@ var SubscribableEvents = []string{
 	"auth.tenant.created",
 	"auth.tenant.activated",
 	"auth.tenant.suspended",
+	"dispute.opened",
+	"dispute.resolved",
 }
 
 // validateSubscriptions exige que todos los tipos (ya normalizados) estén en

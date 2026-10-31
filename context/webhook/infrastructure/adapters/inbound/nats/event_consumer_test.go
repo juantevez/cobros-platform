@@ -127,6 +127,7 @@ func TestStartConsumers(t *testing.T) {
 		{"payout", (*EventConsumer).StartPayoutConsumer, "PAYOUT", "webhook-payout-consumer", "payout.>"},
 		{"onboarding", (*EventConsumer).StartOnboardingConsumer, "ONBOARDING", "webhook-onboarding-consumer", "onboarding.>"},
 		{"auth", (*EventConsumer).StartAuthConsumer, "AUTH", "webhook-auth-consumer", "auth.tenant.>"},
+		{"dispute", (*EventConsumer).StartDisputeConsumer, "DISPUTE", "webhook-dispute-consumer", "dispute.>"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -272,6 +273,7 @@ func TestSubscribableEventsPassConsumerFilters(t *testing.T) {
 	for _, start := range []func(*EventConsumer, context.Context) error{
 		(*EventConsumer).StartPaymentConsumer, (*EventConsumer).StartPayoutConsumer,
 		(*EventConsumer).StartOnboardingConsumer, (*EventConsumer).StartAuthConsumer,
+		(*EventConsumer).StartDisputeConsumer,
 	} {
 		bus := &fakeBus{}
 		_ = start(newEnv(bus).consumer, context.Background())

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
 )
 
@@ -36,6 +38,8 @@ type fakeRepo struct {
 	findPayErr error
 	listErr    error
 	overdueErr error
+	// overdueCalls cuenta las llamadas a ListOverdue (lotes del poller).
+	overdueCalls int
 
 	gotStatusFilter string
 	gotLimit        int
@@ -98,10 +102,22 @@ func (r *fakeRepo) ListByTenant(ctx context.Context, tenantID domain.TenantID, s
 }
 
 func (r *fakeRepo) ListOverdue(ctx context.Context, now time.Time, limit int) ([]*domain.Dispute, error) {
+	r.overdueCalls++
 	if r.overdueErr != nil {
 		return nil, r.overdueErr
 	}
-	return r.overdue, nil
+	// Como la base: las vencidas que no se actualizaron con éxito, hasta limit.
+	persisted := map[domain.DisputeID]bool{}
+	for _, d := range r.updated {
+		persisted[d.ID()] = true
+	}
+	var out []*domain.Dispute
+	for _, d := range r.overdue {
+		if !persisted[d.ID()] && len(out) < limit {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }
 
 func (r *fakeRepo) ListAll(ctx context.Context, statusFilter string, limit int) ([]*domain.Dispute, error) {
@@ -151,6 +167,7 @@ func (f fakePayments) FindPayment(ctx context.Context, paymentID string) (domain
 	}
 	return domain.PaymentRef{
 		ID:       paymentID,
+		TenantID: paymentTenant,
 		Status:   "captured",
 		Amount:   5000,
 		Currency: "ARS",
@@ -159,12 +176,15 @@ func (f fakePayments) FindPayment(ctx context.Context, paymentID string) (domain
 
 // ── Helpers de agregados ──────────────────────────────────────────────────────
 
-func capturedPayment(id string) domain.PaymentRef {
-	return domain.PaymentRef{ID: id, Status: "captured", Amount: 5000, Currency: "ARS"}
+// paymentTenant es el dueño de los pagos que devuelve fakePayments por defecto.
+var paymentTenant = uuid.NewString()
+
+func capturedPayment(id string, tenantID domain.TenantID) domain.PaymentRef {
+	return domain.PaymentRef{ID: id, TenantID: tenantID.String(), Status: "captured", Amount: 5000, Currency: "ARS"}
 }
 
 func seedOpen(r *fakeRepo, tenantID domain.TenantID, deadline time.Time) *domain.Dispute {
-	d, _ := domain.NewDispute(domain.NewDisputeID(), tenantID, capturedPayment("pay-1"), "psp-1", 5000, "ARS",
+	d, _ := domain.NewDispute(domain.NewDisputeID(), capturedPayment("pay-1", tenantID), "psp-1", 5000, "ARS",
 		domain.ReasonFraudulent, deadline, testNow)
 	d.PullEvents()
 	r.byID[d.ID()] = d

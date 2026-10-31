@@ -62,6 +62,11 @@ func TestMembershipHasPermission(t *testing.T) {
 		{RoleAdmin, ActionManageUsers, true},
 		{RoleAdmin, ActionManageApiKeys, true},
 		{RoleAdmin, ActionManageWebhooks, true},
+		{RoleAdmin, ActionManageDisputes, true},
+		{RoleOperator, ActionManageDisputes, false},
+		{RoleAccountant, ActionManageDisputes, false},
+		{RoleReadOnly, ActionManageDisputes, false},
+		{RolePlatformSupport, ActionManageDisputes, false},
 		{RoleAdmin, ActionRefundPayment, true},
 		// operator: crear/leer pagos, nada de gestión
 		{RoleOperator, ActionCreatePayment, true},

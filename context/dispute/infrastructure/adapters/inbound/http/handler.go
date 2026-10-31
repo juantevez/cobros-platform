@@ -37,9 +37,10 @@ func NewDisputeHandler(
 // Open registra una nueva disputa notificada por el banco.
 //
 //	POST /api/v1/disputes
+//
+// Lo ejecuta el operador de plataforma: el tenant de la disputa es el del
+// dueño del pago, no el de su JWT.
 func (h *DisputeHandler) Open(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
-
 	var req struct {
 		PaymentID    string `json:"payment_id"    binding:"required"`
 		PSPReference string `json:"psp_reference"`
@@ -54,17 +55,21 @@ func (h *DisputeHandler) Open(c *gin.Context) {
 	}
 
 	cmd := application.OpenDisputeCmd{
-		TenantID:     tenantID,
 		PaymentID:    req.PaymentID,
 		PSPReference: req.PSPReference,
 		Amount:       req.Amount,
 		Currency:     req.Currency,
 		Reason:       req.Reason,
 	}
+	// Ausente → el caso de uso aplica now+7d. Mal formado → 400: antes se
+	// descartaba en silencio y el comercio quedaba con un plazo que nadie pidió.
 	if req.Deadline != "" {
-		if t, err := time.Parse(time.RFC3339, req.Deadline); err == nil {
-			cmd.Deadline = t.UTC()
+		t, err := time.Parse(time.RFC3339, req.Deadline)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid deadline: must be RFC3339 (e.g. 2026-11-07T18:00:00Z)"})
+			return
 		}
+		cmd.Deadline = t.UTC()
 	}
 
 	result, err := h.open.Execute(c.Request.Context(), cmd)
@@ -197,10 +202,12 @@ func (h *DisputeHandler) Resolve(c *gin.Context) {
 
 func respondError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, domain.ErrDisputeNotFound):
+	case errors.Is(err, domain.ErrDisputeNotFound),
+		errors.Is(err, domain.ErrPaymentNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrDuplicateDispute),
-		errors.Is(err, domain.ErrDisputeAlreadyClosed):
+		errors.Is(err, domain.ErrDisputeAlreadyClosed),
+		errors.Is(err, domain.ErrOptimisticLock):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidTransition),
 		errors.Is(err, domain.ErrDisputeExpired),
@@ -208,21 +215,53 @@ func respondError(c *gin.Context, err error) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidDisputeReason),
 		errors.Is(err, domain.ErrInvalidResolutionOutcome),
-		errors.Is(err, domain.ErrPaymentNotCaptured):
+		errors.Is(err, domain.ErrPaymentNotCaptured),
+		errors.Is(err, domain.ErrAmountExceedsPayment),
+		errors.Is(err, domain.ErrCurrencyMismatch),
+		errors.Is(err, domain.ErrInvalidDeadline),
+		errors.Is(err, domain.ErrInvalidEvidenceType):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
 }
 
-func RegisterRoutes(rg *gin.RouterGroup, h *DisputeHandler) {
+// RouteGuards autoriza cada operación. Las rutas de Operator corren además con
+// platformOperatorScope (RLS). Se inyectan desde el composition root
+// para no acoplar este contexto con Auth:
+//   - Operator: abrir la disputa y registrar el fallo del banco son acciones
+//     del operador de plataforma (RequireRole(platform_support)). Abrir
+//     congela fondos del comercio.
+//   - Manage: contestar o aceptar (RequirePermission(disputes:manage)).
+//     Aceptar entrega el monto disputado.
+//   - Read: consultar (RequirePermission(payments:read)).
+type RouteGuards struct {
+	Operator gin.HandlerFunc
+	Manage   gin.HandlerFunc
+	Read     gin.HandlerFunc
+}
+
+func RegisterRoutes(rg *gin.RouterGroup, h *DisputeHandler, guards RouteGuards) {
+	if guards.Operator == nil || guards.Manage == nil || guards.Read == nil {
+		panic("dispute: RegisterRoutes requires Operator, Manage and Read guards")
+	}
+
 	d := rg.Group("/disputes")
 	{
-		d.POST("", h.Open)
-		d.GET("", h.List)
-		d.GET("/:disputeID", h.Get)
-		d.POST("/:disputeID/contest", h.Contest)
-		d.POST("/:disputeID/accept", h.Accept)
-		d.POST("/:disputeID/resolve", h.Resolve)
+		d.POST("", guards.Operator, platformOperatorScope, h.Open)
+		d.GET("", guards.Read, h.List)
+		d.GET("/:disputeID", guards.Read, h.Get)
+		d.POST("/:disputeID/contest", guards.Manage, h.Contest)
+		d.POST("/:disputeID/accept", guards.Manage, h.Accept)
+		d.POST("/:disputeID/resolve", guards.Operator, platformOperatorScope, h.Resolve)
 	}
+}
+
+// platformOperatorScope marca el request como acción de operador para RLS:
+// la disputa (y el pago) son de otro tenant, así que la lectura pasa por la
+// política de operador, nunca por el tenant del JWT. Debe ir siempre DESPUÉS
+// del guard de rol.
+func platformOperatorScope(c *gin.Context) {
+	c.Request = c.Request.WithContext(postgres.WithPlatformOperator(c.Request.Context()))
+	c.Next()
 }
