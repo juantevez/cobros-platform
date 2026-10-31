@@ -287,7 +287,11 @@ func main() {
 	getPayout := payoutapp.NewGetPayoutUseCase(payoutRepo)
 	listPayouts := payoutapp.NewListPayoutsUseCase(payoutRepo)
 
-	payouthttp.RegisterRoutes(protected, payouthttp.NewPayoutHandler(initiatePayout, getPayout, listPayouts))
+	payouthttp.RegisterRoutes(protected, payouthttp.NewPayoutHandler(initiatePayout, getPayout, listPayouts), payouthttp.RouteGuards{
+		// Sin scopes: desembolsar no se habilita a API keys.
+		Create: authttp.RequirePermission(authdomain.ActionCreatePayout),
+		Read:   authttp.RequirePermission(authdomain.ActionReadPayments, authdomain.ScopePaymentsRead, authdomain.ScopePaymentsWrite),
+	})
 
 	// ── Webhooks ──────────────────────────────────────────────────────────────
 

@@ -137,8 +137,9 @@ Clave `(user_id, tenant_id)` con `role` y `assignedBy`. Define una matriz de per
 | `reports:read` | ✅ | | ✅ | ✅ | ✅ |
 | `webhooks:manage` | ✅ | | | | |
 | `disputes:manage` | ✅ | | | | |
+| `payouts:create` | ✅ | | | | |
 
-La matriz se consulta con `RoleHasPermission(role, action)`, que usa el middleware `RequirePermission` (§6.7). Hoy la aplican **Payments** (cobrar, consultar, reembolsar), **Webhooks**, **Reporting** y **Disputes** (contestar/aceptar con `disputes:manage`, consultar con `payments:read`; abrir y resolver con `RequireRole(platform_support)`). Las rutas de Auth usan `RequireRole`, y Onboarding y Ledger usan `RequireRole(platform_support)` en sus escrituras. Los demás BCs todavía no aplican control por rol.
+La matriz se consulta con `RoleHasPermission(role, action)`, que usa el middleware `RequirePermission` (§6.7). Hoy la aplican **Payments** (cobrar, consultar, reembolsar), **Webhooks**, **Reporting**, **Payouts** (desembolsar con `payouts:create`, sin API key; consultar con `payments:read`) y **Disputes** (contestar/aceptar con `disputes:manage`, consultar con `payments:read`; abrir y resolver con `RequireRole(platform_support)`). Las rutas de Auth usan `RequireRole`, y Onboarding y Ledger usan `RequireRole(platform_support)` en sus escrituras. Los demás BCs todavía no aplican control por rol.
 
 ### 4.4 Agregado `ApiKey`
 

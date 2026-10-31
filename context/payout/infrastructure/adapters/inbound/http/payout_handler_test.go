@@ -419,7 +419,8 @@ func TestRespondDomainError(t *testing.T) {
 
 func TestRegisterRoutes(t *testing.T) {
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()))
+	allow := func(c *gin.Context) { c.Next() }
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()), RouteGuards{Create: allow, Read: allow})
 
 	var got []string
 	for _, r := range engine.Routes() {
@@ -434,5 +435,42 @@ func TestRegisterRoutes(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("routes = %v, want %v", got, want)
+	}
+}
+
+// Antes cualquier usuario del tenant (incluido read_only) podía desembolsar.
+func TestRegisterRoutes_Guards(t *testing.T) {
+	var hit []string
+	deny := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) { hit = append(hit, name); c.AbortWithStatus(http.StatusForbidden) }
+	}
+	engine := gin.New()
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()), RouteGuards{Create: deny("create"), Read: deny("read")})
+
+	for _, tc := range []struct{ method, path, guard string }{
+		{http.MethodPost, "/api/v1/payouts", "create"},
+		{http.MethodGet, "/api/v1/payouts", "read"},
+		{http.MethodGet, "/api/v1/payouts/" + uuid.NewString(), "read"},
+	} {
+		hit = nil
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusForbidden || len(hit) != 1 || hit[0] != tc.guard {
+			t.Errorf("%s %s: status = %d guards = %v, want 403 from %s", tc.method, tc.path, rec.Code, hit, tc.guard)
+		}
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	allow := func(c *gin.Context) { c.Next() }
+	for name, g := range map[string]RouteGuards{"create": {Read: allow}, "read": {Create: allow}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("missing %s guard: expected panic", name)
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/"), newHandler(newRepo(), defaultOpts()), g)
+		}()
 	}
 }

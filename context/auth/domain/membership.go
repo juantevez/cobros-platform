@@ -96,6 +96,8 @@ const (
 	// ActionManageDisputes: contestar o aceptar una disputa. Aceptarla entrega
 	// el monto disputado: solo admin, como el reembolso.
 	ActionManageDisputes Action = "disputes:manage"
+	// ActionCreatePayout: retirar el saldo del comercio a su banco. Solo admin.
+	ActionCreatePayout Action = "payouts:create"
 )
 
 type permissionSet []Action
@@ -121,6 +123,7 @@ var rolePermissions = map[Role]permissionSet{
 		ActionReadReports,
 		ActionManageWebhooks,
 		ActionManageDisputes,
+		ActionCreatePayout,
 	},
 	RoleOperator: {
 		ActionCreatePayment,
