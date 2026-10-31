@@ -61,10 +61,15 @@ func (h *DisputeHandler) Open(c *gin.Context) {
 		Currency:     req.Currency,
 		Reason:       req.Reason,
 	}
+	// Ausente → el caso de uso aplica now+7d. Mal formado → 400: antes se
+	// descartaba en silencio y el comercio quedaba con un plazo que nadie pidió.
 	if req.Deadline != "" {
-		if t, err := time.Parse(time.RFC3339, req.Deadline); err == nil {
-			cmd.Deadline = t.UTC()
+		t, err := time.Parse(time.RFC3339, req.Deadline)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid deadline: must be RFC3339 (e.g. 2026-11-07T18:00:00Z)"})
+			return
 		}
+		cmd.Deadline = t.UTC()
 	}
 
 	result, err := h.open.Execute(c.Request.Context(), cmd)

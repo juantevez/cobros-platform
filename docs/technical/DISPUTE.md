@@ -284,7 +284,7 @@ Sin permiso → 403. El tenant sale del JWT (`postgres.TenantIDFromContext`), sa
 ```
 
 Requeridos: `payment_id`, `amount ≥ 1` (centavos), `currency`, `reason` (uno de §4.4).
-Opcionales: `psp_reference`, `deadline` (RFC3339; ausente **o mal formado** → now+7d; en el pasado → error).
+Opcionales: `psp_reference`, `deadline` (RFC3339; ausente → now+7d; mal formado → 400 `invalid deadline`; en el pasado → 400).
 
 ### 6.2 Contestar — `POST /disputes/:disputeID/contest`
 
@@ -323,6 +323,7 @@ Body: `{ "outcome": "won" | "lost", "note": "…" }` (`outcome` requerido).
 | Condición | HTTP |
 |---|---|
 | Body inválido / parseo JSON fallido | 400 `invalid request body` |
+| `deadline` que no es RFC3339 | 400 `invalid deadline` |
 | Reason/outcome inválido, `ErrPaymentNotCaptured` | 400 con mensaje del dominio |
 | Monto mayor al capturado, moneda distinta, deadline vencido, tipo de evidencia inválido | 400 con mensaje del dominio |
 | Disputa no encontrada (incluye cross-tenant) o pago inexistente | 404 |
@@ -442,11 +443,10 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
-| 2 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
-| 3 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
-| 4 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
-| 5 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
+| 1 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
+| 2 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
+| 3 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
+| 4 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
 
 ---
 

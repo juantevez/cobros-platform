@@ -188,6 +188,37 @@ func TestOpen(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed deadline yields 400 and opens nothing", func(t *testing.T) {
+		r := newRepo()
+		for _, deadline := range []string{"mañana", "2026-11-07", "07/11/2026 18:00"} {
+			rec := doRequest(newHandler(r).Open, http.MethodPost, "/disputes",
+				`{"payment_id":"pay-9","amount":5000,"currency":"ARS","reason":"fraudulent","deadline":"`+deadline+`"}`,
+				tid.String(), nil)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid deadline") {
+				t.Errorf("deadline %q: status = %d body = %s, want 400", deadline, rec.Code, rec.Body)
+			}
+		}
+		if len(r.byID) != 0 {
+			t.Errorf("disputes opened = %d, want 0", len(r.byID))
+		}
+	})
+
+	t.Run("RFC3339 deadline is used", func(t *testing.T) {
+		r := newRepo()
+		deadline := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+		rec := doRequest(newHandler(r).Open, http.MethodPost, "/disputes",
+			`{"payment_id":"pay-9","amount":5000,"currency":"ARS","reason":"fraudulent","deadline":"`+deadline.Format(time.RFC3339)+`"}`,
+			tid.String(), nil)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body)
+		}
+		for _, d := range r.byID {
+			if !d.Deadline().Equal(deadline) {
+				t.Errorf("deadline = %v, want %v", d.Deadline(), deadline)
+			}
+		}
+	})
+
 	t.Run("invalid reason yields 400", func(t *testing.T) {
 		rec := doRequest(newHandler(newRepo()).Open, http.MethodPost, "/disputes",
 			`{"payment_id":"pay-1","amount":5000,"currency":"ARS","reason":"bogus"}`,
