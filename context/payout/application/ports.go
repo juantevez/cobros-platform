@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"time"
 
 	"github.com/juantevez/cobros-platform/context/payout/domain"
 )
@@ -17,7 +18,13 @@ type PayoutRepository interface {
 	// clave de idempotencia, retorna domain.ErrPayoutAlreadyExists
 	// (mapeado desde la violación del índice UNIQUE).
 	Save(ctx context.Context, p *domain.Payout) error
-	Update(ctx context.Context, p *domain.Payout) error
+	// Update persiste el payout solo si sigue en from (el estado del que partió
+	// la transición); si otra ejecución ya lo cambió, retorna
+	// domain.ErrPayoutChanged y no escribe.
+	Update(ctx context.Context, p *domain.Payout, from domain.PayoutStatus) error
+	// ListUnresolved retorna payouts en processing o unknown sin cambios desde
+	// antes de olderThan, de todos los tenants (los resuelve el recuperador).
+	ListUnresolved(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payout, error)
 	FindByID(ctx context.Context, id domain.PayoutID) (*domain.Payout, error)
 	// FindByIdempotencyKey busca un payout existente por (tenant, key).
 	// Retorna domain.ErrPayoutNotFound si no existe.
@@ -37,12 +44,12 @@ type BalanceChecker interface {
 	GetAvailableBalance(ctx context.Context, tenantID domain.TenantID, currency string) (int64, error)
 }
 
-// BankAccountProvider obtiene los datos de la cuenta bancaria del comercio
-// registrada durante el Onboarding. Sólo debe retornar cuentas verificadas
-// (verified = true) de solicitudes aprobadas; verificarla antes de desembolsar
-// es requisito regulatorio mínimo.
+// BankAccountProvider obtiene la cuenta bancaria del comercio registrada en
+// el Onboarding: solo una cuenta verificada (la verifica la aprobación del
+// KYC) de una solicitud aprobada y en la moneda del payout. Si no hay,
+// domain.ErrNoBankAccount.
 type BankAccountProvider interface {
-	GetBankAccount(ctx context.Context, tenantID domain.TenantID) (domain.BankAccountInfo, error)
+	GetBankAccount(ctx context.Context, tenantID domain.TenantID, currency string) (domain.BankAccountInfo, error)
 }
 
 // PayoutGate verifica que el comercio pueda desembolsar: tenant activo y sin
@@ -52,11 +59,36 @@ type PayoutGate interface {
 }
 
 // BankTransferAdapter abstrae la ejecución de transferencias bancarias.
+// Un rechazo definitivo del banco debe envolver ErrBankRejected; cualquier
+// otro error se trata como resultado desconocido.
 // En Fase 3: implementación Mock.
 // En Fase 4: se conecta con el banco real, MP Transfers, o Prex.
 type BankTransferAdapter interface {
 	Transfer(ctx context.Context, req TransferRequest) (TransferResult, error)
+	// GetTransfer consulta al banco el resultado de una transferencia por su
+	// clave de idempotencia: resuelve los payouts unknown o trabados.
+	GetTransfer(ctx context.Context, req TransferLookupRequest) (TransferLookup, error)
 	Name() string
+}
+
+// TransferLookupRequest identifica la transferencia a consultar.
+type TransferLookupRequest struct {
+	PayoutID       string
+	IdempotencyKey string
+	Amount         int64
+	Currency       string
+}
+
+// TransferLookup es lo que el banco sabe de esa transferencia.
+type TransferLookup struct {
+	Found         bool // false: el banco no tiene registro de la operación
+	Completed     bool // con Found: true acreditada, false rechazada
+	BankReference string
+}
+
+// Clock abstrae el tiempo.
+type Clock interface {
+	Now() time.Time
 }
 
 // TransferRequest contiene los datos para ejecutar una transferencia.

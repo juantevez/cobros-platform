@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -45,7 +46,12 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payout) error {
 	r.byKey[p.IdempotencyKey()] = p
 	return nil
 }
-func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout) error { return nil }
+func (r *fakeRepo) Update(ctx context.Context, p *domain.Payout, from domain.PayoutStatus) error {
+	return nil
+}
+func (r *fakeRepo) ListUnresolved(context.Context, time.Time, int) ([]*domain.Payout, error) {
+	return nil, nil
+}
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.PayoutID) (*domain.Payout, error) {
 	p, ok := r.byID[id]
 	if !ok {
@@ -73,7 +79,7 @@ func (b fakeBalance) GetAvailableBalance(ctx context.Context, t domain.TenantID,
 
 type fakeBank struct{ account domain.BankAccountInfo }
 
-func (b fakeBank) GetBankAccount(ctx context.Context, t domain.TenantID) (domain.BankAccountInfo, error) {
+func (b fakeBank) GetBankAccount(ctx context.Context, t domain.TenantID, currency string) (domain.BankAccountInfo, error) {
 	return b.account, nil
 }
 
@@ -84,6 +90,9 @@ func (f fakeTransfer) Transfer(ctx context.Context, req application.TransferRequ
 		return application.TransferResult{}, f.err
 	}
 	return application.TransferResult{BankReference: "BANK-1", Status: "confirmed"}, nil
+}
+func (fakeTransfer) GetTransfer(context.Context, application.TransferLookupRequest) (application.TransferLookup, error) {
+	return application.TransferLookup{}, nil
 }
 func (fakeTransfer) Name() string { return "fake" }
 
@@ -262,15 +271,34 @@ func TestInitiate(t *testing.T) {
 		}
 	})
 
-	t.Run("transfer failure returns 500 without leaking details", func(t *testing.T) {
+	// Antes, rechazo y resultado desconocido respondían 500 sin payout_id.
+	t.Run("bank rejection returns 422 with the failed payout, without leaking details", func(t *testing.T) {
 		o := defaultOpts()
-		o.transferErr = errors.New("bank secret detail")
+		o.transferErr = fmt.Errorf("%w: bank secret detail", application.ErrBankRejected)
 		rec := postPayout(newHandler(newRepo(), o), tid, `{"amount":100}`)
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500", rec.Code)
+		var body struct {
+			Error    string `json:"error"`
+			PayoutID string `json:"payout_id"`
+			Status   string `json:"status"`
 		}
-		if got := errorBody(t, rec); got != "internal server error" {
-			t.Errorf("error = %q", got)
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != http.StatusUnprocessableEntity || body.Status != "failed" || body.PayoutID == "" ||
+			body.Error != domain.ErrPayoutRejected.Error() || strings.Contains(rec.Body.String(), "secret") {
+			t.Errorf("status = %d body = %s", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("unknown transfer outcome returns 202 with the unknown payout", func(t *testing.T) {
+		o := defaultOpts()
+		o.transferErr = errors.New("dial tcp 10.0.0.9:443: i/o timeout")
+		rec := postPayout(newHandler(newRepo(), o), tid, `{"amount":100}`)
+		var body struct {
+			PayoutID string `json:"payout_id"`
+			Status   string `json:"status"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != http.StatusAccepted || body.Status != "unknown" || body.PayoutID == "" || strings.Contains(rec.Body.String(), "10.0.0.9") {
+			t.Errorf("status = %d body = %s", rec.Code, rec.Body)
 		}
 	})
 }
@@ -419,7 +447,8 @@ func TestRespondDomainError(t *testing.T) {
 
 func TestRegisterRoutes(t *testing.T) {
 	engine := gin.New()
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()))
+	allow := func(c *gin.Context) { c.Next() }
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()), RouteGuards{Create: allow, Read: allow})
 
 	var got []string
 	for _, r := range engine.Routes() {
@@ -434,5 +463,42 @@ func TestRegisterRoutes(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("routes = %v, want %v", got, want)
+	}
+}
+
+// Antes cualquier usuario del tenant (incluido read_only) podía desembolsar.
+func TestRegisterRoutes_Guards(t *testing.T) {
+	var hit []string
+	deny := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) { hit = append(hit, name); c.AbortWithStatus(http.StatusForbidden) }
+	}
+	engine := gin.New()
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo(), defaultOpts()), RouteGuards{Create: deny("create"), Read: deny("read")})
+
+	for _, tc := range []struct{ method, path, guard string }{
+		{http.MethodPost, "/api/v1/payouts", "create"},
+		{http.MethodGet, "/api/v1/payouts", "read"},
+		{http.MethodGet, "/api/v1/payouts/" + uuid.NewString(), "read"},
+	} {
+		hit = nil
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusForbidden || len(hit) != 1 || hit[0] != tc.guard {
+			t.Errorf("%s %s: status = %d guards = %v, want 403 from %s", tc.method, tc.path, rec.Code, hit, tc.guard)
+		}
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	allow := func(c *gin.Context) { c.Next() }
+	for name, g := range map[string]RouteGuards{"create": {Read: allow}, "read": {Create: allow}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("missing %s guard: expected panic", name)
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/"), newHandler(newRepo(), defaultOpts()), g)
+		}()
 	}
 }

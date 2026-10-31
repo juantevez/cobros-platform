@@ -338,7 +338,7 @@ make migrate
 # 5. Terminal 1: servidor HTTP (puerto 8080)
 make run-api
 
-# 6. Terminal 2: worker del Outbox relay
+# 6. Terminal 2: worker (outbox relay, consumers NATS, recuperador de pagos y pollers)
 make run-worker
 ```
 
@@ -430,6 +430,8 @@ Cliente paga
 [Billing & Fees] calcula la comisión del plan del tenant (in-process)
     ↓
 [Payment Processing] captura contra PSP → payment.captured.v1
+    (si el PSP no confirma: el pago queda en processing y el recuperador
+     del worker le pregunta al PSP cómo terminó)
     ↓
 [Ledger] registra asiento:
     in_transit         DEBIT   $100   (lo que liquida el PSP, sin su comisión)

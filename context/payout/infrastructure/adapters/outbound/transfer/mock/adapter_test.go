@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -36,10 +37,17 @@ func TestAdapter_Transfer(t *testing.T) {
 		}
 	})
 
-	t.Run("REJECT account fails", func(t *testing.T) {
+	t.Run("REJECT account is a definitive rejection", func(t *testing.T) {
 		_, err := New().Transfer(context.Background(), application.TransferRequest{AccountNumber: "REJECT"})
-		if err == nil || !strings.Contains(err.Error(), "account rejected") {
-			t.Fatalf("expected rejection error, got %v", err)
+		if !errors.Is(err, application.ErrBankRejected) || !strings.Contains(err.Error(), "account rejected") {
+			t.Fatalf("expected ErrBankRejected, got %v", err)
+		}
+	})
+
+	t.Run("TIMEOUT account is an unknown outcome", func(t *testing.T) {
+		_, err := New().Transfer(context.Background(), application.TransferRequest{AccountNumber: "TIMEOUT"})
+		if err == nil || errors.Is(err, application.ErrBankRejected) {
+			t.Fatalf("expected a non-rejection error, got %v", err)
 		}
 	})
 }

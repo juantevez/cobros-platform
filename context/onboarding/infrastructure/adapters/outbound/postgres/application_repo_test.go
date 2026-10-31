@@ -168,6 +168,11 @@ func TestApplicationRepo_PersistsReviewNotes(t *testing.T) {
 	if got.ReviewedAt() == nil {
 		t.Error("reviewed_at not persisted")
 	}
+	// El upsert de la cuenta también actualiza verified (antes el ON CONFLICT
+	// no lo tocaba y la aprobación no llegaba a la base).
+	if got.BankAccount() == nil || !got.BankAccount().Verified() {
+		t.Error("approved bank account not persisted as verified")
+	}
 }
 
 func TestApplicationRepo_BankAccountUpsert(t *testing.T) {

@@ -22,6 +22,10 @@ var (
 	// indeterminado (timeout, error de red, respuesta ambigua del banco).
 	// NO debe tratarse como fallo: los fondos pueden haber sido acreditados.
 	ErrBankTransferUnknown = errors.New("bank transfer result unknown")
+	// ErrPayoutRejected: el banco rechazó la transferencia (el payout queda
+	// failed y el Ledger revierte el asiento). Mensaje genérico: el detalle
+	// del banco no se expone.
+	ErrPayoutRejected = errors.New("payout rejected by the bank")
 
 	// ErrIdempotencyKeyConflict: la clave reutilizada corresponde a un payout
 	// con monto o moneda distintos.
@@ -34,4 +38,7 @@ var (
 	// suspendido o en hold preventivo). El mensaje es genérico a propósito:
 	// no debe revelar un hold de cumplimiento (tipping-off).
 	ErrPayoutsNotAllowed = errors.New("payouts are not available for this account")
+	// ErrPayoutChanged: el payout ya no estaba en el estado del que partía la
+	// transición (otra ejecución lo resolvió antes).
+	ErrPayoutChanged = errors.New("payout was modified concurrently")
 )

@@ -166,6 +166,10 @@ func (a *OnboardingApplication) Approve(notes string) error {
 	}
 	currency := a.bankAccount.Currency()
 
+	// Aprobar verifica la cuenta de desembolso: el operador la revisa como
+	// parte de la solicitud. Payout solo desembolsa a cuentas verificadas.
+	a.bankAccount.verified = true
+
 	now := time.Now().UTC()
 	a.status = StatusApproved
 	a.reviewNotes = notes

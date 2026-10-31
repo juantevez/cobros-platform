@@ -61,7 +61,26 @@ func (h *PayoutHandler) Initiate(c *gin.Context) {
 		Currency:       req.Currency,
 		IdempotencyKey: key,
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, domain.ErrPayoutRejected):
+		// El payout existe y quedó failed (el saldo vuelve al comercio). El
+		// detalle del banco no se expone.
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":     domain.ErrPayoutRejected.Error(),
+			"payout_id": result.PayoutID,
+			"status":    result.Status,
+		})
+		return
+	case errors.Is(err, domain.ErrBankTransferUnknown):
+		// El banco no confirmó: el payout queda unknown y lo resuelve el
+		// recuperador. 202 con su id para consultarlo.
+		c.JSON(http.StatusAccepted, gin.H{
+			"payout_id": result.PayoutID,
+			"status":    result.Status,
+			"detail":    domain.ErrBankTransferUnknown.Error(),
+		})
+		return
+	case err != nil:
 		respondDomainError(c, err)
 		return
 	}
@@ -131,12 +150,26 @@ func respondDomainError(c *gin.Context, err error) {
 	}
 }
 
+// RouteGuards autoriza cada operación. Se inyectan desde el composition root
+// para no acoplar este contexto con Auth; en producción son
+// RequirePermission(payouts:create) para desembolsar (retira el saldo del
+// comercio: solo admin, y sin API key) y RequirePermission(payments:read)
+// para consultar.
+type RouteGuards struct {
+	Create gin.HandlerFunc // desembolsar
+	Read   gin.HandlerFunc // consultar
+}
+
 // RegisterRoutes registra las rutas de Payouts en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, handler *PayoutHandler) {
+func RegisterRoutes(rg *gin.RouterGroup, handler *PayoutHandler, guards RouteGuards) {
+	if guards.Create == nil || guards.Read == nil {
+		panic("payout: RegisterRoutes requires Create and Read guards")
+	}
+
 	payouts := rg.Group("/payouts")
 	{
-		payouts.POST("", handler.Initiate)
-		payouts.GET("", handler.List)
-		payouts.GET("/:payoutID", handler.Get)
+		payouts.POST("", guards.Create, handler.Initiate)
+		payouts.GET("", guards.Read, handler.List)
+		payouts.GET("/:payoutID", guards.Read, handler.Get)
 	}
 }
