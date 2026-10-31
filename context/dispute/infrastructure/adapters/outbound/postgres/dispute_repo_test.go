@@ -16,7 +16,7 @@ import (
 var disputeCols = []string{
 	"id", "tenant_id", "payment_id", "psp_reference", "amount", "currency",
 	"reason", "status", "response_note", "resolved_note",
-	"deadline", "opened_at", "responded_at", "resolved_at",
+	"deadline", "opened_at", "responded_at", "resolved_at", "version",
 }
 
 var evidenceCols = []string{"id", "evidence_type", "reference", "description", "submitted_at"}
@@ -49,7 +49,7 @@ func disputeRow(id, tenantID string) []any {
 	return []any{
 		id, tenantID, "pay-1", "psp-1", int64(5000), "ARS",
 		"fraudulent", "open", "", "",
-		testDeadline, testTime, (*time.Time)(nil), (*time.Time)(nil),
+		testDeadline, testTime, (*time.Time)(nil), (*time.Time)(nil), int64(1),
 	}
 }
 
@@ -70,7 +70,7 @@ func TestDisputeRepository_Save(t *testing.T) {
 		mock := newMock(t)
 		repo := NewDisputeRepository(mock)
 
-		mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(14)...).
+		mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(15)...).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		if err := repo.Save(context.Background(), d); err != nil {
@@ -97,7 +97,7 @@ func TestDisputeRepository_Save(t *testing.T) {
 			t.Fatalf("contest: %v", err)
 		}
 
-		mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(14)...).
+		mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(15)...).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		mock.ExpectExec("INSERT INTO dispute_evidence").WithArgs(anyArgs(6)...).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -130,7 +130,9 @@ func TestDisputeRepository_Update(t *testing.T) {
 	t.Run("updates dispute", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewDisputeRepository(mock)
-		mock.ExpectExec("UPDATE disputes").WithArgs(anyArgs(6)...).
+		mock.ExpectExec("UPDATE disputes SET.*version=\\$7\\s+WHERE id=\\$1 AND version=\\$8").
+			WithArgs(d.ID().String(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				d.Version(), d.Version()-1).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		if err := repo.Update(context.Background(), d); err != nil {
@@ -138,6 +140,19 @@ func TestDisputeRepository_Update(t *testing.T) {
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("expectations: %v", err)
+		}
+	})
+
+	// Otra transición ganó la carrera: el UPDATE no encuentra la versión leída.
+	t.Run("stale version returns ErrOptimisticLock", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectExec("UPDATE disputes").WithArgs(anyArgs(8)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		if err := NewDisputeRepository(mock).Update(context.Background(), d); !errors.Is(err, domain.ErrOptimisticLock) {
+			t.Fatalf("expected ErrOptimisticLock, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("evidence must not be written: %v", err)
 		}
 	})
 
@@ -332,7 +347,7 @@ func TestDisputeRepository_Save_evidenceError(t *testing.T) {
 		t.Fatalf("contest: %v", err)
 	}
 
-	mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(14)...).
+	mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(15)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("INSERT INTO dispute_evidence").WillReturnError(errors.New("boom"))
 

@@ -440,6 +440,7 @@ func TestRespondError(t *testing.T) {
 		{domain.ErrDisputeNotFound, http.StatusNotFound},
 		{fmt.Errorf("%w: \"pay-x\"", domain.ErrPaymentNotFound), http.StatusNotFound},
 		{domain.ErrDuplicateDispute, http.StatusConflict},
+		{fmt.Errorf("dispute repo: update x: %w", domain.ErrOptimisticLock), http.StatusConflict},
 		{domain.ErrInvalidTransition, http.StatusUnprocessableEntity},
 		{domain.ErrPaymentNotCaptured, http.StatusBadRequest},
 		{fmt.Errorf("%w: 9000 > 5000", domain.ErrAmountExceedsPayment), http.StatusBadRequest},

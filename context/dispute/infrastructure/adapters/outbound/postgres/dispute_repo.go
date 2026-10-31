@@ -24,8 +24,8 @@ func (r *pgDisputeRepository) Save(ctx context.Context, d *domain.Dispute) error
 		INSERT INTO disputes
 			(id, tenant_id, payment_id, psp_reference, amount, currency,
 			 reason, status, response_note, resolved_note,
-			 deadline, opened_at, responded_at, resolved_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+			 deadline, opened_at, responded_at, resolved_at, version)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		d.ID().String(), d.TenantID().String(),
 		d.PaymentID(), nullStr(d.PSPReference()),
 		d.Amount(), d.Currency(),
@@ -33,6 +33,7 @@ func (r *pgDisputeRepository) Save(ctx context.Context, d *domain.Dispute) error
 		nullStr(d.ResponseNote()), nullStr(d.ResolvedNote()),
 		d.Deadline(), d.OpenedAt(),
 		d.RespondedAt(), d.ResolvedAt(),
+		d.Version(),
 	)
 	if err != nil {
 		return fmt.Errorf("dispute repo: save: %w", err)
@@ -42,17 +43,23 @@ func (r *pgDisputeRepository) Save(ctx context.Context, d *domain.Dispute) error
 
 func (r *pgDisputeRepository) Update(ctx context.Context, d *domain.Dispute) error {
 	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	_, err := conn.Exec(ctx, `
+	// Cada transición incrementa la versión una vez: el UPDATE exige la que
+	// se leyó. Si otra transición ganó la carrera, 0 filas → ErrOptimisticLock.
+	tag, err := conn.Exec(ctx, `
 		UPDATE disputes SET
 			status=$2, response_note=$3, resolved_note=$4,
-			responded_at=$5, resolved_at=$6
-		WHERE id=$1`,
+			responded_at=$5, resolved_at=$6, version=$7
+		WHERE id=$1 AND version=$8`,
 		d.ID().String(), d.Status().String(),
 		nullStr(d.ResponseNote()), nullStr(d.ResolvedNote()),
 		d.RespondedAt(), d.ResolvedAt(),
+		d.Version(), d.Version()-1,
 	)
 	if err != nil {
 		return fmt.Errorf("dispute repo: update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("dispute repo: update %s: %w", d.ID(), domain.ErrOptimisticLock)
 	}
 	return r.saveEvidence(ctx, conn, d)
 }
@@ -160,7 +167,7 @@ const baseSelect = `
 	SELECT id, tenant_id, payment_id, COALESCE(psp_reference,''),
 	       amount, currency, reason, status,
 	       COALESCE(response_note,''), COALESCE(resolved_note,''),
-	       deadline, opened_at, responded_at, resolved_at
+	       deadline, opened_at, responded_at, resolved_at, version
 	FROM disputes`
 
 func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interface {
@@ -173,12 +180,14 @@ func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interfa
 		responseNote, resolvedNote            string
 		deadline, openedAt                    time.Time
 		respondedAt, resolvedAt               *time.Time
+		version                               int64
 	)
 	if err := row.Scan(
 		&idStr, &tenantIDStr, &paymentID, &pspRef,
 		&amount, &currency, &reasonStr, &statusStr,
 		&responseNote, &resolvedNote,
 		&deadline, &openedAt, &respondedAt, &resolvedAt,
+		&version,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrDisputeNotFound
@@ -217,9 +226,7 @@ func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interfa
 		responseNote, resolvedNote,
 		deadline.UTC(), openedAt.UTC(),
 		respondedAt, resolvedAt,
-		// El SELECT de baseSelect tiene 14 columnas (sin `version`, que no
-		// existe en la tabla disputes): se reconstruye con la versión inicial.
-		int64(1),
+		version,
 	), nil
 }
 

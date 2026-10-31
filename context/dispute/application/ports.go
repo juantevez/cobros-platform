@@ -16,8 +16,8 @@ type TxManager interface {
 type DisputeRepository interface {
 	Save(ctx context.Context, d *domain.Dispute) error
 	// Update aplica la mutación con concurrencia optimista: el UPDATE filtra por
-	// la versión leída (d.Version()-1) y retorna domain.ErrOptimisticLock si
-	// otra transición ganó la carrera (0 filas afectadas).
+	// la versión leída (d.Version()-1, cada transición la incrementa una vez) y
+	// retorna domain.ErrOptimisticLock si otra transición ganó la carrera.
 	Update(ctx context.Context, d *domain.Dispute) error
 	FindByID(ctx context.Context, id domain.DisputeID) (*domain.Dispute, error)
 	FindByPaymentID(ctx context.Context, paymentID string) (*domain.Dispute, error)

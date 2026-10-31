@@ -1,7 +1,7 @@
 # Disputes & Chargebacks — Documentación técnico-funcional
 
 > **Bounded Context:** `context/dispute`
-> **Migración:** [`000012_dispute_init`](../../migrations/000012_dispute_init.up.sql)
+> **Migraciones:** [`000012_dispute_init`](../../migrations/000012_dispute_init.up.sql), versión para concurrencia optimista en [`000042_dispute_version`](../../migrations/000042_dispute_version.up.sql)
 > **Stream NATS:** `DISPUTE` (`dispute.>`)
 
 ---
@@ -115,7 +115,8 @@ Archivo: [domain/dispute.go](../../context/dispute/domain/dispute.go)
 |---|---|
 | `id`, `tenantID` | UUIDs; `tenantID` es el del pago disputado. `ReconstituteDispute` no revalida. |
 | `paymentID` | Referencia TEXT al pago disputado (sin FK: la tabla es de otro BC). `NewDispute` recibe el `PaymentRef` leído por `PaymentReader` y valida: estado `captured` (`ErrPaymentNotCaptured`), monto disputado ≤ capturado (`ErrAmountExceedsPayment`) y misma moneda (`ErrCurrencyMismatch`). La disputa es **siempre del tenant dueño del pago** (`payment.TenantID`; sin tenant válido → error): abrirla es del operador, cuyo tenant no interviene. |
-| `capturedAmount`, `version` | Monto capturado al abrir y versión para concurrencia optimista. **Ninguno se persiste** (no hay columnas): al reconstituir, `capturedAmount = amount` y `version = 1` (§10). |
+| `capturedAmount` | Monto capturado al abrir. **No se persiste**: al reconstituir, `capturedAmount = amount` (§10). |
+| `version` | Concurrencia optimista: nace en 1, cada transición la incrementa una vez y `Update` exige la leída (§9). |
 | `pspReference` | ID de la disputa en el PSP/banco. Opcional. |
 | `amount`, `currency` | Monto disputado en centavos (> 0 en `NewDispute`). |
 | `reason` | `DisputeReason` (ver §4.4). |
@@ -183,7 +184,7 @@ Archivo: [domain/errors.go](../../context/dispute/domain/errors.go)
 | `ErrPaymentNotCaptured` | El pago no está `captured` | 400 |
 | `ErrPaymentNotFound` | El pago a disputar no existe | 404 |
 | `ErrAmountExceedsPayment`, `ErrCurrencyMismatch`, `ErrInvalidDeadline`, `ErrInvalidEvidenceType` | Monto mayor al capturado, otra moneda, deadline vencido, tipo de evidencia desconocido | 400 |
-| `ErrOptimisticLock` | Definido; nunca se produce (§10) | 500 |
+| `ErrOptimisticLock` | Otra transición modificó la disputa entre la lectura y el `UPDATE` | 409 |
 | `ErrInvalidDisputeReason` / `ErrInvalidResolutionOutcome` | Parseo de enums | 400 |
 
 ---
@@ -325,7 +326,7 @@ Body: `{ "outcome": "won" | "lost", "note": "…" }` (`outcome` requerido).
 | Reason/outcome inválido, `ErrPaymentNotCaptured` | 400 con mensaje del dominio |
 | Monto mayor al capturado, moneda distinta, deadline vencido, tipo de evidencia inválido | 400 con mensaje del dominio |
 | Disputa no encontrada (incluye cross-tenant) o pago inexistente | 404 |
-| `ErrDuplicateDispute`, `ErrDisputeAlreadyClosed` | 409 |
+| `ErrDuplicateDispute`, `ErrDisputeAlreadyClosed`, `ErrOptimisticLock` (modificada concurrentemente: reintentar) | 409 |
 | `ErrInvalidTransition`, `ErrDisputeExpired`, `ErrEvidenceRequired` | 422 |
 | Cualquier otro error | 500 `internal server error` |
 
@@ -385,6 +386,7 @@ erDiagram
         timestamptz opened_at
         timestamptz responded_at "nullable"
         timestamptz resolved_at "nullable"
+        bigint version "concurrencia optimista"
     }
     dispute_evidence {
         uuid id PK
@@ -414,7 +416,7 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 | Método | SQL | Notas |
 |---|---|---|
 | `Save` | `INSERT INTO disputes (14 cols)` + INSERT evidencia | Usa la conexión del ctx (tx dentro de `RunInTx`). Strings vacíos → NULL (`nullStr`). Evidencia con `ON CONFLICT (id) DO NOTHING` (re-save idempotente). |
-| `Update` | `UPDATE disputes SET status, response_note, resolved_note, responded_at, resolved_at WHERE id=$1` | No toca `amount`/`deadline`; luego re-inserta toda la evidencia. Sin control de concurrencia: el comentario del puerto promete un `WHERE version` que no existe (§10). |
+| `Update` | `UPDATE disputes SET status, response_note, resolved_note, responded_at, resolved_at, version=<nueva> WHERE id=$1 AND version=<leída>` | 0 filas → `ErrOptimisticLock` (otra transición ganó). No toca `amount`/`deadline`; luego re-inserta toda la evidencia. |
 | `ListAll` | `WHERE [status=$1] ORDER BY opened_at DESC LIMIT $n` | Todos los tenants, pool directo. **No lo usa ningún caso de uso ni ruta.** |
 | `FindByID` / `FindByPaymentID` | `baseSelect WHERE id/payment_id=$1` | Conexión del ctx; los casos de uso los llaman fuera de tx (pool). `pgx.ErrNoRows` → `ErrDisputeNotFound`. |
 | `PaymentReader.FindPayment` | `SELECT id, tenant_id, status, amount, currency FROM payments WHERE id=$1` | Pool directo, sin sesión RLS: con el rol actual (`BYPASSRLS`) ve pagos de cualquier tenant. |
@@ -426,6 +428,7 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 ## 9. Seguridad y multi-tenancy
 
+- **Concurrencia optimista**: cada transición incrementa `version` y el `UPDATE` exige la leída. De dos transiciones concurrentes (contestar y aceptar, resolver dos veces, aceptar justo cuando el poller la vence) gana una: la otra recibe `ErrOptimisticLock` (409) y no publica evento. El poller saltea en silencio la disputa que cambió mientras tanto.
 - **Tenant-scoping en aplicación**: `Contest`, `Accept` y `Get` comparan `dispute.TenantID()`
   con el del JWT y responden 404 ante mismatch (no revelan existencia).
 - **RLS**: la política de `disputes` no tiene `NULLIF` ni política de operador; `dispute_evidence` no tiene RLS. Las lecturas, el poller y `PaymentReader` van por pool directo: todo funciona porque el rol de la app tiene `BYPASSRLS` (§10).
@@ -440,14 +443,13 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Concurrencia optimista declarada pero inexistente | El puerto, el dominio (`version`) y `ErrOptimisticLock` describen un `UPDATE … WHERE version`, pero la tabla no tiene la columna y `Update` filtra solo por `id`: operaciones concurrentes publican dos `resolved.v1` (last-write-wins). La idempotencia del Ledger evita el doble asiento, no la doble resolución lógica. |
-| 2 | Baja | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`. El caso de uso traduce `ErrDuplicatePaymentKey` a 409, pero el repo nunca lo devuelve: si gana la constraint `UNIQUE(payment_id)`, responde **500**. |
-| 3 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
-| 4 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
-| 5 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
-| 6 | Media | RLS no efectiva | La política de `disputes` no tiene `NULLIF` ni política de operador; `dispute_evidence` no tiene RLS ni `tenant_id`. Lecturas, poller y `PaymentReader` van por pool directo; para abrir disputas bajo RLS, `PaymentReader` necesita además leer `payments` como operador (hoy esa tabla no tiene política de operador). Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
-| 7 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y ninguno se persiste). |
-| 8 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
+| 1 | Baja | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`. El caso de uso traduce `ErrDuplicatePaymentKey` a 409, pero el repo nunca lo devuelve: si gana la constraint `UNIQUE(payment_id)`, responde **500**. |
+| 2 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
+| 3 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
+| 4 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
+| 5 | Media | RLS no efectiva | La política de `disputes` no tiene `NULLIF` ni política de operador; `dispute_evidence` no tiene RLS ni `tenant_id`. Lecturas, poller y `PaymentReader` van por pool directo; para abrir disputas bajo RLS, `PaymentReader` necesita además leer `payments` como operador (hoy esa tabla no tiene política de operador). Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
+| 6 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
+| 7 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
 
 ---
 
@@ -458,14 +460,14 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 | Dominio | `domain/dispute_test.go`, `events_test.go`, `vo_test.go` | Unitarios: creación y validaciones (tenant del pago, `deadline` en el evento de apertura), cada transición de la FSM, deadline/`ErrDisputeExpired`, evidencia requerida, `IsOverdue`, `IsFinal`, parseo de enums/IDs, reconstitución, eventos registrados. |
 | Aplicación | `application/use_cases_test.go`, `expiry_poller_test.go` (+ `mocks_test.go`) | Fakes en memoria de repo/tx/publisher/clock: happy paths, duplicados, cross-tenant, outcomes inválidos, límites de `limit`, mapper `toView`, ciclo del poller (expira, publica, tolera errores) y cancelación de contexto. |
 | HTTP inbound | `inbound/http/handler_test.go` | Gin + `httptest`: códigos 201/204/400/404/409/422, `RegisterRoutes`, el guard de cada ruta (403; pánico si falta alguno) y el mapeo de cada error de dominio. |
-| Postgres outbound | `outbound/postgres/dispute_repo_test.go` | **pgxmock v4**: SQL exacto de Save/Update/finds/ListByTenant/ListOverdue, scan de evidencia, errores de scan/save, `nullStr`. |
+| Postgres outbound | `outbound/postgres/dispute_repo_test.go`, `integration_test.go` | **pgxmock v4**: SQL exacto de Save/Update (incluido el `WHERE version` y 0 filas → `ErrOptimisticLock`)/finds/ListByTenant/ListOverdue, scan de evidencia, `PaymentReader`, errores de scan/save, `nullStr`. Integración contra PostgreSQL: concurrencia optimista. |
 | Ledger (consumidor) | `context/ledger/.../nats/dispute_consumer_test.go` | Asientos generados por `dispute.opened.v1` / `dispute.resolved.v1` según outcome. |
 
 ```bash
 go test ./context/dispute/... ./context/ledger/infrastructure/adapters/inbound/nats/...
 ```
 
-No hay tests de integración contra PostgreSQL real (todo pgxmock) ni contra NATS.
+`outbound/postgres/integration_test.go` corre contra PostgreSQL (`DATABASE_URL`; se salta si no hay DB): 8 transiciones concurrentes desde la misma versión (gana una) y una foto vieja que ya no escribe. No hay tests contra NATS.
 
 ---
 

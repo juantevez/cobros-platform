@@ -201,7 +201,8 @@ func respondError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrPaymentNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrDuplicateDispute),
-		errors.Is(err, domain.ErrDisputeAlreadyClosed):
+		errors.Is(err, domain.ErrDisputeAlreadyClosed),
+		errors.Is(err, domain.ErrOptimisticLock):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidTransition),
 		errors.Is(err, domain.ErrDisputeExpired),

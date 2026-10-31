@@ -363,6 +363,12 @@ func (p *ExpiryPoller) runCycle(ctx context.Context) {
 			}
 			return p.publisher.Publish(ctx, d.PullEvents()...)
 		}); err != nil {
+			if errors.Is(err, domain.ErrOptimisticLock) {
+				// El comercio la contestó o aceptó mientras tanto: no vence.
+				p.logger.Info("dispute expiry poller: dispute changed concurrently, skipped",
+					"dispute_id", d.ID())
+				continue
+			}
 			p.logger.Error("dispute expiry poller: expire dispute",
 				"dispute_id", d.ID(), "error", err)
 		}

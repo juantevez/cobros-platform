@@ -2,8 +2,10 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +83,19 @@ func TestExpiryPoller_runCycle(t *testing.T) {
 		poller.runCycle(context.Background())
 		if len(r.updated) != 0 {
 			t.Error("accepted dispute should be skipped, not updated")
+		}
+	})
+
+	// El comercio aceptó o contestó justo al vencer: no es un error.
+	t.Run("dispute changed concurrently is skipped without error log", func(t *testing.T) {
+		r := newRepo()
+		r.overdue = []*domain.Dispute{overdueDispute()}
+		r.updateErr = fmt.Errorf("dispute repo: update: %w", domain.ErrOptimisticLock)
+		var logs strings.Builder
+		pub := &fakePublisher{}
+		NewExpiryPoller(r, fakeTx{}, pub, newClock(), slog.New(slog.NewTextHandler(&logs, nil))).runCycle(context.Background())
+		if strings.Contains(logs.String(), "level=ERROR") || len(pub.published) != 0 {
+			t.Errorf("logs = %s published = %d", logs.String(), len(pub.published))
 		}
 	})
 
