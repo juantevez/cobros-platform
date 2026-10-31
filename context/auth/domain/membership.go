@@ -93,6 +93,9 @@ const (
 	ActionRefundPayment  Action = "payments:refund" // devuelve dinero: solo admin
 	ActionReadReports    Action = "reports:read"
 	ActionManageWebhooks Action = "webhooks:manage"
+	// ActionManageDisputes: contestar o aceptar una disputa. Aceptarla entrega
+	// el monto disputado: solo admin, como el reembolso.
+	ActionManageDisputes Action = "disputes:manage"
 )
 
 type permissionSet []Action
@@ -117,6 +120,7 @@ var rolePermissions = map[Role]permissionSet{
 		ActionRefundPayment,
 		ActionReadReports,
 		ActionManageWebhooks,
+		ActionManageDisputes,
 	},
 	RoleOperator: {
 		ActionCreatePayment,

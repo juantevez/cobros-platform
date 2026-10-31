@@ -215,14 +215,32 @@ func respondError(c *gin.Context, err error) {
 	}
 }
 
-func RegisterRoutes(rg *gin.RouterGroup, h *DisputeHandler) {
+// RouteGuards autoriza cada operación. Se inyectan desde el composition root
+// para no acoplar este contexto con Auth:
+//   - Operator: abrir la disputa y registrar el fallo del banco son acciones
+//     del operador de plataforma (RequireRole(platform_support)). Abrir
+//     congela fondos del comercio.
+//   - Manage: contestar o aceptar (RequirePermission(disputes:manage)).
+//     Aceptar entrega el monto disputado.
+//   - Read: consultar (RequirePermission(payments:read)).
+type RouteGuards struct {
+	Operator gin.HandlerFunc
+	Manage   gin.HandlerFunc
+	Read     gin.HandlerFunc
+}
+
+func RegisterRoutes(rg *gin.RouterGroup, h *DisputeHandler, guards RouteGuards) {
+	if guards.Operator == nil || guards.Manage == nil || guards.Read == nil {
+		panic("dispute: RegisterRoutes requires Operator, Manage and Read guards")
+	}
+
 	d := rg.Group("/disputes")
 	{
-		d.POST("", h.Open)
-		d.GET("", h.List)
-		d.GET("/:disputeID", h.Get)
-		d.POST("/:disputeID/contest", h.Contest)
-		d.POST("/:disputeID/accept", h.Accept)
-		d.POST("/:disputeID/resolve", h.Resolve)
+		d.POST("", guards.Operator, h.Open)
+		d.GET("", guards.Read, h.List)
+		d.GET("/:disputeID", guards.Read, h.Get)
+		d.POST("/:disputeID/contest", guards.Manage, h.Contest)
+		d.POST("/:disputeID/accept", guards.Manage, h.Accept)
+		d.POST("/:disputeID/resolve", guards.Operator, h.Resolve)
 	}
 }

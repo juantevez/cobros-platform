@@ -363,7 +363,11 @@ func main() {
 
 	disputehttp.RegisterRoutes(protected, disputehttp.NewDisputeHandler(
 		openDispute, contestDisp, acceptDisp, resolveDisp, getDisp, listDisp,
-	))
+	), disputehttp.RouteGuards{
+		Operator: authttp.RequireRole(authdomain.RolePlatformSupport),
+		Manage:   authttp.RequirePermission(authdomain.ActionManageDisputes, authdomain.ScopePaymentsWrite),
+		Read:     authttp.RequirePermission(authdomain.ActionReadPayments, authdomain.ScopePaymentsRead, authdomain.ScopePaymentsWrite),
+	})
 
 	// ── Dashboard & Reporting ─────────────────────────────────────────────────
 	// Read-model CQRS: solo lecturas agregadas. La proyección de eventos ocurre

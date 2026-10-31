@@ -360,12 +360,68 @@ func TestRegisterRoutes(t *testing.T) {
 		c.Request = c.Request.WithContext(postgres.WithTenantID(c.Request.Context(), tid.String()))
 		c.Next()
 	})
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(r))
+	allow := func(c *gin.Context) { c.Next() }
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(r), RouteGuards{Operator: allow, Manage: allow, Read: allow})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/disputes", nil)
 	engine.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/disputes status = %d, want 200", rec.Code)
+	}
+}
+
+// Cada ruta pasa por su guard antes del handler: abrir y resolver son del
+// operador de plataforma; contestar y aceptar, de quien gestiona disputas.
+func TestRegisterRoutes_Guards(t *testing.T) {
+	var hit []string
+	deny := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			hit = append(hit, name)
+			c.AbortWithStatus(http.StatusForbidden)
+		}
+	}
+	engine := gin.New()
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(newRepo()), RouteGuards{
+		Operator: deny("operator"), Manage: deny("manage"), Read: deny("read"),
+	})
+
+	id := uuid.NewString()
+	cases := []struct{ method, path, guard string }{
+		{http.MethodPost, "/api/v1/disputes", "operator"},
+		{http.MethodPost, "/api/v1/disputes/" + id + "/resolve", "operator"},
+		{http.MethodPost, "/api/v1/disputes/" + id + "/contest", "manage"},
+		{http.MethodPost, "/api/v1/disputes/" + id + "/accept", "manage"},
+		{http.MethodGet, "/api/v1/disputes", "read"},
+		{http.MethodGet, "/api/v1/disputes/" + id, "read"},
+	}
+	for _, tc := range cases {
+		hit = nil
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusForbidden || len(hit) != 1 || hit[0] != tc.guard {
+			t.Errorf("%s %s: status = %d guards = %v, want 403 from %s", tc.method, tc.path, rec.Code, hit, tc.guard)
+		}
+	}
+	if got := len(engine.Routes()); got != len(cases) {
+		t.Errorf("routes = %d, want %d", got, len(cases))
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	allow := func(c *gin.Context) { c.Next() }
+	for name, g := range map[string]RouteGuards{
+		"operator": {Manage: allow, Read: allow},
+		"manage":   {Operator: allow, Read: allow},
+		"read":     {Operator: allow, Manage: allow},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("missing %s guard: expected panic", name)
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/"), newHandler(newRepo()), g)
+		}()
 	}
 }
