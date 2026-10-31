@@ -29,6 +29,7 @@ eventual, ver [LEDGER.md](LEDGER.md) §7).
 | `DisputeRepository` | `postgres.NewDisputeRepository(pool)` | Tablas `disputes` + `dispute_evidence`; una sola disputa por pago (`UNIQUE(payment_id)`). |
 | `EventPublisher` | `outbox.NewEventPublisher[disputedomain.Event]` | Outbox transaccional + relay a JetStream (patrón común a todos los BCs). |
 | `TxManager` | `postgres.NewTxManager(pool)` | Setea `app.current_tenant` → RLS activo en escrituras. |
+| `PaymentReader` | `postgres.NewPaymentReader(pool)` | Lee la fila del pago disputado en `payments` (BC Payment, sin acoplamiento de código): existencia, estado, tenant, monto y moneda. |
 | Notificación del banco | **HTTP manual** (`POST /disputes`) | No existe adaptador PSP ni webhook entrante; el operador carga la disputa a mano. |
 | `Clock` | `realClock{}` (`time.Now().UTC()`) | Inyectado en API y worker. |
 
@@ -42,11 +43,9 @@ Cableado en dos procesos:
 ### Fuera de alcance (hoy)
 
 - Ingesta automática de disputas desde el PSP (webhooks, API de chargebacks).
-- Validación de que el `payment_id` exista y esté `captured` (`ErrPaymentNotCaptured` está definido pero **nunca se usa**).
 - Pre-arbitraje, múltiples rondas de evidencia, fees de chargeback, representación legal.
 - Envío real de evidencia al banco (solo se guarda la referencia externa).
-- Webhooks salientes ni notificaciones al comercio por `dispute.*` (ningún BC suscribe ese stream salvo Ledger).
-- Concurrencia optimista (contest/accept/resolve simultáneos: last-write-wins).
+- Webhooks salientes ni notificaciones al comercio por `dispute.*` (§10).
 
 ---
 
@@ -116,15 +115,16 @@ Archivo: [domain/dispute.go](../../context/dispute/domain/dispute.go)
 | Campo | Notas |
 |---|---|
 | `id`, `tenantID` | UUIDs; `ReconstituteDispute` no revalida. |
-| `paymentID` | Referencia TEXT al pago disputado (**sin FK ni validación**). Obligatorio en `NewDispute`. |
+| `paymentID` | Referencia TEXT al pago disputado (sin FK: la tabla es de otro BC). `NewDispute` recibe el `PaymentRef` leído por `PaymentReader` y valida: estado `captured` (`ErrPaymentNotCaptured`), monto disputado ≤ capturado (`ErrAmountExceedsPayment`) y misma moneda (`ErrCurrencyMismatch`). Si el pago es de otro tenant, **reasigna la disputa al dueño del pago** (§10). |
+| `capturedAmount`, `version` | Monto capturado al abrir y versión para concurrencia optimista. **Ninguno se persiste** (no hay columnas): al reconstituir, `capturedAmount = amount` y `version = 1` (§10). |
 | `pspReference` | ID de la disputa en el PSP/banco. Opcional. |
 | `amount`, `currency` | Monto disputado en centavos (> 0 en `NewDispute`). |
 | `reason` | `DisputeReason` (ver §4.4). |
 | `status` | `DisputeStatus` (ver §4.2). |
 | `evidence []Evidence` | Se acumulan; solo se agregan vía `Contest`. |
 | `responseNote` | Nota del comercio al contestar. |
-| `resolvedNote` | Nota del operador al cerrar (accept/resolve; **no** en expire). |
-| `deadline` | Límite para contestar. Default 7 días si el cmd no lo trae. |
+| `resolvedNote` | Nota al cerrar: la del comercio (accept), la del operador (resolve) o una fija en `Expire`. |
+| `deadline` | Límite para contestar. Default 7 días si el cmd no lo trae; uno ya vencido → `ErrInvalidDeadline`. |
 | `openedAt`, `respondedAt`, `resolvedAt` | Timestamps de ciclo de vida. |
 | `events []Event` | Solo `DisputeOpenedEvent` y `DisputeResolvedEvent`. `Contest` **no** emite evento. |
 
@@ -167,7 +167,7 @@ Archivo: [domain/vo.go](../../context/dispute/domain/vo.go)
 | `DisputeStatus` | `open`, `under_review`, `won`, `lost`, `accepted`, `expired`; `IsFinal()`. |
 | `DisputeReason` | `fraudulent`, `product_not_received`, `product_unacceptable`, `duplicate`, `credit_not_processed`, `general`. `ParseDisputeReason` → `ErrInvalidDisputeReason`. |
 | `ResolutionOutcome` | `won`, `lost`, `accepted`, `expired`. `ParseResolutionOutcome` → `ErrInvalidResolutionOutcome`. `Resolve` solo acepta `won`/`lost`. |
-| `Evidence` | `evidenceType` (`receipt`/`tracking`/`communication`/`other` — **sin validación**), `reference`, `description`, `submittedAt`. |
+| `Evidence` | `evidenceType` (`receipt`/`tracking`/`communication`/`other`, otro → `ErrInvalidEvidenceType`), `reference` (obligatoria), `description`, `submittedAt`. |
 
 ### 4.5 Errores de dominio
 
@@ -181,7 +181,9 @@ Archivo: [domain/errors.go](../../context/dispute/domain/errors.go)
 | `ErrInvalidTransition` | Transición fuera de la FSM | 422 |
 | `ErrDisputeExpired` | `Contest` después del deadline | 422 |
 | `ErrEvidenceRequired` | `Contest` con lista vacía | 422 |
-| `ErrPaymentNotCaptured` | Definido; **nunca se usa** (§10.2) | 400 |
+| `ErrPaymentNotCaptured` | El pago no está `captured` | 400 |
+| `ErrAmountExceedsPayment`, `ErrCurrencyMismatch`, `ErrInvalidDeadline`, `ErrInvalidEvidenceType` | Validaciones de apertura y evidencia | **500** (sin mapear, §10) |
+| `ErrOptimisticLock` | Definido; nunca se produce (§10) | 500 |
 | `ErrInvalidDisputeReason` / `ErrInvalidResolutionOutcome` | Parseo de enums | 400 |
 
 ---
@@ -192,7 +194,7 @@ Archivo: [application/use_cases.go](../../context/dispute/application/use_cases.
 
 | Use case | Puertos | Emite evento | Escritura |
 |---|---|---|---|
-| `OpenDisputeUseCase` | repo, tx, publisher | `dispute.opened.v1` | Save + Publish |
+| `OpenDisputeUseCase` | repo, payments, tx, publisher, clock | `dispute.opened.v1` | Save + Publish |
 | `ContestDisputeUseCase` | repo, tx, clock | — | Update + evidence |
 | `AcceptDisputeUseCase` | repo, tx, publisher | `dispute.resolved.v1 (accepted)` | Update + Publish |
 | `ResolveDisputeUseCase` | repo, tx, publisher | `dispute.resolved.v1 (won/lost)` | Update + Publish |
@@ -203,13 +205,11 @@ Archivo: [application/use_cases.go](../../context/dispute/application/use_cases.
 
 1. Parsea `tenant_id` y `reason` (error si inválidos → 400).
 2. **Idempotencia de negocio**: `FindByPaymentID` → si existe, `ErrDuplicateDispute` (409).
-   La barrera real es `UNIQUE(payment_id)` en BD.
-3. `deadline` cero → `now + 7 días`.
-4. `NewDispute` valida `payment_id` no vacío y `amount > 0`, y registra `DisputeOpenedEvent`.
-5. `RunInTx`: `Save` + `Publish` (outbox). Resultado: `{dispute_id}`.
-
-⚠️ No verifica que el pago exista, esté capturado, ni que el monto disputado sea
-coherente con el neto del pago.
+   La barrera real es `UNIQUE(payment_id)` en BD; si la carrera la gana la constraint, responde 500 (§10).
+3. `PaymentReader.FindPayment`: un pago inexistente devuelve `ErrDisputeNotFound` (404 *dispute not found*, §10).
+4. `deadline` cero → `now + 7 días`.
+5. `NewDispute` valida el pago (§4.1), `amount > 0` y el deadline, y registra `DisputeOpenedEvent`.
+6. `RunInTx`: `Save` + `Publish` (outbox). Resultado: `{dispute_id}`.
 
 ### 5.2 `Contest`
 
@@ -229,7 +229,7 @@ Ambos: cargar → mutar agregado → tx{Update + Publish}. Diferencias:
 
 - `Accept` exige el tenant del caller y solo funciona desde `open`; fija
   `resolvedNote`/`resolvedAt` y emite outcome `accepted`.
-- `Resolve` **no recibe `TenantID` en el comando** (ver §10.1) y solo puede ejecutarse
+- `Resolve` **no recibe `TenantID` en el comando** (§10) y solo puede ejecutarse
   desde `under_review` con outcome `won`/`lost`.
 
 ### 5.4 `ExpiryPoller`
@@ -251,7 +251,7 @@ ciclo continúa. Sin paginación: más de 100 vencidas se atienden en ciclos pos
 Archivo: [inbound/http/handler.go](../../context/dispute/infrastructure/adapters/inbound/http/handler.go)
 
 Rutas bajo `/api/v1/disputes`, grupo `protected` con **solo `JWTMiddleware`** — sin guards
-de permiso ni rol (ver §10.1). El tenant sale del JWT (`postgres.TenantIDFromContext`).
+de permiso ni rol (§10). El tenant sale del JWT (`postgres.TenantIDFromContext`).
 
 | Método | Ruta | Acción | Éxito |
 |---|---|---|---|
@@ -276,7 +276,7 @@ de permiso ni rol (ver §10.1). El tenant sale del JWT (`postgres.TenantIDFromCo
 ```
 
 Requeridos: `payment_id`, `amount ≥ 1` (centavos), `currency`, `reason` (uno de §4.4).
-Opcionales: `psp_reference`, `deadline` (RFC3339; ausente **o inválido** → now+7d).
+Opcionales: `psp_reference`, `deadline` (RFC3339; ausente **o mal formado** → now+7d; en el pasado → error).
 
 ### 6.2 Contestar — `POST /disputes/:disputeID/contest`
 
@@ -316,6 +316,7 @@ Body: `{ "outcome": "won" | "lost", "note": "…" }` (`outcome` requerido).
 |---|---|
 | Body inválido / parseo JSON fallido | 400 `invalid request body` |
 | Reason/outcome inválido, `ErrPaymentNotCaptured` | 400 con mensaje del dominio |
+| Monto mayor al capturado, moneda distinta, deadline vencido, tipo de evidencia inválido | **500** (sin mapear, §10) |
 | No encontrada (incluye cross-tenant) | 404 |
 | `ErrDuplicateDispute`, `ErrDisputeAlreadyClosed` | 409 |
 | `ErrInvalidTransition`, `ErrDisputeExpired`, `ErrEvidenceRequired` | 422 |
@@ -340,9 +341,10 @@ es UUID y sirve de `Nats-Msg-Id` (dedupe de 5 min).
 | Consumer | Proceso | Stream/Filtro | Qué hace |
 |---|---|---|---|
 | `ledger-dispute-consumer` | worker | `DISPUTE` / `dispute.>` | Asientos de hold/liberación (§4.3), idempotente por claves `dispute_opened_*` / `dispute_resolved_*`. `MaxDeliver: 5`. |
+| Reporting | worker | `DISPUTE` | Proyección de disputas en el read-model (ver REPORTING.md). |
+| Audit | worker | `DISPUTE` | Bitácora. |
 
-**Nadie más** consume `dispute.*`: no hay webhook saliente, notificación al comercio,
-proyección en Reporting ni screening de Compliance por disputas (§10.4).
+No hay webhook saliente ni notificación al comercio por `dispute.*`, ni screening de Compliance por tasa de contracargos (§10).
 
 ### 7.3 Este BC no consume eventos de otros
 
@@ -403,8 +405,10 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 | Método | SQL | Notas |
 |---|---|---|
 | `Save` | `INSERT INTO disputes (14 cols)` + INSERT evidencia | Usa la conexión del ctx (tx dentro de `RunInTx`). Strings vacíos → NULL (`nullStr`). Evidencia con `ON CONFLICT (id) DO NOTHING` (re-save idempotente). |
-| `Update` | `UPDATE disputes SET status, response_note, resolved_note, responded_at, resolved_at WHERE id=$1` | No toca `amount`/`deadline`; luego re-inserta toda la evidencia. Sin control de concurrencia. |
-| `FindByID` / `FindByPaymentID` | `baseSelect WHERE id/payment_id=$1` | Viaja por la conexión del ctx: dentro de tx queda filtrada por RLS. `pgx.ErrNoRows` → `ErrDisputeNotFound`. |
+| `Update` | `UPDATE disputes SET status, response_note, resolved_note, responded_at, resolved_at WHERE id=$1` | No toca `amount`/`deadline`; luego re-inserta toda la evidencia. Sin control de concurrencia: el comentario del puerto promete un `WHERE version` que no existe (§10). |
+| `ListAll` | `WHERE [status=$1] ORDER BY opened_at DESC LIMIT $n` | Todos los tenants, pool directo. **No lo usa ningún caso de uso ni ruta.** |
+| `FindByID` / `FindByPaymentID` | `baseSelect WHERE id/payment_id=$1` | Conexión del ctx; los casos de uso los llaman fuera de tx (pool). `pgx.ErrNoRows` → `ErrDisputeNotFound`. |
+| `PaymentReader.FindPayment` | `SELECT id, tenant_id, status, amount, currency FROM payments WHERE id=$1` | Pool directo, sin sesión RLS: con el rol actual (`BYPASSRLS`) ve pagos de cualquier tenant. |
 | `ListByTenant` | `WHERE tenant_id=$1 [AND status=$2] ORDER BY opened_at DESC LIMIT $n` | Corre sobre el **pool directo** (fuera de tx): filtro explícito, no depende de RLS. `statusFilter` no validado (enum desconocido → lista vacía). |
 | `ListOverdue` | `WHERE status='open' AND deadline < $1 ORDER BY deadline ASC LIMIT $2` | Pool directo; usado solo por el poller. |
 | scan | `scanWithEvidence` | Carga la evidencia con una query extra **por fila** (N+1 en listings). `COALESCE` para nullable→string. |
@@ -415,10 +419,8 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 - **Tenant-scoping en aplicación**: `Contest`, `Accept` y `Get` comparan `dispute.TenantID()`
   con el del JWT y responden 404 ante mismatch (no revelan existencia).
-- **Huecos**: `Resolve` opera solo por ID, **sin verificar tenant**; ninguna ruta exige rol
-  aunque la semántica reserva `Open`/`Resolve` al operador de plataforma (§10.1).
-- **RLS**: activa solo en escrituras que corren dentro de `RunInTx` (setea
-  `app.current_tenant`); las lecturas de listado van por pool directo con filtro explícito.
+- **Huecos**: ninguna ruta exige rol ni permiso. `Resolve` opera solo por ID, sin tenant, y `Open` reasigna la disputa al dueño del pago aunque el caller sea otro comercio (§10).
+- **RLS**: la política de `disputes` no tiene `NULLIF` ni política de operador; `dispute_evidence` no tiene RLS. Las lecturas, el poller y `PaymentReader` van por pool directo: todo funciona porque el rol de la app tiene `BYPASSRLS` (§10).
 - **API keys**: el grupo `protected` solo acepta JWT; las disputas no son accesibles
   desde integraciones server-to-server (`X-Api-Key`).
 - **Datos sensibles**: solo referencias externas de evidencia (URLs/IDs); no se almacenan
@@ -428,18 +430,20 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 ## 10. Limitaciones conocidas y deuda técnica
 
-| # | Tema | Detalle | Impacto |
+| # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | **Sin control de roles** | `POST /disputes` (abrir) y `POST /:id/resolve` (fallo del banco) cuelgan de `protected` sin `RequireRole(RolePlatformSupport)`: cualquier usuario de cualquier tenant puede abrir disputas contra pagos ajenos y resolver disputas. `ResolveDisputeCmd` ni siquiera lleva `TenantID`. | **Alto** |
-| 2 | Pago no validado | No se comprueba existencia, estado `captured` ni coherencia del monto; `ErrPaymentNotCaptured` es código muerto. `payment_id` es TEXT sin FK: se puede disputar un pago inexistente. | Alto |
-| 3 | Cross-tenant posible en Open | `PaymentID` no se contrasta con la tabla `payments`; la disputa se atribuye al tenant del caller, no al dueño del pago. | Alto |
-| 4 | Disputas invisibles fuera de Ledger | Sin webhooks, sin notificación al comercio (que desconoce plazos por el canal oficial), sin proyección en Reporting, sin alerta de Compliance por tasa de chargebacks. | Funcional |
-| 5 | Sin concurrencia optimista | `FindByID` fuera de tx + `UPDATE` sin versión: operaciones concurrentes publican dos `resolved.v1` (last-write-wins). La idempotencia del Ledger amortigua el doble asiento, no la doble resolución lógica. | Medio |
-| 6 | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`; si gana la constraint `UNIQUE(payment_id)`, el error genérico se responde **500** en lugar de 409. | Bajo/Medio |
-| 7 | Deadline ignorado silenciosamente | Un `deadline` malformado en el JSON se descarta y aplica now+7d sin error. No se rechaza un deadline en el pasado (la disputa nace expirable). | Bajo |
-| 8 | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; primer ciclo no corre hasta la primera hora; lote fijo de 100 sin paginación. `Expire()` no deja `resolvedNote`. | Bajo |
-| 9 | Evidencia: N+1 y sin validación | `scanWithEvidence` hace 1 query extra por disputa listada; `evidence_type` acepta cualquier string. No hay forma de agregar evidencia en `under_review` (una sola ronda). | Bajo |
-| 10 | Sin vista operatoria global | No hay endpoint multi-tenant para que soporte vea todas las disputas abiertas de la plataforma (el diseño RLS/filtro lo impide). | Funcional |
+| 1 | Alta | Sin control de roles | Las 6 rutas cuelgan de `protected` sin guard. Cualquier usuario de cualquier tenant (incluido `read_only`) puede abrir disputas y registrar el fallo del banco (`Resolve` ni siquiera lleva tenant), y cualquier usuario del tenant puede aceptar una disputa, que entrega el dinero. Abrir y resolver son acciones del operador de plataforma. |
+| 2 | Media | Validación del pago incompleta | `PaymentReader` valida existencia, estado `captured`, monto y moneda, pero: un pago inexistente responde 404 *dispute not found*; `ErrAmountExceedsPayment`, `ErrCurrencyMismatch`, `ErrInvalidDeadline` y `ErrInvalidEvidenceType` no están en `respondError` y dan **500**. |
+| 3 | Alta | Atribución cross-tenant en Open | La disputa se abre con el tenant del caller y `NewDispute` la **reasigna al dueño del pago** si difiere. Con el ítem 1, un comercio que conozca el ID de un pago ajeno abre una disputa que congela fondos de otro comercio (Ledger debita su `merchant_balance`). |
+| 4 | Media | Disputas invisibles para el comercio | Sin webhook ni notificación por `dispute.*`: el comercio no se entera por un canal oficial de que tiene una disputa ni de su plazo, y la pierde por vencimiento. `dispute.opened.v1` tampoco lleva el `deadline`. (Reporting sí proyecta las disputas.) |
+| 5 | Media | Concurrencia optimista declarada pero inexistente | El puerto, el dominio (`version`) y `ErrOptimisticLock` describen un `UPDATE … WHERE version`, pero la tabla no tiene la columna y `Update` filtra solo por `id`: operaciones concurrentes publican dos `resolved.v1` (last-write-wins). La idempotencia del Ledger evita el doble asiento, no la doble resolución lógica. |
+| 6 | Baja | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`. El caso de uso traduce `ErrDuplicatePaymentKey` a 409, pero el repo nunca lo devuelve: si gana la constraint `UNIQUE(payment_id)`, responde **500**. |
+| 7 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
+| 8 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
+| 9 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
+| 10 | Media | RLS no efectiva | La política de `disputes` no tiene `NULLIF` ni política de operador; `dispute_evidence` no tiene RLS ni `tenant_id`. Lecturas, poller y `PaymentReader` van por pool directo. Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
+| 11 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y ninguno se persiste). |
+| 12 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
 
 ---
 
@@ -469,14 +473,15 @@ context/dispute/
 │   ├── dispute.go       # Agregado Dispute: FSM (open→under_review/accepted/expired; under_review→won/lost), IsOverdue, PullEvents
 │   ├── vo.go            # IDs, DisputeStatus, DisputeReason, ResolutionOutcome, Evidence
 │   ├── events.go        # DisputeOpenedEvent, DisputeResolvedEvent (+ baseEvent)
-│   └── errors.go        # 9 errores sentinela
+│   └── errors.go        # errores sentinela
 ├── application/
-│   ├── ports.go         # TxManager, DisputeRepository, EventPublisher, Clock
+│   ├── ports.go         # TxManager, DisputeRepository, PaymentReader, EventPublisher, Clock
 │   ├── commands.go      # Open/Contest/Accept/Resolve cmds, Get/List queries, DisputeView/EvidenceView
 │   └── use_cases.go     # 6 use cases + ExpiryPoller + toView
 └── infrastructure/adapters/
     ├── inbound/http/handler.go             # DisputeHandler + RegisterRoutes (6 rutas) + respondError
-    └── outbound/postgres/dispute_repo.go   # Repository (disputes + dispute_evidence, pgx)
+    ├── outbound/postgres/dispute_repo.go   # Repository (disputes + dispute_evidence, pgx)
+    └── outbound/postgres/payment_reader.go # PaymentRef desde la tabla payments
 
 # Colaboradores fuera del BC:
 context/ledger/infrastructure/adapters/inbound/nats/dispute_consumer.go  # asientos hold/liberación
