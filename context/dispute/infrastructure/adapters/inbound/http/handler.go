@@ -197,7 +197,8 @@ func (h *DisputeHandler) Resolve(c *gin.Context) {
 
 func respondError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, domain.ErrDisputeNotFound):
+	case errors.Is(err, domain.ErrDisputeNotFound),
+		errors.Is(err, domain.ErrPaymentNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrDuplicateDispute),
 		errors.Is(err, domain.ErrDisputeAlreadyClosed):
@@ -208,7 +209,11 @@ func respondError(c *gin.Context, err error) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidDisputeReason),
 		errors.Is(err, domain.ErrInvalidResolutionOutcome),
-		errors.Is(err, domain.ErrPaymentNotCaptured):
+		errors.Is(err, domain.ErrPaymentNotCaptured),
+		errors.Is(err, domain.ErrAmountExceedsPayment),
+		errors.Is(err, domain.ErrCurrencyMismatch),
+		errors.Is(err, domain.ErrInvalidDeadline),
+		errors.Is(err, domain.ErrInvalidEvidenceType):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})

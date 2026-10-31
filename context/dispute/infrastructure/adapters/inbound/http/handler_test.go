@@ -3,6 +3,8 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -423,5 +425,32 @@ func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
 			}()
 			RegisterRoutes(gin.New().Group("/"), newHandler(newRepo()), g)
 		}()
+	}
+}
+
+// Las validaciones de apertura y de evidencia caían en el default (500).
+func TestRespondError(t *testing.T) {
+	cases := []struct {
+		err  error
+		code int
+	}{
+		{domain.ErrDisputeNotFound, http.StatusNotFound},
+		{fmt.Errorf("%w: \"pay-x\"", domain.ErrPaymentNotFound), http.StatusNotFound},
+		{domain.ErrDuplicateDispute, http.StatusConflict},
+		{domain.ErrInvalidTransition, http.StatusUnprocessableEntity},
+		{domain.ErrPaymentNotCaptured, http.StatusBadRequest},
+		{fmt.Errorf("%w: 9000 > 5000", domain.ErrAmountExceedsPayment), http.StatusBadRequest},
+		{fmt.Errorf("%w: USD != ARS", domain.ErrCurrencyMismatch), http.StatusBadRequest},
+		{fmt.Errorf("%w: already passed", domain.ErrInvalidDeadline), http.StatusBadRequest},
+		{fmt.Errorf("%w: \"selfie\"", domain.ErrInvalidEvidenceType), http.StatusBadRequest},
+		{errors.New("boom"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		respondError(c, tc.err)
+		if rec.Code != tc.code {
+			t.Errorf("%v: status = %d, want %d", tc.err, rec.Code, tc.code)
+		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
@@ -396,4 +397,26 @@ func TestNullStr(t *testing.T) {
 	if got := nullStr("x"); got == nil || *got != "x" {
 		t.Errorf("non-empty mapped wrong: %v", got)
 	}
+}
+
+// Un pago inexistente se informaba como ErrDisputeNotFound ("dispute not found").
+func TestPaymentReader_FindPayment(t *testing.T) {
+	t.Run("not found", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectQuery("FROM payments").WithArgs("pay-x").WillReturnError(pgx.ErrNoRows)
+		_, err := NewPaymentReader(mock).FindPayment(context.Background(), "pay-x")
+		if !errors.Is(err, domain.ErrPaymentNotFound) || errors.Is(err, domain.ErrDisputeNotFound) {
+			t.Fatalf("expected ErrPaymentNotFound, got %v", err)
+		}
+	})
+	t.Run("found", func(t *testing.T) {
+		mock := newMock(t)
+		mock.ExpectQuery("FROM payments").WithArgs("pay-1").WillReturnRows(
+			pgxmock.NewRows([]string{"id", "tenant_id", "status", "amount", "currency"}).
+				AddRow("pay-1", "11111111-1111-1111-1111-111111111111", "captured", int64(5000), "ARS"))
+		ref, err := NewPaymentReader(mock).FindPayment(context.Background(), "pay-1")
+		if err != nil || ref.Status != "captured" || ref.Amount != 5000 || ref.Currency != "ARS" {
+			t.Fatalf("ref = %+v, %v", ref, err)
+		}
+	})
 }

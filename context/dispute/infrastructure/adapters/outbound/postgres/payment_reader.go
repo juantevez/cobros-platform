@@ -32,7 +32,7 @@ func (r *paymentReader) FindPayment(ctx context.Context, paymentID string) (doma
 		WHERE id = $1`, paymentID).
 		Scan(&ref.ID, &ref.TenantID, &ref.Status, &ref.Amount, &ref.Currency)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.PaymentRef{}, fmt.Errorf("%w: payment %q", domain.ErrDisputeNotFound, paymentID)
+		return domain.PaymentRef{}, fmt.Errorf("%w: %q", domain.ErrPaymentNotFound, paymentID)
 	}
 	if err != nil {
 		return domain.PaymentRef{}, fmt.Errorf("dispute payment reader: find: %w", err)
