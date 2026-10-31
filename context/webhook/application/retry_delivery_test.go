@@ -16,6 +16,7 @@ type retryDeps struct {
 	endpoints  *fakeEndpointRepo
 	deliveries *fakeDeliveryRepo
 	dispatcher *fakeDispatcher
+	tx         *fakeTx
 	pub        *fakePublisher
 }
 
@@ -26,12 +27,13 @@ func newRetryDeps(seed ...*domain.WebhookDelivery) *retryDeps {
 		endpoints:  newEndpointRepo(e),
 		deliveries: newDeliveryRepo(seed...),
 		dispatcher: &fakeDispatcher{status: 200},
+		tx:         &fakeTx{},
 		pub:        &fakePublisher{},
 	}
 }
 
 func (d *retryDeps) uc() *RetryDeliveryUseCase {
-	return NewRetryDeliveryUseCase(d.endpoints, d.deliveries, d.dispatcher, d.pub, fixedClock{testNow})
+	return NewRetryDeliveryUseCase(d.endpoints, d.deliveries, d.dispatcher, d.tx, d.pub, fixedClock{testNow})
 }
 
 // seed agrega una delivery del endpoint de los deps al repo.
@@ -100,17 +102,33 @@ func TestRetryDeliveryUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("publish error of exhausted event is ignored", func(t *testing.T) {
+	// Antes el error de publish se descartaba: la delivery quedaba exhausted
+	// sin su evento. Ahora el error sale del RunInTx y la tx se descarta.
+	t.Run("publish error of exhausted event fails the transaction", func(t *testing.T) {
 		d := newRetryDeps()
 		d.dispatcher.status = 503
 		d.pub.err = errBoom
 		del := d.seed(domain.StatusFailed, domain.MaxAttempts-1)
 
-		if err := d.uc().Execute(ctx, RetryDeliveryCmd{TenantID: tenantA, DeliveryID: del.ID().String()}); err != nil {
-			t.Fatalf("publish error should be swallowed, got %v", err)
+		err := d.uc().Execute(ctx, RetryDeliveryCmd{TenantID: tenantA, DeliveryID: del.ID().String()})
+		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "publish delivery events") {
+			t.Fatalf("expected wrapped errBoom, got %v", err)
 		}
-		if d.pub.calls != 1 {
-			t.Errorf("publish calls = %d, want 1", d.pub.calls)
+		if d.pub.calls != 1 || d.tx.calls != 1 {
+			t.Errorf("publish calls = %d tx calls = %d, want 1 and 1", d.pub.calls, d.tx.calls)
+		}
+	})
+
+	t.Run("update and event are persisted in one transaction", func(t *testing.T) {
+		d := newRetryDeps()
+		d.dispatcher.status = 503
+		del := d.seed(domain.StatusFailed, domain.MaxAttempts-1)
+
+		if err := d.uc().Execute(ctx, RetryDeliveryCmd{TenantID: tenantA, DeliveryID: del.ID().String()}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if d.tx.calls != 1 || !d.deliveries.updatedInTx || !d.pub.publishedInTx {
+			t.Errorf("tx calls = %d update in tx = %v publish in tx = %v", d.tx.calls, d.deliveries.updatedInTx, d.pub.publishedInTx)
 		}
 	})
 

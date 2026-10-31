@@ -134,7 +134,7 @@ func newEnv() *env {
 		application.NewListEndpointsUseCase(endpoints),
 		application.NewListDeliveriesUseCase(deliveries),
 		application.NewGetDeliveryUseCase(deliveries),
-		application.NewRetryDeliveryUseCase(endpoints, deliveries, dispatcher, fakePublisher{}, fixedClock{}),
+		application.NewRetryDeliveryUseCase(endpoints, deliveries, dispatcher, fakeTx{}, fakePublisher{}, fixedClock{}),
 	)
 	return &env{endpoints: endpoints, deliveries: deliveries, dispatcher: dispatcher, secretGen: secretGen, h: h}
 }

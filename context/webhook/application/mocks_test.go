@@ -104,9 +104,11 @@ type fakeDeliveryRepo struct {
 	saveErrFor map[domain.EndpointID]error // Save falla sólo para esos endpoints
 	idemErrFor map[domain.EndpointID]error // FindByEventAndEndpoint falla sólo para esos
 	updateErr  error
-	findErr    error
-	listErr    error
-	dueErr     error
+	// updatedInTx: el último Update corrió dentro de fakeTx.RunInTx.
+	updatedInTx bool
+	findErr     error
+	listErr     error
+	dueErr      error
 
 	// capturados para aserciones
 	lastTenant domain.TenantID
@@ -138,6 +140,7 @@ func (r *fakeDeliveryRepo) Update(ctx context.Context, d *domain.WebhookDelivery
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.updates = append(r.updates, d.Status())
+	r.updatedInTx = inFakeTx(ctx)
 	return r.updateErr
 }
 
@@ -251,25 +254,33 @@ type fakeTx struct {
 	err   error
 }
 
+// fakeTxKey marca el contexto que fakeTx le pasa a fn, para que los fakes
+// verifiquen que una escritura ocurrió dentro de la transacción.
+type fakeTxKey struct{}
+
+func inFakeTx(ctx context.Context) bool { return ctx.Value(fakeTxKey{}) != nil }
+
 func (tx *fakeTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
 	tx.calls++
 	if tx.err != nil {
 		return tx.err
 	}
-	return fn(ctx)
+	return fn(context.WithValue(ctx, fakeTxKey{}, true))
 }
 
 type fakePublisher struct {
-	mu     sync.Mutex
-	events []domain.Event
-	calls  int
-	err    error
+	mu            sync.Mutex
+	events        []domain.Event
+	calls         int
+	err           error
+	publishedInTx bool
 }
 
 func (p *fakePublisher) Publish(ctx context.Context, events ...domain.Event) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	p.publishedInTx = inFakeTx(ctx)
 	if p.err != nil {
 		return p.err
 	}

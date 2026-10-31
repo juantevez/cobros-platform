@@ -225,7 +225,7 @@ func main() {
 
 	dispatchEvent := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
 	retryDelivery := webhookapp.NewRetryDeliveryUseCase(
-		endpointRepo, deliveryRepo, httpDispatcher, webhookPub, realClock{},
+		endpointRepo, deliveryRepo, httpDispatcher, postgres.NewTxManager(pool), webhookPub, realClock{},
 	)
 	retryPoller := webhookapp.NewRetryPoller(
 		retryDelivery, deliveryRepo, 5*time.Second,

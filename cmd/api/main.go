@@ -300,7 +300,7 @@ func main() {
 	registerEndpoint := webhookapp.NewRegisterEndpointUseCase(endpointRepo, destinationGuard, secretGen, txManager, webhookPub)
 	deactivateEndpoint := webhookapp.NewDeactivateEndpointUseCase(endpointRepo, txManager, webhookPub)
 	dispatchEvent := webhookapp.NewDispatchEventUseCase(endpointRepo, deliveryRepo)
-	retryDelivery := webhookapp.NewRetryDeliveryUseCase(endpointRepo, deliveryRepo, httpDispatcher, webhookPub, clock)
+	retryDelivery := webhookapp.NewRetryDeliveryUseCase(endpointRepo, deliveryRepo, httpDispatcher, txManager, webhookPub, clock)
 	listEndpoints := webhookapp.NewListEndpointsUseCase(endpointRepo)
 	listDeliveries := webhookapp.NewListDeliveriesUseCase(deliveryRepo)
 	getDelivery := webhookapp.NewGetDeliveryUseCase(deliveryRepo)

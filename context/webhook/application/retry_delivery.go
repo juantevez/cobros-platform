@@ -24,6 +24,7 @@ type RetryDeliveryUseCase struct {
 	endpointRepo EndpointRepository
 	deliveryRepo DeliveryRepository
 	dispatcher   HTTPDispatcher
+	txManager    TxManager
 	publisher    EventPublisher
 	clock        Clock
 }
@@ -32,6 +33,7 @@ func NewRetryDeliveryUseCase(
 	endpointRepo EndpointRepository,
 	deliveryRepo DeliveryRepository,
 	dispatcher HTTPDispatcher,
+	txManager TxManager,
 	publisher EventPublisher,
 	clock Clock,
 ) *RetryDeliveryUseCase {
@@ -39,6 +41,7 @@ func NewRetryDeliveryUseCase(
 		endpointRepo: endpointRepo,
 		deliveryRepo: deliveryRepo,
 		dispatcher:   dispatcher,
+		txManager:    txManager,
 		publisher:    publisher,
 		clock:        clock,
 	}
@@ -86,16 +89,21 @@ func (uc *RetryDeliveryUseCase) dispatch(ctx context.Context, delivery *domain.W
 	now := uc.clock.Now()
 	_ = delivery.RecordAttempt(attempt, now)
 
-	if err := uc.deliveryRepo.Update(ctx, delivery); err != nil {
-		return fmt.Errorf("update delivery: %w", err)
-	}
-
-	// Publicar DeliveryExhaustedEvent si se agotaron los reintentos.
-	if evs := delivery.PullEvents(); len(evs) > 0 {
-		_ = uc.publisher.Publish(ctx, evs...)
-	}
-
-	return nil
+	// Estado, intento y DeliveryExhaustedEvent se guardan juntos: si algo
+	// falla no queda una delivery agotada sin su evento ni un estado sin el
+	// intento que lo explica. La delivery sigue como estaba en la base y el
+	// poller la vuelve a despachar (at-least-once).
+	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.deliveryRepo.Update(ctx, delivery); err != nil {
+			return fmt.Errorf("update delivery: %w", err)
+		}
+		if evs := delivery.PullEvents(); len(evs) > 0 {
+			if err := uc.publisher.Publish(ctx, evs...); err != nil {
+				return fmt.Errorf("publish delivery events: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // ── RetryPoller ───────────────────────────────────────────────────────────────
