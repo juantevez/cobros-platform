@@ -3,7 +3,6 @@ package fees
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/juantevez/cobros-platform/context/payment/domain"
 )
@@ -39,14 +38,5 @@ func (c *FixedRateCalculator) Calculate(
 		fee = 1
 	}
 
-	m := domain.ReconstituteMoney(fee, amount.Currency())
-	if m.IsZero() {
-		return domain.ReconstituteMoney(0, amount.Currency()), nil
-	}
-
-	result := domain.ReconstituteMoney(fee, amount.Currency())
-	_ = fmt.Sprintf("fee calc: %d bps of %s = %d %s",
-		c.RateBps, amount, fee, amount.Currency())
-
-	return result, nil
+	return domain.ReconstituteMoney(fee, amount.Currency()), nil
 }

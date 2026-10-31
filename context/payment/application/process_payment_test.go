@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -263,6 +264,36 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	// Dos ejecuciones del mismo pago en initiated lo rechazaban por riesgo
+	// dos veces (dos payment.failed.v1). La que pierde no publica.
+	t.Run("concurrent risk rejection does not publish a second event", func(t *testing.T) {
+		d := newProcessDeps()
+		d.risk.decision = RiskDecision{Approved: false, Reason: "score too high"}
+		d.repo.changed = true
+		rejected := buildPayment(tenantA, domain.StatusRiskRejected)
+		d.repo.findByIDHook = func(domain.PaymentID) *domain.Payment { return rejected }
+
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); !errors.Is(err, domain.ErrRiskRejected) {
+			t.Fatalf("expected ErrRiskRejected, got %v", err)
+		}
+		if len(d.pub.events) != 0 {
+			t.Errorf("events = %v, want none from the loser", d.pub.eventTypes())
+		}
+	})
+
+	t.Run("risk rejection that lost to a processing execution reports the current state", func(t *testing.T) {
+		d := newProcessDeps()
+		d.risk.decision = RiskDecision{Approved: false, Reason: "score too high"}
+		d.repo.changed = true
+		captured := buildPayment(tenantA, domain.StatusCaptured)
+		d.repo.findByIDHook = func(domain.PaymentID) *domain.Payment { return captured }
+
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil || res.Status != "captured" {
+			t.Fatalf("res = %+v err = %v, want the captured payment", res, err)
+		}
+	})
+
 	t.Run("risk rejection persist error is wrapped", func(t *testing.T) {
 		d := newProcessDeps()
 		d.risk.decision = RiskDecision{Approved: false, Reason: "velocity"}
@@ -333,7 +364,7 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 
 	t.Run("psp rejection fails payment and publishes failed event", func(t *testing.T) {
 		d := newProcessDeps()
-		d.psp.captureErr = errors.New("card declined")
+		d.psp.captureErr = fmt.Errorf("%w: card declined", ErrPSPDeclined)
 
 		res, err := d.uc().Execute(ctx, validProcessCmd())
 		if !errors.Is(err, domain.ErrPaymentDeclined) || !errors.Is(err, d.psp.captureErr) {
@@ -345,8 +376,13 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 
 		p := d.repo.saved[0]
-		if p.Status() != domain.StatusFailed || p.FailureReason() != "card declined" || p.PSPName() != "fakepsp" {
+		// El motivo público es genérico: el error del PSP (que puede traer
+		// datos de la tarjeta) va al email y al webhook del comercio.
+		if p.Status() != domain.StatusFailed || p.FailureReason() != domain.FailureDeclinedByPSP || p.PSPName() != "fakepsp" {
 			t.Errorf("payment not failed: status=%q reason=%q psp=%q", p.Status(), p.FailureReason(), p.PSPName())
+		}
+		if !strings.Contains(p.PSPFailureDetail(), "card declined") {
+			t.Errorf("psp failure detail = %q", p.PSPFailureDetail())
 		}
 		wantUpdates := []domain.PaymentStatus{domain.StatusProcessing, domain.StatusFailed}
 		if !reflect.DeepEqual(d.repo.updates, wantUpdates) {
@@ -357,9 +393,87 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	// Un timeout o error de red no es un rechazo: el PSP pudo haber capturado.
+	// Antes el pago quedaba failed y el pagador cobrado sin pago registrado.
+	for _, pspErr := range []error{context.DeadlineExceeded, errors.New("connection reset by peer")} {
+		t.Run("unknown psp outcome leaves the payment processing: "+pspErr.Error(), func(t *testing.T) {
+			d := newProcessDeps()
+			d.psp.captureErr = pspErr
+
+			res, err := d.uc().Execute(ctx, validProcessCmd())
+			if !errors.Is(err, domain.ErrPaymentPending) || errors.Is(err, domain.ErrPaymentDeclined) {
+				t.Fatalf("expected ErrPaymentPending, got %v", err)
+			}
+			p := d.repo.saved[0]
+			if p.Status() != domain.StatusProcessing || res.Status != domain.StatusProcessing.String() || res.PaymentID != p.ID().String() {
+				t.Errorf("payment = %q result = %+v, want processing", p.Status(), res)
+			}
+			// Solo el claim: ningún Update final ni evento.
+			if !reflect.DeepEqual(d.repo.updates, []domain.PaymentStatus{domain.StatusProcessing}) || len(d.pub.eventTypes()) != 0 {
+				t.Errorf("updates = %v events = %v", d.repo.updates, d.pub.eventTypes())
+			}
+		})
+	}
+
+	// El recuperador lo capturó mientras el PSP respondía: el Update
+	// condicional falla y se informa el estado que quedó, sin error.
+	t.Run("capture resolved meanwhile by the recoverer returns the current state", func(t *testing.T) {
+		d := newProcessDeps()
+		d.repo.changed = true
+		d.repo.byID = map[domain.PaymentID]*domain.Payment{}
+		resolved := buildPayment(tenantA, domain.StatusCaptured)
+		d.repo.findByIDHook = func(id domain.PaymentID) *domain.Payment { return resolved }
+
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil || res.Status != domain.StatusCaptured.String() {
+			t.Fatalf("res = %+v err = %v, want captured without error", res, err)
+		}
+	})
+
+	t.Run("final transitions are conditional on their starting status", func(t *testing.T) {
+		d := newProcessDeps()
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(d.repo.froms, []domain.PaymentStatus{domain.StatusProcessing}) {
+			t.Errorf("capture update from = %v, want [processing]", d.repo.froms)
+		}
+		// La comisión se fija en el claim (el recuperador la reusa).
+		if d.repo.saved[0].PlatformFee().Amount() != 300 {
+			t.Errorf("platform fee = %d", d.repo.saved[0].PlatformFee().Amount())
+		}
+	})
+
+	// Una comisión de Billing que deja el neto ≤ 0 no llega al PSP: el pago
+	// queda initiated (un reintento lo retoma cuando se corrija el plan).
+	t.Run("platform fee not below the amount aborts before the PSP", func(t *testing.T) {
+		d := newProcessDeps()
+		d.fees.fee = 10_000
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); !errors.Is(err, domain.ErrInvalidFee) {
+			t.Fatalf("expected ErrInvalidFee, got %v", err)
+		}
+		if len(d.psp.captures) != 0 || d.repo.saved[0].Status() != domain.StatusInitiated {
+			t.Errorf("captures = %d status = %q", len(d.psp.captures), d.repo.saved[0].Status())
+		}
+	})
+
+	// El PSP informó una comisión imposible: el pago queda processing (el
+	// recuperador lo reporta en cada ciclo) y no se publica una captura que
+	// Ledger rechazaría.
+	t.Run("absurd psp fee leaves the payment processing without events", func(t *testing.T) {
+		d := newProcessDeps()
+		d.psp.captureResult.PSPFee = 9_800
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); !errors.Is(err, domain.ErrInvalidFee) {
+			t.Fatalf("expected ErrInvalidFee, got %v", err)
+		}
+		if d.repo.saved[0].Status() != domain.StatusProcessing || len(d.pub.events) != 0 {
+			t.Errorf("status = %q events = %v", d.repo.saved[0].Status(), d.pub.eventTypes())
+		}
+	})
+
 	t.Run("psp rejection persist error is wrapped", func(t *testing.T) {
 		d := newProcessDeps()
-		d.psp.captureErr = errors.New("card declined")
+		d.psp.captureErr = fmt.Errorf("%w: card declined", ErrPSPDeclined)
 		d.repo.updateErr = errBoom
 		d.repo.updateErrAt = 2
 
@@ -453,9 +567,7 @@ func TestProcessPayment_ResumesInitiatedPayment(t *testing.T) {
 		stuck := buildPayment(tenantA, domain.StatusInitiated)
 		d.repo.byKey = stuck
 
-		cmd := validProcessCmd()
-		cmd.Amount = 99_999 // un reintento con otro monto no altera el pago existente
-		res, err := d.uc().Execute(ctx, cmd)
+		res, err := d.uc().Execute(ctx, validProcessCmd())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -474,6 +586,46 @@ func TestProcessPayment_ResumesInitiatedPayment(t *testing.T) {
 		}
 		if got := d.pub.eventTypes(); !reflect.DeepEqual(got, []string{"payment.captured.v1"}) {
 			t.Errorf("events = %v", got)
+		}
+	})
+
+	// Reusar la clave con otros datos es un error del cliente, no un
+	// reintento: antes devolvía el pago original sin avisar.
+	for name, mutate := range map[string]func(*ProcessPaymentCmd){
+		"other amount":   func(c *ProcessPaymentCmd) { c.Amount = 99_999 },
+		"other currency": func(c *ProcessPaymentCmd) { c.Currency = "USD" },
+		"other method":   func(c *ProcessPaymentCmd) { c.PaymentMethod = "wallet" },
+	} {
+		for _, status := range []domain.PaymentStatus{domain.StatusInitiated, domain.StatusCaptured} {
+			t.Run("key reused with "+name+" on a "+status.String()+" payment is a conflict", func(t *testing.T) {
+				d := newProcessDeps()
+				d.repo.byKey = buildPayment(tenantA, status)
+				cmd := validProcessCmd()
+				mutate(&cmd)
+				if _, err := d.uc().Execute(ctx, cmd); !errors.Is(err, domain.ErrIdempotencyKeyConflict) {
+					t.Fatalf("expected ErrIdempotencyKeyConflict, got %v", err)
+				}
+				if len(d.psp.captures) != 0 || len(d.repo.updates) != 0 {
+					t.Error("a conflicting request must not process anything")
+				}
+			})
+		}
+	}
+
+	// Dos requests con la misma clave pasan el chequeo; el segundo choca con
+	// la constraint al guardar. Antes respondía 500.
+	t.Run("concurrent request with the same key returns the winner", func(t *testing.T) {
+		d := newProcessDeps()
+		winner := buildPayment(tenantA, domain.StatusProcessing)
+		d.repo.saveErr = fmt.Errorf("payment repo: save: %w", domain.ErrPaymentAlreadyExists)
+		d.repo.byKeyAfterSave = winner
+
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil || res.PaymentID != winner.ID().String() || !res.WasExisting || res.Status != "processing" {
+			t.Fatalf("res = %+v err = %v, want the winner as existing", res, err)
+		}
+		if len(d.psp.captures) != 0 {
+			t.Error("the loser must not call the PSP")
 		}
 	})
 

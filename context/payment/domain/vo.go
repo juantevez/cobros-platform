@@ -16,14 +16,14 @@ func NewPaymentID() PaymentID { return PaymentID(uuid.NewString()) }
 
 func ParsePaymentID(s string) (PaymentID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid payment id: %w", err)
+		return "", fmt.Errorf("%w: invalid payment id: %v", ErrInvalidID, err)
 	}
 	return PaymentID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: invalid tenant id: %v", ErrInvalidID, err)
 	}
 	return TenantID(s), nil
 }
@@ -99,15 +99,6 @@ func (m Money) Amount() int64    { return m.amount }
 func (m Money) Currency() string { return m.currency }
 func (m Money) IsZero() bool     { return m.amount == 0 }
 
-func (m Money) Sub(other Money) (Money, error) {
-	if m.currency != other.currency {
-		return Money{}, fmt.Errorf("cannot subtract money with different currencies")
-	}
-	if other.amount > m.amount {
-		return Money{}, ErrRefundExceedsAmount
-	}
-	return Money{amount: m.amount - other.amount, currency: m.currency}, nil
-}
 
 func (m Money) String() string { return fmt.Sprintf("%d %s", m.amount, m.currency) }
 

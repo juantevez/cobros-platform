@@ -178,6 +178,62 @@ func TestRefundPaymentUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	// La referencia del reembolso no se persistía: solo viajaba en el evento.
+	t.Run("refund reference and date are recorded on the payment", func(t *testing.T) {
+		p := buildPayment(tenantA, domain.StatusCaptured)
+		d := newRefundDeps(p)
+		if _, err := d.uc().Execute(ctx, RefundPaymentCmd{TenantID: tenantA, PaymentID: p.ID().String()}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.RefundPSPReference() != "REFUND-REF-1" || p.RefundedAt() == nil {
+			t.Errorf("refund ref = %q at = %v", p.RefundPSPReference(), p.RefundedAt())
+		}
+		if !reflect.DeepEqual(d.repo.froms, []domain.PaymentStatus{domain.StatusCaptured}) {
+			t.Errorf("update from = %v, want [captured]", d.repo.froms)
+		}
+	})
+
+	// Dos reembolsos concurrentes: el que pierde no publica otro
+	// payment.refunded.v1 e informa el pago ya reembolsado.
+	t.Run("concurrent refund that lost reports the refunded payment", func(t *testing.T) {
+		p := buildPayment(tenantA, domain.StatusCaptured)
+		d := newRefundDeps(p)
+		d.repo.changed = true
+		refunded := buildPayment(tenantA, domain.StatusCaptured)
+		_ = refunded.Refund("REFUND-WINNER")
+		refunded.PullEvents()
+		d.repo.findByIDHook = func(id domain.PaymentID) *domain.Payment {
+			if len(d.repo.updates) == 0 {
+				return p
+			}
+			return refunded
+		}
+
+		res, err := d.uc().Execute(ctx, RefundPaymentCmd{TenantID: tenantA, PaymentID: p.ID().String()})
+		if err != nil || res.Status != "refunded" || res.PSPReference != "REFUND-WINNER" {
+			t.Fatalf("res = %+v err = %v", res, err)
+		}
+		if len(d.pub.events) != 0 {
+			t.Errorf("events = %v, want none from the loser", d.pub.eventTypes())
+		}
+	})
+
+	t.Run("payment changed to something other than refunded is an error", func(t *testing.T) {
+		p := buildPayment(tenantA, domain.StatusCaptured)
+		d := newRefundDeps(p)
+		d.repo.changed = true
+		other := buildPayment(tenantA, domain.StatusCaptured)
+		d.repo.findByIDHook = func(id domain.PaymentID) *domain.Payment {
+			if len(d.repo.updates) == 0 {
+				return p
+			}
+			return other
+		}
+		if _, err := d.uc().Execute(ctx, RefundPaymentCmd{TenantID: tenantA, PaymentID: p.ID().String()}); !errors.Is(err, domain.ErrPaymentChanged) {
+			t.Fatalf("expected ErrPaymentChanged, got %v", err)
+		}
+	})
+
 	t.Run("update error is wrapped", func(t *testing.T) {
 		p := buildPayment(tenantA, domain.StatusCaptured)
 		d := newRefundDeps(p)
@@ -206,6 +262,16 @@ func TestRefundPaymentUseCase_Execute(t *testing.T) {
 
 func TestGetPaymentUseCase_Execute(t *testing.T) {
 	ctx := context.Background()
+
+	t.Run("view exposes the refund reference", func(t *testing.T) {
+		p := buildPayment(tenantA, domain.StatusCaptured)
+		_ = p.Refund("REFUND-9")
+		repo := &fakeRepo{byID: map[domain.PaymentID]*domain.Payment{p.ID(): p}}
+		v, err := NewGetPaymentUseCase(repo).Execute(ctx, GetPaymentQuery{TenantID: tenantA, PaymentID: p.ID().String()})
+		if err != nil || v.RefundPSPReference != "REFUND-9" || v.RefundedAt == nil {
+			t.Fatalf("view = %+v err = %v", v, err)
+		}
+	})
 
 	t.Run("returns full view of tenant's payment", func(t *testing.T) {
 		p := buildPayment(tenantA, domain.StatusCaptured)

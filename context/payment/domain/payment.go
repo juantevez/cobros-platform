@@ -24,10 +24,9 @@ type Payment struct {
 	id             PaymentID
 	tenantID       TenantID
 	idempotencyKey string
-	checkoutID     string // referencia al Checkout (Fase 3); vacío en Fase 2
 	amount         Money
-	platformFee    Money  // calculado al capturar
-	pspFee         Money  // informado por el PSP
+	platformFee    Money // calculado al capturar
+	pspFee         Money // informado por el PSP
 	payerInfo      PayerInfo
 	method         PaymentMethod
 	pspName        string // "mock", "mercadopago", "paypal"
@@ -35,11 +34,16 @@ type Payment struct {
 	status         PaymentStatus
 	failureReason  string
 	metadata       map[string]string
-	authorizedAt   *time.Time
 	capturedAt     *time.Time
 	failedAt       *time.Time
-	createdAt      time.Time
-	updatedAt      time.Time
+	// refundPSPReference y refundedAt: el reembolso en el PSP (vacío/nil si no hubo).
+	refundPSPReference string
+	refundedAt         *time.Time
+	// pspFailureDetail: error crudo del PSP al rechazar. Interno: no se
+	// expone (failureReason es el motivo público).
+	pspFailureDetail string
+	createdAt        time.Time
+	updatedAt        time.Time
 
 	events []Event
 }
@@ -80,7 +84,7 @@ func NewPayment(
 // ReconstitutePayment reconstruye un Payment desde el repositorio.
 func ReconstitutePayment(
 	id PaymentID, tenantID TenantID,
-	idempotencyKey, checkoutID string,
+	idempotencyKey string,
 	amount, platformFee, pspFee Money,
 	payerInfo PayerInfo,
 	method PaymentMethod,
@@ -88,30 +92,40 @@ func ReconstitutePayment(
 	status PaymentStatus,
 	failureReason string,
 	metadata map[string]string,
-	authorizedAt, capturedAt, failedAt *time.Time,
+	capturedAt, failedAt *time.Time,
 	createdAt, updatedAt time.Time,
+	refundPSPReference string, refundedAt *time.Time,
+	pspFailureDetail string,
 ) *Payment {
 	return &Payment{
 		id: id, tenantID: tenantID,
-		idempotencyKey: idempotencyKey, checkoutID: checkoutID,
-		amount: amount, platformFee: platformFee, pspFee: pspFee,
+		idempotencyKey: idempotencyKey,
+		amount:         amount, platformFee: platformFee, pspFee: pspFee,
 		payerInfo: payerInfo, method: method,
 		pspName: pspName, pspReference: pspReference,
 		status: status, failureReason: failureReason,
-		metadata: metadata,
-		authorizedAt: authorizedAt, capturedAt: capturedAt, failedAt: failedAt,
+		metadata:   metadata,
+		capturedAt: capturedAt, failedAt: failedAt,
 		createdAt: createdAt, updatedAt: updatedAt,
+		refundPSPReference: refundPSPReference, refundedAt: refundedAt,
+		pspFailureDetail: pspFailureDetail,
 	}
 }
 
 // ── Transiciones ──────────────────────────────────────────────────────────────
 
-// MarkProcessing indica que el pago fue enviado al PSP.
-func (p *Payment) MarkProcessing() error {
+// MarkProcessing indica que el pago se envía al PSP y fija la comisión de la
+// plataforma calculada para él: se persiste con el claim, así quien resuelva
+// un pago trabado (el recuperador) captura con la misma comisión.
+func (p *Payment) MarkProcessing(platformFee Money) error {
 	if p.status != StatusInitiated {
 		return fmt.Errorf("%w: cannot mark processing from %q", ErrInvalidTransition, p.status)
 	}
+	if err := p.validateFees(platformFee, Money{amount: 0, currency: p.amount.currency}); err != nil {
+		return err
+	}
 	p.status = StatusProcessing
+	p.platformFee = platformFee
 	p.updatedAt = time.Now().UTC()
 	return nil
 }
@@ -121,6 +135,9 @@ func (p *Payment) MarkProcessing() error {
 func (p *Payment) Capture(pspName, pspReference string, platformFee, pspFee Money) error {
 	if p.status != StatusProcessing {
 		return fmt.Errorf("%w: cannot capture from %q", ErrInvalidTransition, p.status)
+	}
+	if err := p.validateFees(platformFee, pspFee); err != nil {
+		return err
 	}
 
 	now := time.Now().UTC()
@@ -168,13 +185,16 @@ func (p *Payment) RejectByRisk(reason string) error {
 		Currency:      p.amount.Currency(),
 		FailureReason: reason,
 		PaymentMethod: p.method.String(),
+		FailureStage:  FailureStageRisk,
 	})
 
 	return nil
 }
 
-// Fail marca el pago como fallido por el PSP.
-func (p *Payment) Fail(pspName, reason string) error {
+// Fail marca el pago como fallido por el PSP. reason es el motivo público
+// (vista, evento, email y webhook al comercio); detail, el error crudo del
+// PSP, que se guarda solo para diagnóstico.
+func (p *Payment) Fail(pspName, reason, detail string) error {
 	if p.status != StatusProcessing {
 		return fmt.Errorf("%w: cannot fail from %q", ErrInvalidTransition, p.status)
 	}
@@ -183,6 +203,7 @@ func (p *Payment) Fail(pspName, reason string) error {
 	p.status = StatusFailed
 	p.pspName = pspName
 	p.failureReason = reason
+	p.pspFailureDetail = detail
 	p.failedAt = &now
 	p.updatedAt = now
 
@@ -194,6 +215,7 @@ func (p *Payment) Fail(pspName, reason string) error {
 		Currency:      p.amount.Currency(),
 		FailureReason: reason,
 		PaymentMethod: p.method.String(),
+		FailureStage:  FailureStagePSP,
 	})
 
 	return nil
@@ -205,8 +227,11 @@ func (p *Payment) Refund(pspReference string) error {
 		return ErrNotCaptured
 	}
 
+	now := time.Now().UTC()
 	p.status = StatusRefunded
-	p.updatedAt = time.Now().UTC()
+	p.refundPSPReference = pspReference
+	p.refundedAt = &now
+	p.updatedAt = now
 
 	p.record(PaymentRefundedEvent{
 		baseEvent:    newBase(p.tenantID.String()),
@@ -220,6 +245,20 @@ func (p *Payment) Refund(pspReference string) error {
 	return nil
 }
 
+// validateFees exige comisiones no negativas que dejen un neto positivo para
+// el comercio: con neto ≤ 0, Ledger rechaza el asiento y el pago quedaría
+// captured sin contabilizar.
+func (p *Payment) validateFees(platformFee, pspFee Money) error {
+	if platformFee.amount < 0 || pspFee.amount < 0 {
+		return fmt.Errorf("%w: platform_fee=%d psp_fee=%d", ErrInvalidFee, platformFee.amount, pspFee.amount)
+	}
+	if platformFee.amount+pspFee.amount >= p.amount.amount {
+		return fmt.Errorf("%w: platform_fee=%d + psp_fee=%d >= amount=%d",
+			ErrInvalidFee, platformFee.amount, pspFee.amount, p.amount.amount)
+	}
+	return nil
+}
+
 // NetAmount retorna el monto neto para el comercio (amount - platformFee - pspFee).
 func (p *Payment) NetAmount() int64 {
 	return p.amount.Amount() - p.platformFee.Amount() - p.pspFee.Amount()
@@ -227,25 +266,26 @@ func (p *Payment) NetAmount() int64 {
 
 // ── Getters ───────────────────────────────────────────────────────────────────
 
-func (p *Payment) ID() PaymentID            { return p.id }
-func (p *Payment) TenantID() TenantID       { return p.tenantID }
-func (p *Payment) IdempotencyKey() string   { return p.idempotencyKey }
-func (p *Payment) CheckoutID() string       { return p.checkoutID }
-func (p *Payment) Amount() Money            { return p.amount }
-func (p *Payment) PlatformFee() Money       { return p.platformFee }
-func (p *Payment) PSPFee() Money            { return p.pspFee }
-func (p *Payment) PayerInfo() PayerInfo     { return p.payerInfo }
-func (p *Payment) Method() PaymentMethod    { return p.method }
-func (p *Payment) PSPName() string          { return p.pspName }
-func (p *Payment) PSPReference() string     { return p.pspReference }
-func (p *Payment) Status() PaymentStatus    { return p.status }
-func (p *Payment) FailureReason() string    { return p.failureReason }
+func (p *Payment) ID() PaymentID               { return p.id }
+func (p *Payment) TenantID() TenantID          { return p.tenantID }
+func (p *Payment) IdempotencyKey() string      { return p.idempotencyKey }
+func (p *Payment) Amount() Money               { return p.amount }
+func (p *Payment) PlatformFee() Money          { return p.platformFee }
+func (p *Payment) PSPFee() Money               { return p.pspFee }
+func (p *Payment) PayerInfo() PayerInfo        { return p.payerInfo }
+func (p *Payment) Method() PaymentMethod       { return p.method }
+func (p *Payment) PSPName() string             { return p.pspName }
+func (p *Payment) PSPReference() string        { return p.pspReference }
+func (p *Payment) Status() PaymentStatus       { return p.status }
+func (p *Payment) FailureReason() string       { return p.failureReason }
 func (p *Payment) Metadata() map[string]string { return p.metadata }
-func (p *Payment) AuthorizedAt() *time.Time { return p.authorizedAt }
-func (p *Payment) CapturedAt() *time.Time   { return p.capturedAt }
-func (p *Payment) FailedAt() *time.Time     { return p.failedAt }
-func (p *Payment) CreatedAt() time.Time     { return p.createdAt }
-func (p *Payment) UpdatedAt() time.Time     { return p.updatedAt }
+func (p *Payment) CapturedAt() *time.Time      { return p.capturedAt }
+func (p *Payment) FailedAt() *time.Time        { return p.failedAt }
+func (p *Payment) CreatedAt() time.Time        { return p.createdAt }
+func (p *Payment) RefundPSPReference() string  { return p.refundPSPReference }
+func (p *Payment) RefundedAt() *time.Time      { return p.refundedAt }
+func (p *Payment) PSPFailureDetail() string    { return p.pspFailureDetail }
+func (p *Payment) UpdatedAt() time.Time        { return p.updatedAt }
 
 func (p *Payment) PullEvents() []Event {
 	evs := p.events

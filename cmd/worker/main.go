@@ -29,6 +29,10 @@ import (
 	notificationemail "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/email"
 	notificationpg "github.com/juantevez/cobros-platform/context/notification/infrastructure/adapters/outbound/postgres"
 	disputeapp "github.com/juantevez/cobros-platform/context/dispute/application"
+	paymentapp "github.com/juantevez/cobros-platform/context/payment/application"
+	paymentdomain "github.com/juantevez/cobros-platform/context/payment/domain"
+	paymentpg "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/postgres"
+	paymentpsp "github.com/juantevez/cobros-platform/context/payment/infrastructure/adapters/outbound/psp"
 	disputedomain "github.com/juantevez/cobros-platform/context/dispute/domain"
 	disputepg "github.com/juantevez/cobros-platform/context/dispute/infrastructure/adapters/outbound/postgres"
 	reportingapp "github.com/juantevez/cobros-platform/context/reporting/application"
@@ -98,6 +102,7 @@ func main() {
 	ledgerPub  := outbox.NewEventPublisher[ledgerdomain.Event](outboxStore)
 	webhookPub  := outbox.NewEventPublisher[webhookdomain.Event](outboxStore)
 	disputePub  := outbox.NewEventPublisher[disputedomain.Event](outboxStore)
+	paymentPub  := outbox.NewEventPublisher[paymentdomain.Event](outboxStore)
 
 	// ── Audit consumers ───────────────────────────────────────────────────────
 
@@ -323,6 +328,21 @@ func main() {
 	go func() {
 		if err := notifConsumer.StartDisputeConsumer(ctx); err != nil {
 			logger.Error("notification dispute consumer stopped", "error", err)
+		}
+	}()
+
+	// ── Payment: recuperador de pagos trabados en processing ─────────────────
+	// Resuelve los pagos cuyo resultado del PSP quedó desconocido (timeout,
+	// red) o cuya captura no se pudo persistir, consultando al PSP.
+
+	paymentRecoverer := paymentapp.NewProcessingRecoverer(
+		paymentpg.NewPaymentRepository(pool), paymentpsp.NewRouter(),
+		postgres.NewTxManager(pool), paymentPub, realClock{},
+		logger.With("component", "payment_recoverer"),
+	)
+	go func() {
+		if err := paymentRecoverer.Start(ctx); err != nil {
+			logger.Error("payment recoverer stopped", "error", err)
 		}
 	}()
 

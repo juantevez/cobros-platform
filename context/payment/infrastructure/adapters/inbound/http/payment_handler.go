@@ -78,6 +78,16 @@ func (h *PaymentHandler) Process(c *gin.Context) {
 		})
 		return
 	}
+	if errors.Is(err, domain.ErrPaymentPending) {
+		// El PSP no confirmó (timeout, red): el pago sigue en processing y se
+		// resuelve después. 202 con su id para consultarlo.
+		c.JSON(http.StatusAccepted, gin.H{
+			"payment_id": result.PaymentID,
+			"status":     result.Status,
+			"detail":     domain.ErrPaymentPending.Error(),
+		})
+		return
+	}
 	if err != nil {
 		respondDomainError(c, err)
 		return
@@ -134,7 +144,8 @@ func respondDomainError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domain.ErrPaymentNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrPaymentAlreadyExists):
+	case errors.Is(err, domain.ErrPaymentAlreadyExists),
+		errors.Is(err, domain.ErrIdempotencyKeyConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrTenantNotActive):
 		// Mensaje fijo: el detalle (pending/suspended) no se expone al caller.
@@ -144,10 +155,10 @@ func respondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrRiskRejected):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrNotCaptured),
-		errors.Is(err, domain.ErrAlreadyCaptured),
 		errors.Is(err, domain.ErrInvalidTransition):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrInvalidAmount),
+	case errors.Is(err, domain.ErrInvalidID),
+		errors.Is(err, domain.ErrInvalidAmount),
 		errors.Is(err, domain.ErrInvalidCurrency),
 		errors.Is(err, domain.ErrInvalidMethod):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

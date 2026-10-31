@@ -20,9 +20,14 @@ func New() *Adapter { return &Adapter{} }
 func (a *Adapter) Name() string { return "mock" }
 
 func (a *Adapter) AuthorizeAndCapture(_ context.Context, req application.PSPCaptureRequest) (application.PSPCaptureResult, error) {
-	// Simular rechazo para tokens especiales en tests
-	if req.PaymentToken == "REJECT" {
-		return application.PSPCaptureResult{}, fmt.Errorf("mock psp: payment rejected (test token)")
+	// Tokens especiales para probar los dos tipos de fallo:
+	//   REJECT  → rechazo definitivo.
+	//   TIMEOUT → resultado desconocido (simula un timeout antes de capturar).
+	switch req.PaymentToken {
+	case "REJECT":
+		return application.PSPCaptureResult{}, fmt.Errorf("%w: mock psp: payment rejected (test token)", application.ErrPSPDeclined)
+	case "TIMEOUT":
+		return application.PSPCaptureResult{}, fmt.Errorf("mock psp: request timed out (test token)")
 	}
 
 	// Simular comisión del PSP: 1.5% del monto
@@ -36,6 +41,13 @@ func (a *Adapter) AuthorizeAndCapture(_ context.Context, req application.PSPCapt
 		PSPFee:       pspFee,
 		Status:       "approved",
 	}, nil
+}
+
+// GetCapture: el mock no guarda estado. El único resultado desconocido que
+// produce es TIMEOUT, que simula un timeout antes de capturar: el PSP no tiene
+// registro de la operación.
+func (a *Adapter) GetCapture(_ context.Context, _ application.PSPCaptureLookupRequest) (application.PSPCaptureLookup, error) {
+	return application.PSPCaptureLookup{Found: false}, nil
 }
 
 func (a *Adapter) Refund(_ context.Context, req application.PSPRefundRequest) (application.PSPRefundResult, error) {

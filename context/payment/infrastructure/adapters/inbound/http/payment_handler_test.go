@@ -40,7 +40,12 @@ func (r *fakeRepo) Save(ctx context.Context, p *domain.Payment) error {
 	r.byKey[p.IdempotencyKey()] = p
 	return nil
 }
-func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment) error { return nil }
+func (r *fakeRepo) Update(ctx context.Context, p *domain.Payment, from domain.PaymentStatus) error {
+	return nil
+}
+func (r *fakeRepo) ListStuckProcessing(context.Context, time.Time, int) ([]*domain.Payment, error) {
+	return nil, nil
+}
 func (r *fakeRepo) ClaimProcessing(ctx context.Context, p *domain.Payment) (bool, error) {
 	return true, nil
 }
@@ -72,6 +77,9 @@ func (f fakePSP) Refund(ctx context.Context, req application.PSPRefundRequest) (
 		return application.PSPRefundResult{}, f.refundErr
 	}
 	return application.PSPRefundResult{PSPReference: "REF-1"}, nil
+}
+func (fakePSP) GetCapture(context.Context, application.PSPCaptureLookupRequest) (application.PSPCaptureLookup, error) {
+	return application.PSPCaptureLookup{}, nil
 }
 func (fakePSP) Name() string { return "fake" }
 
@@ -143,10 +151,10 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 func seedPayment(r *fakeRepo, tenantID string, status domain.PaymentStatus) *domain.Payment {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	p := domain.ReconstitutePayment(
-		domain.NewPaymentID(), domain.TenantID(tenantID), "seed-"+uuid.NewString(), "",
+		domain.NewPaymentID(), domain.TenantID(tenantID), "seed-"+uuid.NewString(),
 		domain.ReconstituteMoney(10_000, "ARS"), domain.ReconstituteMoney(300, "ARS"), domain.ReconstituteMoney(150, "ARS"),
 		domain.PayerInfo{}, domain.MethodCard, "fake", "PSP-1", status, "", nil,
-		nil, &now, nil, now, now,
+		&now, nil, now, now, "", nil, "",
 	)
 	r.byID[p.ID()] = p
 	r.byKey[p.IdempotencyKey()] = p
@@ -263,7 +271,7 @@ func TestProcess(t *testing.T) {
 
 	t.Run("psp rejection returns 402 with payment id, without leaking details", func(t *testing.T) {
 		o := defaultOpts()
-		o.psp.captureErr = errors.New("card 4111 declined")
+		o.psp.captureErr = fmt.Errorf("%w: card 4111 declined", application.ErrPSPDeclined)
 		r := newRepo()
 		rec := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
 		if rec.Code != http.StatusPaymentRequired {
@@ -282,6 +290,24 @@ func TestProcess(t *testing.T) {
 		}
 		if body.Status != "failed" || body.PaymentID != r.byKey["order-1"].ID().String() {
 			t.Errorf("unexpected decline body: %+v", body)
+		}
+	})
+
+	t.Run("unknown psp outcome returns 202 with the processing payment", func(t *testing.T) {
+		o := defaultOpts()
+		o.psp.captureErr = errors.New("dial tcp 10.0.0.1:443: i/o timeout")
+		r := newRepo()
+		rec := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202", rec.Code)
+		}
+		var body struct {
+			PaymentID string `json:"payment_id"`
+			Status    string `json:"status"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if body.Status != "processing" || body.PaymentID != r.byKey["order-1"].ID().String() || strings.Contains(rec.Body.String(), "10.0.0.1") {
+			t.Errorf("body = %s", rec.Body)
 		}
 	})
 
@@ -401,15 +427,15 @@ func TestRespondDomainError(t *testing.T) {
 		{domain.ErrPaymentAlreadyExists, http.StatusConflict},
 		{domain.ErrRiskRejected, http.StatusUnprocessableEntity},
 		{domain.ErrNotCaptured, http.StatusUnprocessableEntity},
-		{domain.ErrAlreadyCaptured, http.StatusUnprocessableEntity},
 		{domain.ErrInvalidTransition, http.StatusUnprocessableEntity},
 		{domain.ErrInvalidAmount, http.StatusBadRequest},
 		{domain.ErrInvalidCurrency, http.StatusBadRequest},
 		{domain.ErrInvalidMethod, http.StatusBadRequest},
 		{domain.ErrTenantNotActive, http.StatusForbidden},
 		{domain.ErrPaymentDeclined, http.StatusPaymentRequired},
+		{domain.ErrIdempotencyKeyConflict, http.StatusConflict},
 		{fmt.Errorf("find payment: %w", domain.ErrPaymentNotFound), http.StatusNotFound},
-		{domain.ErrRefundExceedsAmount, http.StatusInternalServerError},
+		{errors.New("unexpected"), http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
@@ -513,5 +539,68 @@ func TestRegisterRoutes_GuardsApplyPerRoute(t *testing.T) {
 				t.Error("handler must not run when the guard rejects")
 			}
 		})
+	}
+}
+
+// Las respuestas de cobro y reembolso salían en PascalCase (sin tags JSON),
+// mientras GET usa snake_case.
+func TestResponsesUseSnakeCase(t *testing.T) {
+	tid := uuid.NewString()
+	r := newRepo()
+	process := doRequest(newHandler(r, defaultOpts()).Process, http.MethodPost, "/payments", validBody, tid, nil)
+	var processBody map[string]any
+	_ = json.Unmarshal(process.Body.Bytes(), &processBody)
+	for _, k := range []string{"payment_id", "status", "psp_reference", "amount", "currency", "platform_fee", "captured_at", "was_existing"} {
+		if _, ok := processBody[k]; !ok {
+			t.Errorf("process response lacks %q: %s", k, process.Body)
+		}
+	}
+	paymentID, _ := processBody["payment_id"].(string)
+
+	refund := doRequest(newHandler(r, defaultOpts()).Refund, http.MethodPost, "/payments/x/refund", "", tid,
+		gin.Params{{Key: "paymentID", Value: paymentID}})
+	var refundBody map[string]any
+	_ = json.Unmarshal(refund.Body.Bytes(), &refundBody)
+	for _, k := range []string{"payment_id", "psp_reference", "status"} {
+		if _, ok := refundBody[k]; !ok {
+			t.Errorf("refund response lacks %q: %s", k, refund.Body)
+		}
+	}
+	if strings.Contains(process.Body.String()+refund.Body.String(), "PaymentID") {
+		t.Errorf("PascalCase keys left: %s %s", process.Body, refund.Body)
+	}
+}
+
+// GET no expone el error crudo del PSP: ni el motivo ni el detalle interno.
+func TestGetDoesNotLeakPSPError(t *testing.T) {
+	tid := uuid.NewString()
+	r := newRepo()
+	o := defaultOpts()
+	o.psp.captureErr = fmt.Errorf("%w: card 4111 declined", application.ErrPSPDeclined)
+	declined := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
+	var body struct {
+		PaymentID string `json:"payment_id"`
+	}
+	_ = json.Unmarshal(declined.Body.Bytes(), &body)
+
+	rec := doRequest(newHandler(r, defaultOpts()).Get, http.MethodGet, "/payments/x", "", tid,
+		gin.Params{{Key: "paymentID", Value: body.PaymentID}})
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "4111") || !strings.Contains(rec.Body.String(), domain.FailureDeclinedByPSP) {
+		t.Errorf("status = %d body = %s", rec.Code, rec.Body)
+	}
+}
+
+// Un ID mal formado en la URL caía en el default de respondDomainError (500).
+func TestMalformedPaymentIDReturns400(t *testing.T) {
+	tid := uuid.NewString()
+	h := newHandler(newRepo(), defaultOpts())
+	params := gin.Params{{Key: "paymentID", Value: "abc"}}
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"GET /payments/abc":         doRequest(h.Get, http.MethodGet, "/payments/abc", "", tid, params),
+		"POST /payments/abc/refund": doRequest(h.Refund, http.MethodPost, "/payments/abc/refund", "", tid, params),
+	} {
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid id") {
+			t.Errorf("%s: status = %d body = %s, want 400", name, rec.Code, rec.Body)
+		}
 	}
 }

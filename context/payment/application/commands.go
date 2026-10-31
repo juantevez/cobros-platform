@@ -20,20 +20,20 @@ type ProcessPaymentCmd struct {
 	PayerEmail   string
 	PayerDocType string
 	PayerDocNum  string
-	// CheckoutID referencia al Checkout (Fase 3); vacío en Fase 2
-	CheckoutID string
-	Metadata   map[string]string
+	Metadata     map[string]string
 }
 
+// ProcessPaymentResult es también la respuesta HTTP: snake_case, como
+// PaymentView (antes salía en PascalCase).
 type ProcessPaymentResult struct {
-	PaymentID    string
-	Status       string
-	PSPReference string
-	Amount       int64
-	Currency     string
-	PlatformFee  int64
-	CapturedAt   *time.Time
-	WasExisting  bool // true si el pago ya existía (reintento idempotente)
+	PaymentID    string     `json:"payment_id"`
+	Status       string     `json:"status"`
+	PSPReference string     `json:"psp_reference,omitempty"`
+	Amount       int64      `json:"amount"`
+	Currency     string     `json:"currency"`
+	PlatformFee  int64      `json:"platform_fee"`
+	CapturedAt   *time.Time `json:"captured_at,omitempty"`
+	WasExisting  bool       `json:"was_existing"` // true si el pago ya existía (reintento idempotente)
 }
 
 // RefundPaymentCmd solicita el reembolso de un pago capturado.
@@ -43,9 +43,9 @@ type RefundPaymentCmd struct {
 }
 
 type RefundPaymentResult struct {
-	PaymentID    string
-	PSPReference string
-	Status       string
+	PaymentID    string `json:"payment_id"`
+	PSPReference string `json:"psp_reference"`
+	Status       string `json:"status"`
 }
 
 // GetPaymentQuery consulta el estado de un pago.
@@ -55,20 +55,22 @@ type GetPaymentQuery struct {
 }
 
 type PaymentView struct {
-	ID             string     `json:"id"`
-	TenantID       string     `json:"tenant_id"`
-	Status         string     `json:"status"`
-	Amount         int64      `json:"amount"`
-	Currency       string     `json:"currency"`
-	PlatformFee    int64      `json:"platform_fee"`
-	PSPFee         int64      `json:"psp_fee"`
-	NetAmount      int64      `json:"net_amount"`
-	PaymentMethod  string     `json:"payment_method"`
-	PSPName        string     `json:"psp_name,omitempty"`
-	PSPReference   string     `json:"psp_reference,omitempty"`
-	FailureReason  string     `json:"failure_reason,omitempty"`
-	IdempotencyKey string     `json:"idempotency_key"`
-	CapturedAt     *time.Time `json:"captured_at,omitempty"`
-	FailedAt       *time.Time `json:"failed_at,omitempty"`
-	CreatedAt      string     `json:"created_at"`
+	ID                 string     `json:"id"`
+	TenantID           string     `json:"tenant_id"`
+	Status             string     `json:"status"`
+	Amount             int64      `json:"amount"`
+	Currency           string     `json:"currency"`
+	PlatformFee        int64      `json:"platform_fee"`
+	PSPFee             int64      `json:"psp_fee"`
+	NetAmount          int64      `json:"net_amount"`
+	PaymentMethod      string     `json:"payment_method"`
+	PSPName            string     `json:"psp_name,omitempty"`
+	PSPReference       string     `json:"psp_reference,omitempty"`
+	FailureReason      string     `json:"failure_reason,omitempty"`
+	IdempotencyKey     string     `json:"idempotency_key"`
+	CapturedAt         *time.Time `json:"captured_at,omitempty"`
+	FailedAt           *time.Time `json:"failed_at,omitempty"`
+	RefundPSPReference string     `json:"refund_psp_reference,omitempty"`
+	RefundedAt         *time.Time `json:"refunded_at,omitempty"`
+	CreatedAt          string     `json:"created_at"`
 }

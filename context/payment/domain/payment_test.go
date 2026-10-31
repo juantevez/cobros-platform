@@ -30,7 +30,7 @@ func newTestPayment(t *testing.T) *Payment {
 func newProcessingPayment(t *testing.T) *Payment {
 	t.Helper()
 	p := newTestPayment(t)
-	if err := p.MarkProcessing(); err != nil {
+	if err := p.MarkProcessing(ReconstituteMoney(300, "ARS")); err != nil {
 		t.Fatalf("MarkProcessing: %v", err)
 	}
 	return p
@@ -50,12 +50,12 @@ func reconstituteWithStatus(st PaymentStatus) *Payment {
 	now := time.Now().UTC()
 	zero := ReconstituteMoney(0, "ARS")
 	return ReconstitutePayment(
-		NewPaymentID(), testTenant, "idem-1", "",
+		NewPaymentID(), testTenant, "idem-1",
 		ReconstituteMoney(10_000, "ARS"), zero, zero,
 		testPayer(), MethodCard,
 		"", "", st, "", nil,
-		nil, nil, nil,
-		now, now,
+		nil, nil,
+		now, now, "", nil, "",
 	)
 }
 
@@ -104,10 +104,10 @@ func TestNewPayment(t *testing.T) {
 		if p.NetAmount() != 10_000 {
 			t.Errorf("net amount = %d, want 10000", p.NetAmount())
 		}
-		if p.CheckoutID() != "" || p.PSPName() != "" || p.PSPReference() != "" || p.FailureReason() != "" {
+		if p.PSPName() != "" || p.PSPReference() != "" || p.FailureReason() != "" {
 			t.Error("optional strings should be empty")
 		}
-		if p.AuthorizedAt() != nil || p.CapturedAt() != nil || p.FailedAt() != nil {
+		if p.CapturedAt() != nil || p.FailedAt() != nil {
 			t.Error("lifecycle timestamps should be nil")
 		}
 		if p.CreatedAt().Before(before) || !p.CreatedAt().Equal(p.UpdatedAt()) || p.CreatedAt().Location() != time.UTC {
@@ -132,7 +132,7 @@ func TestPayment_MarkProcessing(t *testing.T) {
 		p := newTestPayment(t)
 		created := p.UpdatedAt()
 
-		if err := p.MarkProcessing(); err != nil {
+		if err := p.MarkProcessing(ReconstituteMoney(300, "ARS")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if p.Status() != StatusProcessing {
@@ -149,7 +149,7 @@ func TestPayment_MarkProcessing(t *testing.T) {
 	for _, st := range allStatusesExcept(StatusInitiated) {
 		t.Run("rejected from "+st.String(), func(t *testing.T) {
 			p := reconstituteWithStatus(st)
-			if err := p.MarkProcessing(); !errors.Is(err, ErrInvalidTransition) {
+			if err := p.MarkProcessing(ReconstituteMoney(300, "ARS")); !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("expected ErrInvalidTransition, got %v", err)
 			}
 			if p.Status() != st {
@@ -274,11 +274,15 @@ func TestPayment_Fail(t *testing.T) {
 	t.Run("from processing", func(t *testing.T) {
 		p := newProcessingPayment(t)
 
-		if err := p.Fail("mock", "card declined"); err != nil {
+		if err := p.Fail("mock", "declined by the payment provider", "card 4111 declined"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if p.Status() != StatusFailed || p.FailureReason() != "card declined" || p.PSPName() != "mock" {
+		if p.Status() != StatusFailed || p.FailureReason() != "declined by the payment provider" || p.PSPName() != "mock" {
 			t.Errorf("status=%q reason=%q psp=%q", p.Status(), p.FailureReason(), p.PSPName())
+		}
+		// El error crudo del PSP queda solo para diagnóstico.
+		if p.PSPFailureDetail() != "card 4111 declined" {
+			t.Errorf("psp failure detail = %q", p.PSPFailureDetail())
 		}
 		if p.FailedAt() == nil || !p.UpdatedAt().Equal(*p.FailedAt()) {
 			t.Errorf("failedAt=%v updatedAt=%v", p.FailedAt(), p.UpdatedAt())
@@ -296,7 +300,7 @@ func TestPayment_Fail(t *testing.T) {
 			t.Fatalf("expected PaymentFailedEvent, got %T", evs[0])
 		}
 		if ev.PaymentID != p.ID().String() || ev.TenantID != testTenant.String() || ev.Amount != 10_000 ||
-			ev.Currency != "ARS" || ev.FailureReason != "card declined" || ev.PaymentMethod != "card" {
+			ev.Currency != "ARS" || ev.FailureReason != "declined by the payment provider" || ev.PaymentMethod != "card" {
 			t.Errorf("event fields not set: %+v", ev)
 		}
 	})
@@ -304,7 +308,7 @@ func TestPayment_Fail(t *testing.T) {
 	for _, st := range allStatusesExcept(StatusProcessing) {
 		t.Run("rejected from "+st.String(), func(t *testing.T) {
 			p := reconstituteWithStatus(st)
-			if err := p.Fail("mock", "x"); !errors.Is(err, ErrInvalidTransition) {
+			if err := p.Fail("mock", "x", ""); !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("expected ErrInvalidTransition, got %v", err)
 			}
 			if p.Status() != st || len(p.PullEvents()) != 0 {
@@ -375,21 +379,21 @@ func TestPayment_PullEvents(t *testing.T) {
 
 func TestReconstitutePayment(t *testing.T) {
 	id := NewPaymentID()
-	authorized := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-	captured := authorized.Add(time.Second)
-	created := authorized.Add(-time.Minute)
+	base := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	captured := base.Add(time.Second)
+	created := base.Add(-time.Minute)
 	meta := map[string]string{"k": "v"}
 
 	p := ReconstitutePayment(
-		id, testTenant, "idem-9", "chk-1",
+		id, testTenant, "idem-9",
 		ReconstituteMoney(5000, "USD"), ReconstituteMoney(100, "USD"), ReconstituteMoney(50, "USD"),
 		testPayer(), MethodQR,
 		"mercadopago", "MP-1", StatusCaptured, "", meta,
-		&authorized, &captured, nil,
-		created, captured,
+		&captured, nil,
+		created, captured, "", nil, "",
 	)
 
-	if p.ID() != id || p.TenantID() != testTenant || p.IdempotencyKey() != "idem-9" || p.CheckoutID() != "chk-1" {
+	if p.ID() != id || p.TenantID() != testTenant || p.IdempotencyKey() != "idem-9" {
 		t.Errorf("identity not restored")
 	}
 	if p.Amount().Amount() != 5000 || p.PlatformFee().Amount() != 100 || p.PSPFee().Amount() != 50 || p.NetAmount() != 4850 {
@@ -401,7 +405,7 @@ func TestReconstitutePayment(t *testing.T) {
 	if p.PSPName() != "mercadopago" || p.PSPReference() != "MP-1" || p.Status() != StatusCaptured {
 		t.Errorf("psp/status not restored")
 	}
-	if p.AuthorizedAt() != &authorized || p.CapturedAt() != &captured || p.FailedAt() != nil {
+	if p.CapturedAt() != &captured || p.FailedAt() != nil {
 		t.Error("lifecycle timestamps not restored")
 	}
 	if !p.CreatedAt().Equal(created) || !p.UpdatedAt().Equal(captured) {
@@ -409,5 +413,63 @@ func TestReconstitutePayment(t *testing.T) {
 	}
 	if len(p.PullEvents()) != 0 {
 		t.Error("reconstitution must not emit events")
+	}
+}
+
+// Comisiones negativas o que dejan el neto ≤ 0: Ledger rechaza ese asiento y
+// el pago quedaba captured sin contabilizar.
+func TestPayment_FeeValidation(t *testing.T) {
+	ars := func(n int64) Money { return ReconstituteMoney(n, "ARS") }
+	amount := newTestPayment(t).Amount().Amount()
+
+	for name, fee := range map[string]int64{"negative": -1, "equal to amount": amount, "above amount": amount + 1} {
+		t.Run("MarkProcessing rejects platform fee "+name, func(t *testing.T) {
+			p := newTestPayment(t)
+			if err := p.MarkProcessing(ars(fee)); !errors.Is(err, ErrInvalidFee) {
+				t.Fatalf("expected ErrInvalidFee, got %v", err)
+			}
+			if p.Status() != StatusInitiated {
+				t.Errorf("status = %q, want initiated", p.Status())
+			}
+		})
+	}
+
+	for name, tc := range map[string]struct{ platform, psp int64 }{
+		"negative psp fee":      {300, -1},
+		"fees equal to amount":  {300, amount - 300},
+		"fees above amount":     {300, amount},
+		"negative platform fee": {-1, 10},
+	} {
+		t.Run("Capture rejects "+name, func(t *testing.T) {
+			p := newProcessingPayment(t)
+			if err := p.Capture("mock", "PSP-1", ars(tc.platform), ars(tc.psp)); !errors.Is(err, ErrInvalidFee) {
+				t.Fatalf("expected ErrInvalidFee, got %v", err)
+			}
+			if p.Status() != StatusProcessing || len(p.PullEvents()) != 0 {
+				t.Errorf("status = %q, want processing without events", p.Status())
+			}
+		})
+	}
+
+	t.Run("fees leaving a positive net are accepted", func(t *testing.T) {
+		p := newProcessingPayment(t)
+		if err := p.Capture("mock", "PSP-1", ars(300), ars(amount-301)); err != nil || p.NetAmount() != 1 {
+			t.Fatalf("err = %v net = %d", err, p.NetAmount())
+		}
+	})
+}
+
+// El rechazo por riesgo y el del PSP emitían el mismo payment.failed.v1 sin
+// forma de distinguirlos.
+func TestPaymentFailedEvent_FailureStage(t *testing.T) {
+	risk := newTestPayment(t)
+	_ = risk.RejectByRisk("score too high")
+	psp := newProcessingPayment(t)
+	_ = psp.Fail("mock", FailureDeclinedByPSP, "")
+	for want, p := range map[string]*Payment{FailureStageRisk: risk, FailureStagePSP: psp} {
+		evs := p.PullEvents()
+		if len(evs) != 1 || evs[0].(PaymentFailedEvent).FailureStage != want {
+			t.Errorf("failure stage = %+v, want %q", evs, want)
+		}
 	}
 }

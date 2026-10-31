@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -43,10 +44,17 @@ func TestAdapter_AuthorizeAndCapture(t *testing.T) {
 		}
 	})
 
-	t.Run("REJECT token fails", func(t *testing.T) {
+	t.Run("REJECT token is a definitive decline", func(t *testing.T) {
 		_, err := New().AuthorizeAndCapture(context.Background(), application.PSPCaptureRequest{Amount: 100, PaymentToken: "REJECT"})
-		if err == nil || !strings.Contains(err.Error(), "payment rejected") {
-			t.Fatalf("expected rejection, got %v", err)
+		if !errors.Is(err, application.ErrPSPDeclined) || !strings.Contains(err.Error(), "payment rejected") {
+			t.Fatalf("expected ErrPSPDeclined, got %v", err)
+		}
+	})
+
+	t.Run("TIMEOUT token is an unknown outcome", func(t *testing.T) {
+		_, err := New().AuthorizeAndCapture(context.Background(), application.PSPCaptureRequest{Amount: 100, PaymentToken: "TIMEOUT"})
+		if err == nil || errors.Is(err, application.ErrPSPDeclined) {
+			t.Fatalf("expected a non-decline error, got %v", err)
 		}
 	})
 }
