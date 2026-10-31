@@ -22,21 +22,21 @@ func NewAttemptID() AttemptID   { return AttemptID(uuid.NewString()) }
 
 func ParseEndpointID(s string) (EndpointID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid endpoint id: %w", err)
+		return "", fmt.Errorf("%w: invalid endpoint id: %v", ErrInvalidID, err)
 	}
 	return EndpointID(s), nil
 }
 
 func ParseDeliveryID(s string) (DeliveryID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid delivery id: %w", err)
+		return "", fmt.Errorf("%w: invalid delivery id: %v", ErrInvalidID, err)
 	}
 	return DeliveryID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: invalid tenant id: %v", ErrInvalidID, err)
 	}
 	return TenantID(s), nil
 }

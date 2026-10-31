@@ -169,7 +169,8 @@ func respondError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrDeliveryNotRetryable),
 		errors.Is(err, domain.ErrEndpointInactive):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrEndpointURLEmpty),
+	case errors.Is(err, domain.ErrInvalidID),
+		errors.Is(err, domain.ErrEndpointURLEmpty),
 		errors.Is(err, domain.ErrInvalidEndpointURL),
 		errors.Is(err, domain.ErrDestinationNotAllowed),
 		errors.Is(err, domain.ErrNoEventsSubscribed):

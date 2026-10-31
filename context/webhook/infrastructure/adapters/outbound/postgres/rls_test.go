@@ -183,6 +183,15 @@ func TestRLS_ConsumerAndPollerDeliver(t *testing.T) {
 	ep := seedEndpoint(t)
 	endpoints, deliveries := NewEndpointRepository(rls), NewDeliveryRepository(rls)
 
+	// El poller arranca antes de crear la delivery y revisa cada 20ms: si un
+	// worker real usa la misma base (cada 5s), casi siempre la reclama este.
+	retry := application.NewRetryDeliveryUseCase(endpoints, deliveries, okDispatcher{}, pkgpostgres.NewTxManager(rls), noopPublisher{}, wallClock{})
+	poller := application.NewRetryPoller(retry, deliveries, 20*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = poller.Start(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
 	eventID := domain.NewDeliveryID().String()
 	err := application.NewDispatchEventUseCase(endpoints, deliveries).Execute(asTenant(ep.TenantID()), application.IncomingEvent{
 		TenantID: ep.TenantID().String(), EventType: "payment.captured.v1", EventID: eventID,
@@ -191,13 +200,6 @@ func TestRLS_ConsumerAndPollerDeliver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch event: %v", err)
 	}
-
-	retry := application.NewRetryDeliveryUseCase(endpoints, deliveries, okDispatcher{}, pkgpostgres.NewTxManager(rls), noopPublisher{}, wallClock{})
-	poller := application.NewRetryPoller(retry, deliveries, 20*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = poller.Start(ctx); close(done) }()
-	defer func() { cancel(); <-done }()
 
 	admin := NewDeliveryRepository(requireDB(t))
 	deadline := time.Now().Add(5 * time.Second)

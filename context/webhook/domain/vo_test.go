@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,10 @@ func TestParseIDs(t *testing.T) {
 				got, err := p.parse(in)
 				if err == nil || !strings.Contains(err.Error(), p.errText) || got != "" {
 					t.Errorf("parse(%q) = %q, %v; want %q error", in, got, err, p.errText)
+				}
+				// El handler lo mapea a 400 por errors.Is.
+				if !errors.Is(err, ErrInvalidID) {
+					t.Errorf("parse(%q) error %v is not ErrInvalidID", in, err)
 				}
 			}
 		})

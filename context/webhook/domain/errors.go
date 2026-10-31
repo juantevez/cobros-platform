@@ -3,6 +3,8 @@ package domain
 import "errors"
 
 var (
+	// ErrInvalidID: un ID (endpoint, delivery, tenant) que no es un UUID.
+	ErrInvalidID          = errors.New("invalid id: must be a UUID")
 	ErrEndpointNotFound   = errors.New("webhook endpoint not found")
 	ErrEndpointInactive   = errors.New("webhook endpoint is inactive")
 	ErrEndpointURLEmpty   = errors.New("webhook endpoint URL cannot be empty")

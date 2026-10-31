@@ -116,10 +116,10 @@ failed  ──5º fallo─────────► exhausted   (final, emite 
 | Error | HTTP |
 |---|---|
 | `ErrEndpointNotFound`, `ErrDeliveryNotFound` (incluye recurso de otro tenant) | 404 |
-| `ErrEndpointURLEmpty`, `ErrInvalidEndpointURL`, `ErrNoEventsSubscribed`, `ErrDestinationNotAllowed` | 400 |
+| `ErrInvalidID` (endpoint, delivery o tenant que no es UUID), `ErrEndpointURLEmpty`, `ErrInvalidEndpointURL`, `ErrNoEventsSubscribed`, `ErrDestinationNotAllowed` | 400 |
 | `ErrDeliveryNotRetryable` (delivery `delivered`/`exhausted`), `ErrEndpointInactive` | 422 |
 | `ErrDeliveryInProgress` (otro proceso la tiene reclamada, §9) | 409 |
-| Cualquier otro (incluidos IDs mal formados, §10) | 500 |
+| Cualquier otro | 500 |
 
 `ErrDuplicateDelivery` está declarado pero no se usa.
 
@@ -270,11 +270,10 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | IDs inválidos → 500 | `DELETE /endpoints/abc`, `GET`/`POST /deliveries/abc[/retry]`: el error de parseo cae en el `default` de `respondError`. |
-| 2 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
-| 3 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
-| 4 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
-| 5 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
+| 1 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
+| 2 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
+| 3 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
+| 4 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
 
 ---
 
@@ -284,7 +283,7 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 |---|---|---|
 | Dominio | `domain/*_test.go` | Validación de URL y eventos, firma de `<t>.<body>` (vector calculado aparte en Python, y distinta con otro `t`), FSM de la delivery, schedule y `MaxAttempts`, truncado y saneado del body (sin partir caracteres, UTF-8 inválido, `NUL`). |
 | Aplicación | `application/*_test.go` | Alta (incluido el destino rechazado sin guardar nada) y baja con publicación en tx, `DispatchEvent` (idempotencia, fallo parcial), `RetryDelivery` (tenant ajeno, final, endpoint inactivo, exhausted, estado + evento en la misma tx y error de publish que la descarta, reclamo con su vencimiento y `attempt_count`, delivery reclamada por otro sin POST), poller con concurrencia (saltea en silencio las reclamadas y despacha cada delivery con su tenant), listados. |
-| HTTP | `inbound/http/webhook_handler_test.go` | Handlers, mapeo de errores y guard en cada ruta (403; `RegisterRoutes` exige el guard). |
+| HTTP | `inbound/http/webhook_handler_test.go` | Handlers, mapeo de errores (IDs mal formados en la URL → 400) y guard en cada ruta (403; `RegisterRoutes` exige el guard). |
 | NATS | `inbound/nats/event_consumer_test.go` | Extracción de tenant (y su paso al contexto, para RLS), `event_id` y `occurred_at`; casos que hacen *ack* sin reintentar. |
 | Dispatcher | `outbound/http/dispatcher_test.go`, `destination_guard_test.go` | Headers, firma `t=…,v1=…` verificada como lo haría el comercio (`t` = `X-Cobros-Timestamp`), errores de red, redirects no seguidos (301/302/303/307/308) y destino interno bloqueado en el dial (sin tocar el servidor) contra `httptest`. Rangos internos, chequeo del alta con resolver falso (incluido un host con una IP pública y otra interna), control del dialer y modo desarrollo. |
 | Postgres | `outbound/postgres/repo_test.go`, `integration_test.go`, `rls_test.go` | `pgxmock` para el SQL de cada método (dentro de una tx simulada) y para la sesión RLS: tenant de la entidad, tenant del llamador, operador en el listado del poller. Integración contra PostgreSQL (`DATABASE_URL`, se saltan si no hay DB): intento con body multibyte cortado y `NUL`; 8 reclamos simultáneos de la misma delivery (gana uno), reclamo vigente fuera del poller, reclamo vencido retomado, `UPDATE` que libera el reclamo y rechaza una escritura con `attempt_count` viejo. RLS con un rol sin `BYPASSRLS`: aislamiento de endpoints, deliveries e intentos entre tenants, sin tenant no se ve nada, el operador lista cross-tenant pero no escribe, y el flujo consumer → poller entrega bajo RLS. |

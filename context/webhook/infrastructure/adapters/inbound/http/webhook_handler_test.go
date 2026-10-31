@@ -70,7 +70,7 @@ type fakeDeliveries struct {
 	lastLimit int
 }
 
-func (r *fakeDeliveries) Save(context.Context, *domain.WebhookDelivery) error   { return nil }
+func (r *fakeDeliveries) Save(context.Context, *domain.WebhookDelivery) error        { return nil }
 func (r *fakeDeliveries) Update(context.Context, *domain.WebhookDelivery, int) error { return nil }
 func (r *fakeDeliveries) Claim(context.Context, domain.DeliveryID, int, time.Time, time.Time) (bool, error) {
 	return true, nil
@@ -391,6 +391,26 @@ type allowAll struct{}
 
 func (allowAll) Check(context.Context, string) error { return nil }
 
+// Un ID mal formado en la URL caía en el default de respondError (500).
+func TestMalformedIDReturns400(t *testing.T) {
+	e := newEnv()
+	cases := map[string]struct {
+		h      gin.HandlerFunc
+		method string
+		params gin.Params
+	}{
+		"DELETE /endpoints/abc":      {e.h.DeactivateEndpoint, http.MethodDelete, endpointParam("abc")},
+		"GET /deliveries/abc":        {e.h.GetDelivery, http.MethodGet, deliveryParam("abc")},
+		"POST /deliveries/abc/retry": {e.h.RetryDelivery, http.MethodPost, deliveryParam("abc")},
+	}
+	for name, tc := range cases {
+		rec := doRequest(tc.h, tc.method, "/x", "", tc.params)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(errorBody(t, rec), "invalid id") {
+			t.Errorf("%s: status = %d body = %s, want 400", name, rec.Code, rec.Body)
+		}
+	}
+}
+
 func TestRespondError(t *testing.T) {
 	cases := []struct {
 		err  error
@@ -402,6 +422,7 @@ func TestRespondError(t *testing.T) {
 		{fmt.Errorf("delivery repo: update x: %w", domain.ErrDeliveryInProgress), http.StatusConflict},
 		{domain.ErrEndpointInactive, http.StatusUnprocessableEntity},
 		{domain.ErrEndpointURLEmpty, http.StatusBadRequest},
+		{fmt.Errorf("%w: invalid delivery id: x", domain.ErrInvalidID), http.StatusBadRequest},
 		{fmt.Errorf("%w: missing host", domain.ErrInvalidEndpointURL), http.StatusBadRequest},
 		{domain.ErrNoEventsSubscribed, http.StatusBadRequest},
 		{fmt.Errorf("%w: 127.0.0.1", domain.ErrDestinationNotAllowed), http.StatusBadRequest},
