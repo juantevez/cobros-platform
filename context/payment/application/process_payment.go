@@ -179,7 +179,19 @@ func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Pa
 			}
 			return uc.publisher.Publish(ctx, payment.PullEvents()...)
 		}); updateErr != nil {
-			return ProcessPaymentResult{}, fmt.Errorf("persist risk rejection: %w", updateErr)
+			if !errors.Is(updateErr, domain.ErrPaymentChanged) {
+				return ProcessPaymentResult{}, fmt.Errorf("persist risk rejection: %w", updateErr)
+			}
+			// Otra ejecución del mismo pago lo resolvió primero (lo rechazó
+			// también, o lo reclamó): no se publica un segundo evento; se
+			// informa cómo quedó.
+			current, findErr := uc.repo.FindByID(ctx, payment.ID())
+			if findErr != nil {
+				return ProcessPaymentResult{}, fmt.Errorf("reload payment: %w", findErr)
+			}
+			if current.Status() != domain.StatusRiskRejected {
+				return toResult(current, wasExisting), nil
+			}
 		}
 		return ProcessPaymentResult{}, domain.ErrRiskRejected
 	}

@@ -264,6 +264,36 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	// Dos ejecuciones del mismo pago en initiated lo rechazaban por riesgo
+	// dos veces (dos payment.failed.v1). La que pierde no publica.
+	t.Run("concurrent risk rejection does not publish a second event", func(t *testing.T) {
+		d := newProcessDeps()
+		d.risk.decision = RiskDecision{Approved: false, Reason: "score too high"}
+		d.repo.changed = true
+		rejected := buildPayment(tenantA, domain.StatusRiskRejected)
+		d.repo.findByIDHook = func(domain.PaymentID) *domain.Payment { return rejected }
+
+		if _, err := d.uc().Execute(ctx, validProcessCmd()); !errors.Is(err, domain.ErrRiskRejected) {
+			t.Fatalf("expected ErrRiskRejected, got %v", err)
+		}
+		if len(d.pub.events) != 0 {
+			t.Errorf("events = %v, want none from the loser", d.pub.eventTypes())
+		}
+	})
+
+	t.Run("risk rejection that lost to a processing execution reports the current state", func(t *testing.T) {
+		d := newProcessDeps()
+		d.risk.decision = RiskDecision{Approved: false, Reason: "score too high"}
+		d.repo.changed = true
+		captured := buildPayment(tenantA, domain.StatusCaptured)
+		d.repo.findByIDHook = func(domain.PaymentID) *domain.Payment { return captured }
+
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil || res.Status != "captured" {
+			t.Fatalf("res = %+v err = %v, want the captured payment", res, err)
+		}
+	})
+
 	t.Run("risk rejection persist error is wrapped", func(t *testing.T) {
 		d := newProcessDeps()
 		d.risk.decision = RiskDecision{Approved: false, Reason: "velocity"}

@@ -187,6 +187,7 @@ func (p *Payment) RejectByRisk(reason string) error {
 		Currency:      p.amount.Currency(),
 		FailureReason: reason,
 		PaymentMethod: p.method.String(),
+		FailureStage:  FailureStageRisk,
 	})
 
 	return nil
@@ -216,6 +217,7 @@ func (p *Payment) Fail(pspName, reason, detail string) error {
 		Currency:      p.amount.Currency(),
 		FailureReason: reason,
 		PaymentMethod: p.method.String(),
+		FailureStage:  FailureStagePSP,
 	})
 
 	return nil

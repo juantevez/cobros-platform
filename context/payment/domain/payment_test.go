@@ -458,3 +458,18 @@ func TestPayment_FeeValidation(t *testing.T) {
 		}
 	})
 }
+
+// El rechazo por riesgo y el del PSP emitían el mismo payment.failed.v1 sin
+// forma de distinguirlos.
+func TestPaymentFailedEvent_FailureStage(t *testing.T) {
+	risk := newTestPayment(t)
+	_ = risk.RejectByRisk("score too high")
+	psp := newProcessingPayment(t)
+	_ = psp.Fail("mock", FailureDeclinedByPSP, "")
+	for want, p := range map[string]*Payment{FailureStageRisk: risk, FailureStagePSP: psp} {
+		evs := p.PullEvents()
+		if len(evs) != 1 || evs[0].(PaymentFailedEvent).FailureStage != want {
+			t.Errorf("failure stage = %+v, want %q", evs, want)
+		}
+	}
+}

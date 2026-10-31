@@ -30,9 +30,10 @@ func (e baseEvent) OccurredAt() time.Time { return e.occurredAt }
 // PaymentCapturedEvent es el evento más importante del contexto Payment.
 //
 // El Ledger lo consume para crear el asiento contable:
-//   in_transit       DEBIT   amount - psp_fee
-//   merchant_balance CREDIT  amount - platform_fee - psp_fee
-//   platform_fees    CREDIT  platform_fee
+//
+//	in_transit       DEBIT   amount - psp_fee
+//	merchant_balance CREDIT  amount - platform_fee - psp_fee
+//	platform_fees    CREDIT  platform_fee
 //
 // Otros contextos (Webhooks, Notifications) también lo consumen.
 type PaymentCapturedEvent struct {
@@ -59,7 +60,15 @@ type PaymentFailedEvent struct {
 	Currency      string `json:"currency"`
 	FailureReason string `json:"failure_reason"`
 	PaymentMethod string `json:"payment_method"`
+	// FailureStage distingue el rechazo por riesgo (antes de ir al PSP) del
+	// rechazo del PSP: FailureStageRisk | FailureStagePSP.
+	FailureStage string `json:"failure_stage"`
 }
+
+const (
+	FailureStageRisk = "risk"
+	FailureStagePSP  = "psp"
+)
 
 func (e PaymentFailedEvent) EventType() string { return "payment.failed.v1" }
 
