@@ -7,9 +7,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/juantevez/cobros-platform/context/dispute/application"
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
+)
+
+const (
+	pgErrUniqueViolation    = "23505"
+	paymentUniqueConstraint = "disputes_payment_id_key"
 )
 
 type pgDisputeRepository struct{ pool pkgpostgres.Conn }
@@ -36,6 +43,12 @@ func (r *pgDisputeRepository) Save(ctx context.Context, d *domain.Dispute) error
 			d.Version(),
 		)
 		if err != nil {
+			// Dos aperturas concurrentes del mismo pago: la segunda choca con
+			// UNIQUE(payment_id). El caso de uso lo traduce a 409.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgErrUniqueViolation && pgErr.ConstraintName == paymentUniqueConstraint {
+				return fmt.Errorf("dispute repo: save: %w", application.ErrDuplicatePaymentKey)
+			}
 			return fmt.Errorf("dispute repo: save: %w", err)
 		}
 		return r.saveEvidence(ctx, conn, d)

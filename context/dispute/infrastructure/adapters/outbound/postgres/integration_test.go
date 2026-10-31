@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juantevez/cobros-platform/context/dispute/application"
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
 )
 
@@ -68,5 +69,20 @@ func TestDisputeRepository_Update_OptimisticLock(t *testing.T) {
 	_ = stale.Expire(time.Now())
 	if err := repo.Update(ctx, stale); !errors.Is(err, domain.ErrOptimisticLock) {
 		t.Errorf("stale update = %v, want ErrOptimisticLock", err)
+	}
+}
+
+// Contra la constraint real: la segunda disputa del mismo pago devuelve el
+// centinela de duplicado (el caso de uso responde 409).
+func TestDisputeRepository_Save_DuplicatePaymentAgainstConstraint(t *testing.T) {
+	first := seedDispute(t)
+	now := time.Now().UTC()
+	ref := domain.PaymentRef{ID: first.PaymentID(), TenantID: first.TenantID().String(), Status: "captured", Amount: 5000, Currency: "ARS"}
+	second, err := domain.NewDispute(domain.NewDisputeID(), ref, "psp", 5000, "ARS", domain.ReasonGeneral, now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("new dispute: %v", err)
+	}
+	if err := NewDisputeRepository(requireDB(t)).Save(context.Background(), second); !errors.Is(err, application.ErrDuplicatePaymentKey) {
+		t.Fatalf("second save = %v, want ErrDuplicatePaymentKey", err)
 	}
 }

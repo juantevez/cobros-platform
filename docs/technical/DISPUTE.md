@@ -206,7 +206,7 @@ Archivo: [application/use_cases.go](../../context/dispute/application/use_cases.
 
 1. Parsea `reason` (inválido → 400). El comando no lleva tenant.
 2. **Idempotencia de negocio**: `FindByPaymentID` → si existe, `ErrDuplicateDispute` (409).
-   La barrera real es `UNIQUE(payment_id)` en BD; si la carrera la gana la constraint, responde 500 (§10).
+   La barrera real es `UNIQUE(payment_id)` en BD; si la carrera la gana la constraint, `Save` devuelve `ErrDuplicatePaymentKey` (23505 sobre `disputes_payment_id_key`) y el caso de uso responde igual 409.
 3. `PaymentReader.FindPayment`: un pago inexistente devuelve `ErrPaymentNotFound` (404).
 4. `deadline` cero → `now + 7 días`.
 5. `NewDispute` valida el pago (§4.1), `amount > 0` y el deadline, y registra `DisputeOpenedEvent`.
@@ -442,12 +442,11 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Race en la idempotencia de apertura | TOCTOU entre `FindByPaymentID` e `INSERT`. El caso de uso traduce `ErrDuplicatePaymentKey` a 409, pero el repo nunca lo devuelve: si gana la constraint `UNIQUE(payment_id)`, responde **500**. |
-| 2 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
-| 3 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
-| 4 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
-| 5 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
-| 6 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
+| 1 | Baja | Deadline mal formado ignorado | Un `deadline` que no es RFC3339 se descarta y aplica now+7d sin error. |
+| 2 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
+| 3 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
+| 4 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
+| 5 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
 
 ---
 
@@ -458,7 +457,7 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 | Dominio | `domain/dispute_test.go`, `events_test.go`, `vo_test.go` | Unitarios: creación y validaciones (tenant del pago, `deadline` en el evento de apertura), cada transición de la FSM, deadline/`ErrDisputeExpired`, evidencia requerida, `IsOverdue`, `IsFinal`, parseo de enums/IDs, reconstitución, eventos registrados. |
 | Aplicación | `application/use_cases_test.go`, `expiry_poller_test.go` (+ `mocks_test.go`) | Fakes en memoria de repo/tx/publisher/clock: happy paths, duplicados, cross-tenant, outcomes inválidos, límites de `limit`, mapper `toView`, ciclo del poller (expira, publica, tolera errores) y cancelación de contexto. |
 | HTTP inbound | `inbound/http/handler_test.go` | Gin + `httptest`: códigos 201/204/400/404/409/422, `RegisterRoutes`, el guard de cada ruta (403; pánico si falta alguno), la marca de operador en abrir y resolver (y no en contestar) y el mapeo de cada error de dominio. |
-| Postgres outbound | `outbound/postgres/dispute_repo_test.go`, `integration_test.go` | **pgxmock v4**: SQL exacto de Save/Update (incluido el `WHERE version` y 0 filas → `ErrOptimisticLock`)/finds/ListByTenant/ListOverdue, scan de evidencia, `PaymentReader`, errores de scan/save, `nullStr`. Integración contra PostgreSQL: concurrencia optimista y RLS con un rol sin `BYPASSRLS` (`dispute_rls_probe`). |
+| Postgres outbound | `outbound/postgres/dispute_repo_test.go`, `integration_test.go` | **pgxmock v4**: SQL exacto de Save/Update (incluido el `WHERE version` y 0 filas → `ErrOptimisticLock`)/finds/ListByTenant/ListOverdue, scan de evidencia, `PaymentReader`, errores de scan/save, `nullStr`. Integración contra PostgreSQL: concurrencia optimista, segunda disputa del mismo pago contra la constraint real (→ `ErrDuplicatePaymentKey`) y RLS con un rol sin `BYPASSRLS` (`dispute_rls_probe`). |
 | Ledger (consumidor) | `context/ledger/.../nats/dispute_consumer_test.go` | Asientos generados por `dispute.opened.v1` / `dispute.resolved.v1` según outcome. |
 
 ```bash

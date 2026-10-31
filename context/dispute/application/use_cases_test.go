@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -144,6 +145,17 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 		cmd := baseCmd()
 		cmd.PaymentID = "pay-1" // ya existe
 		if _, err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrDuplicateDispute) {
+			t.Fatalf("expected ErrDuplicateDispute, got %v", err)
+		}
+	})
+
+	// Carrera entre dos aperturas: el chequeo previo no la vio y la ganó la
+	// constraint UNIQUE(payment_id).
+	t.Run("duplicate key from the repo is reported as duplicate dispute", func(t *testing.T) {
+		r := newRepo()
+		r.saveErr = fmt.Errorf("dispute repo: save: %w", ErrDuplicatePaymentKey)
+		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
+		if _, err := uc.Execute(context.Background(), baseCmd()); !errors.Is(err, domain.ErrDuplicateDispute) {
 			t.Fatalf("expected ErrDuplicateDispute, got %v", err)
 		}
 	})

@@ -8,8 +8,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 
+	"github.com/juantevez/cobros-platform/context/dispute/application"
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
 	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
@@ -487,4 +489,28 @@ func TestRLSSession(t *testing.T) {
 			t.Errorf("expectations: %v", err)
 		}
 	})
+}
+
+// Si la carrera la gana la constraint UNIQUE(payment_id), el repo devuelve el
+// centinela que el caso de uso traduce a 409 (antes, error genérico → 500).
+func TestDisputeRepository_Save_DuplicatePayment(t *testing.T) {
+	d, err := domain.NewDispute(domain.NewDisputeID(), capturedRef("pay-1"), "psp", 5000, "ARS", domain.ReasonFraudulent, testDeadline, testTime)
+	if err != nil {
+		t.Fatalf("new dispute: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		pgErr *pgconn.PgError
+		dup   bool
+	}{
+		"payment unique":   {&pgconn.PgError{Code: "23505", ConstraintName: "disputes_payment_id_key"}, true},
+		"other unique":     {&pgconn.PgError{Code: "23505", ConstraintName: "disputes_pkey"}, false},
+		"other error code": {&pgconn.PgError{Code: "23503"}, false},
+	} {
+		mock, ctx := newTxMock(t)
+		mock.ExpectExec("INSERT INTO disputes").WithArgs(anyArgs(15)...).WillReturnError(tc.pgErr)
+		err := NewDisputeRepository(mock).Save(ctx, d)
+		if errors.Is(err, application.ErrDuplicatePaymentKey) != tc.dup || err == nil {
+			t.Errorf("%s: err = %v, duplicate = %v", name, err, tc.dup)
+		}
+	}
 }
