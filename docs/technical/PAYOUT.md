@@ -22,7 +22,7 @@ Payout orquesta el **desembolso** de fondos desde la plataforma hacia la cuenta 
 |---|---|---|
 | `BankTransferAdapter` | `transfer/mock.Adapter` | Confirma siempre, salvo cuenta `REJECT` (rechazo explícito). El `IdempotencyKey` de la transferencia es `transfer_<payout_id>`; el mock lo ignora. **Nunca usar en producción.** |
 | `BalanceChecker` / `BalanceLocker` | `ledger.BalanceChecker` | Query directa a `account_balances` (cuenta `merchant_balance` del tenant) menos los payouts aún no asentados en el Ledger, con la conexión de la tx + `pg_advisory_xact_lock` por `(tenant, currency)`. |
-| `BankAccountProvider` | `onboarding.BankAccountProvider` | Query directa a `onboarding_bank_accounts` unida a solicitudes `approved`. ⚠️ No filtra `verified` ni moneda (§10.6). |
+| `BankAccountProvider` | `onboarding.BankAccountProvider` | Query directa a `onboarding_bank_accounts` unida a solicitudes `approved`. ⚠️ No filtra `verified` ni moneda (§10). |
 | `PayoutGate` | `tenant.PayoutGate` | Lee `tenants.status` y `tenant_compliance_holds` (contexto Auth): exige tenant `active` sin hold de cumplimiento vigente. |
 | `EventPublisher` | `outbox.NewEventPublisher` | Publicación transaccional vía Outbox (ver LEDGER.MD §7). |
 | `TxManager` | `pkg/postgres` | `RunInTx` propaga la tx por el contexto; `ConnFromContext` hace que repo y publisher participen de la misma transacción. |
@@ -31,7 +31,7 @@ Payout orquesta el **desembolso** de fondos desde la plataforma hacia la cuenta 
 
 - Bancos reales (MP Transfers, Prex, adquirentes): solo existe el mock.
 - Comisión de desembolso: no se descuenta ningún fee del monto transferido.
-- Job de resolución de payouts `unknown`: no hay consulta al banco ni webhook entrante que los cierre (§10.3).
+- Job de resolución de payouts `unknown`: no hay consulta al banco ni webhook entrante que los cierre (§10).
 - Payouts parciales programados / retiros automáticos (scheduled payouts).
 - Filtros por estado en `GET /payouts`; paginación real (solo `limit`).
 
@@ -195,13 +195,13 @@ Archivo: [initiate_payout.go](../../context/payout/application/initiate_payout.g
 | 3d | `NewPayout` + `repo.Save` + publish `payout.initiated.v1` | Sí (misma tx) | UNIQUE violado → `ErrPayoutAlreadyExists` (409; el retry encontrará el registro) |
 | 4 | `MarkProcessing` + `repo.Update` | No | 500; payout queda `initiated` con fondos reservados |
 | 5 | `transferAdapter.Transfer` (`IdempotencyKey: transfer_<payout_id>`) | — | ver abajo |
-| 6a | OK → `Confirm(ref)` + tx{Update + publish `payout.confirmed.v1`} | Sí | 500; queda `processing` (§10.5) |
+| 6a | OK → `Confirm(ref)` + tx{Update + publish `payout.confirmed.v1`} | Sí | 500; queda `processing` (§10) |
 | 6b | Rechazo conocido → `Fail(reason)` + tx{Update + publish `payout.failed.v1`} | Sí | — |
 | 6c | Indeterminado ([transfer_errors.go](../../context/payout/application/transfer_errors.go): `DeadlineExceeded`, `Canceled`, `net.Error.Timeout()`, EOF/conexión caída y hints de mensaje) → `MarkUnknown` + tx{Update + publish `payout.unknown.v1`} | Sí | — |
 
-El clasificador `isIndeterminate` distingue estructuralmente *no sabemos* de *el banco dijo que no*: solo el rechazo conocido revierte fondos. Tratar un timeout como fallo definitivo era el bug crítico original (§10.3).
+El clasificador `isIndeterminate` distingue estructuralmente *no sabemos* de *el banco dijo que no*: solo el rechazo conocido revierte fondos. Tratar un timeout como fallo definitivo era el bug crítico original (§10).
 
-Resultado: `{payout_id, amount, currency, status, bank_reference, replayed}` (struct sin tags JSON → claves PascalCase, igual que `ProcessPaymentResult` en PAYMENT.MD §10.10).
+Resultado: `{payout_id, amount, currency, status, bank_reference, replayed}` (struct sin tags JSON → claves PascalCase, §10).
 
 ### 5.2 Consultas
 
@@ -217,7 +217,7 @@ Archivo: [query_payouts.go](../../context/payout/application/query_payouts.go)
 
 Archivo: [payout_handler.go](../../context/payout/infrastructure/adapters/inbound/http/payout_handler.go)
 
-Las rutas `/api/v1/payouts` cuelgan del grupo `protected` de `cmd/api` con `JWTMiddleware` (solo JWT; **no** aceptan API key y **no** tienen guards por permiso — ver §10.8). El tenant sale del token.
+Las rutas `/api/v1/payouts` cuelgan del grupo `protected` de `cmd/api` con `JWTMiddleware` (solo JWT; **no** aceptan API key y **no** tienen guards por permiso — ver §10). El tenant sale del token.
 
 | Método | Ruta | Descripción | Éxito |
 |---|---|---|---|
@@ -265,7 +265,7 @@ Header **`Idempotency-Key: payout-2026-10-27-01`** (obligatorio; alternativa: ca
 }
 ```
 
-⚠️ `failure_reason` expone el texto crudo del error del banco (§10.10).
+⚠️ `failure_reason` expone el texto crudo del error del banco (§10).
 
 ---
 
@@ -315,31 +315,30 @@ Tabla `payouts` ([000007](../../migrations/000007_payout_init.up.sql) + [000015]
 
 ## 9. Seguridad y cumplimiento
 
-- **Datos bancarios:** el número de cuenta vive encapsulado en `BankAccountInfo`; la API de lectura solo expone `MaskedAccountNumber()`. El snapshot en `payouts.bank_acct_num` queda **en claro** (necesario para reproducir la transferencia y auditar); no hay cifrado en reposo (§10.9).
-- **Autorización:** cualquier usuario autenticado del tenant (todos los roles) puede iniciar payouts — no hay permiso `payouts:create` ni guard por ruta (§10.8). Un desembolso es una operación sensible: debería requerir `admin` (y doble aprobación en el futuro).
+- **Datos bancarios:** el número de cuenta vive encapsulado en `BankAccountInfo`; la API de lectura solo expone `MaskedAccountNumber()`. El snapshot en `payouts.bank_acct_num` queda **en claro** (necesario para reproducir la transferencia y auditar); no hay cifrado en reposo (§10).
+- **Autorización:** cualquier usuario autenticado del tenant (todos los roles) puede iniciar payouts — no hay permiso `payouts:create` ni guard por ruta (§10). Un desembolso es una operación sensible: debería requerir `admin` (y doble aprobación en el futuro).
 - **Aislamiento:** `Get` verifica el tenant del payout; `List` y `Initiate` toman el tenant del token.
 - **Estado del comercio y AML:** `PayoutGate` bloquea desembolsos de tenants no activos, suspendidos o en hold preventivo de cumplimiento (ver [COMPLIANCE.md](COMPLIANCE.md) §7.3). El mensaje no revela el motivo (anti tipping-off). Un payout iniciado antes del hold sigue su curso.
-- **Reserva contable:** el lock advisory por `(tenant, currency)` dentro de la misma tx que lee el saldo e inserta el payout serializa los requests concurrentes (§10.4). Como el Ledger debita `merchant_balance` de forma asíncrona, el disponible descuenta los payouts cuyo asiento de `initiated` todavía no existe (salvo los fallidos): sin eso, dos payouts seguidos antes de que corriera el consumer leían el mismo saldo.
+- **Reserva contable:** el lock advisory por `(tenant, currency)` dentro de la misma tx que lee el saldo e inserta el payout serializa los requests concurrentes (§10). Como el Ledger debita `merchant_balance` de forma asíncrona, el disponible descuenta los payouts cuyo asiento de `initiated` todavía no existe (salvo los fallidos): sin eso, dos payouts seguidos antes de que corriera el consumer leían el mismo saldo.
 - **Idempotencia de extremo a extremo:** clave de negocio (HTTP) → UNIQUE (PG) → `transfer_<payout_id>` (banco) → `ledger_entry_key` (asiento). Cuatro capas: retries del caller nunca duplican dinero.
 
 ---
 
 ## 10. Limitaciones conocidas y deuda técnica
 
-| # | Tema | Detalle | Estado |
+| # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | ~~Sin idempotencia de negocio~~ | Retries del caller podían desembolsar dos veces. Ahora: clave obligatoria (`400` si falta), replay `200`, conflicto de contenido `409`, UNIQUE como red de seguridad. | ✅ Resuelto (000015) |
-| 2 | ~~Check-then-insert con carrera~~ | Dos requests concurrentes con la misma clave colisionan en el UNIQUE → `ErrPayoutAlreadyExists` → 409; el retry encuentra el registro. | ✅ Resuelto |
-| 3 | ~~Timeout del banco tratado como fallo~~ | Un timeout revirtaba el asiento cuando el banco quizá acreditó los fondos (dinero regalado al comercio). Ahora `MarkUnknown` + `payout.unknown.v1` **sin reversa**; `unknown` admite `Confirm`/`Fail` como resolución. **Pendiente:** job/webhook que consulte al banco y resuelva payouts `unknown` — hoy quedan trabados manualmente. | ✅ Parcial (falta el resolver) |
-| 4 | ~~TOCTOU entre leer saldo y reservar~~ | `LockBalance` (`pg_advisory_xact_lock` por tenant+moneda) serializa saldo + INSERT en la misma tx. Pendiente: test de integración concurrente real (requiere Postgres). | ✅ Resuelto |
-| 5 | Payout trabado en `processing` | Si el proceso cae entre el UPDATE a `processing` y el cierre, no hay job de recuperación (mismo problema que PAYMENT.MD §10.2b). Depende del resolver de #3. | Alto |
-| 6 | Cuenta bancaria sin filtrar `verified` ni moneda | El provider toma la primera cuenta de una solicitud `approved` **aunque `verified = false`** y sin casar `oba.currency` con la moneda del payout. Riesgo: transferir a una cuenta no validada o en otra moneda. Corregir en la query (y decidir política multi-cuenta). | Medio |
-| 7 | Notificación de `unknown` | Notification no tiene plantilla para `payout.unknown.v1`: el comercio no sabe que su retiro está en estado ambiguo. | Bajo |
-| 8 | Sin autorización granular | `/payouts` vive en `protected` con JWT genérico: sin permiso `payouts:create/read`, sin soporte de API key, sin guards (`RouteGuards`) como Payments. Cualquier rol del tenant puede desembolsar. | Medio |
-| 9 | Snapshot bancario en claro | `bank_acct_num` persiste el CBU sin cifrar (necesario para la transferencia). Falta cifrado en reposo / política de retención. | Medio |
-| 10 | Filtrado de información | `failure_reason` guarda y expone en `PayoutView` el texto crudo del banco. Contrato inconsistente: `InitiatePayoutResult` sin tags JSON (PascalCase) vs `PayoutView` snake_case. | Bajo |
-| 11 | Sin comisión de desembolso | No existe `payout_fee`; el monto transferido es exactamente el retirado. Definir producto antes de cablearlo al Ledger. | Funcional |
-| 12 | Mock ignora su idempotencia | El adapter recibe `transfer_<payout_id>` pero no la usa; un banco real sí debe honrarla. El clasificador `isIndeterminate` depende de tipos/mensajes de error estándar: un banco real necesitará errores tipados propios. | Bajo |
+| 1 | Alta | Sin autorización | `/payouts` vive en `protected` con solo `JWTMiddleware`: sin permiso ni guard por ruta. Cualquier usuario del tenant, incluido `read_only`, puede retirar el saldo del comercio. Tampoco acepta API key. |
+| 2 | Alta | Rechazo por descarte | `isIndeterminate` reconoce un timeout o un error de red por tipo o por mensaje, y **todo lo demás es rechazo**: `Fail` + reversa del asiento. Un 5xx del banco o un error no previsto de un SDK revierten el asiento aunque el banco haya pagado. Debería ser al revés: rechazo solo con un error tipado del adaptador y, si no, resultado desconocido. |
+| 3 | Alta | `unknown` y `processing` sin resolver | Nada consulta al banco para cerrar un payout `unknown`, ni uno que quedó en `processing` porque el proceso cayó o falló la persistencia: los fondos quedan en `payout_transit` indefinidamente. Además, `Fail` y `MarkUnknown` se persisten ignorando el error (`_ = Update`, `_ = RunInTx`), y `Update` no es condicional al estado (dos resoluciones pisarían una a la otra). |
+| 4 | Media | Cuenta bancaria sin verificar ni casar moneda | `BankAccountProvider` toma la primera cuenta de una solicitud `approved` sin filtrar `verified` ni la moneda del payout. Y nada en Onboarding marca una cuenta `verified = true`: filtrar hoy bloquearía todos los payouts. Hay que decidir quién la verifica (p. ej. la aprobación del KYC). |
+| 5 | Media | Errores de transferencia como 500 | Un rechazo del banco y un resultado desconocido (`ErrBankTransferUnknown`) caen en el `default` de `respondDomainError`: 500 sin `payout_id`. Debería ser como Payment: rechazo con el id y el estado, y desconocido como 202 (`unknown`). |
+| 6 | Media | RLS no efectiva | El repo y `BankAccountProvider` (tablas de Onboarding, con RLS) van por el pool fuera de la sesión RLS: funciona solo porque el rol de la app tiene `BYPASSRLS`. Con un rol sin él, el provider no encuentra la cuenta y ningún payout sale. La política de `payouts` no tiene `NULLIF` ni operador. |
+| 7 | Baja | Error crudo del banco y contrato JSON | `failure_reason` guarda el texto crudo del banco y lo expone en `PayoutView` (el comentario del dominio dice que no se expone), en `payout.failed.v1` y en `payout.unknown.v1`. `InitiatePayoutResult` no tiene tags JSON (PascalCase) mientras `PayoutView` usa snake_case. |
+| 8 | Baja | Sin notificación de `unknown` | Notification no tiene plantilla para `payout.unknown.v1`: el comercio no sabe que su retiro está en estado ambiguo. |
+| 9 | Baja | IDs mal formados y `limit` sin tope | `GET /payouts/abc` responde 500; `GET /payouts?limit=1000000` no tiene tope. |
+| 10 | Baja | Código muerto | `ConfirmPayoutCmd`, `FailPayoutCmd`, `ReconstitutePayout` (sin clave), `ErrPayoutAlreadyConfirmed`, `ErrPayoutAlreadyFailed`; `TransferResult.Status` se ignora. |
+| 11 | Producto | Alcance | `bank_acct_num` (CBU) en claro, sin cifrado ni retención. Sin comisión de desembolso. Una sola cuenta por tenant. El mock de transferencia ignora la clave de idempotencia (un banco real debe honrarla). |
 
 ---
 
