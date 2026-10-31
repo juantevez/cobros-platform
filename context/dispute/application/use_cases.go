@@ -314,7 +314,8 @@ func (uc *ListDisputesUseCase) Execute(ctx context.Context, q ListDisputesQuery)
 // ── ExpiryPoller ─────────────────────────────────────────────────────────────
 
 // ExpiryPoller marca como expired las disputes abiertas cuyo deadline venció.
-// Corre en cmd/worker como goroutine independiente cada hora.
+// Corre en cmd/worker como goroutine independiente: un ciclo al arrancar y
+// después cada expiryInterval.
 type ExpiryPoller struct {
 	repo      DisputeRepository
 	txManager TxManager
@@ -334,11 +335,23 @@ func NewExpiryPoller(
 		clock: clock, logger: logger}
 }
 
-func (p *ExpiryPoller) Start(ctx context.Context) error {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-	p.logger.Info("dispute expiry poller started")
+const (
+	// expiryInterval acota la demora entre el vencimiento y el cierre (antes
+	// era de hasta una hora, y el primer ciclo recién corría a la hora).
+	expiryInterval = 5 * time.Minute
+	expiryBatch    = 100
+	// maxExpiryBatches acota un ciclo: con más vencidas, siguen en el próximo.
+	maxExpiryBatches = 10
+)
 
+func (p *ExpiryPoller) Start(ctx context.Context) error {
+	ticker := time.NewTicker(expiryInterval)
+	defer ticker.Stop()
+	p.logger.Info("dispute expiry poller started", "interval", expiryInterval)
+
+	if ctx.Err() == nil {
+		p.runCycle(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -349,13 +362,32 @@ func (p *ExpiryPoller) Start(ctx context.Context) error {
 	}
 }
 
+// runCycle vence las disputas abiertas con deadline pasado, de a lotes de
+// expiryBatch. Corta con un lote incompleto (no quedan más) o sin avances:
+// las que fallan siguen vencidas y pedirlas otra vez daría siempre las mismas.
 func (p *ExpiryPoller) runCycle(ctx context.Context) {
 	now := p.clock.Now()
-	overdue, err := p.repo.ListOverdue(ctx, now, 100)
-	if err != nil {
-		p.logger.Error("dispute expiry poller: list overdue", "error", err)
-		return
+	total := 0
+	for i := 0; i < maxExpiryBatches; i++ {
+		overdue, err := p.repo.ListOverdue(ctx, now, expiryBatch)
+		if err != nil {
+			p.logger.Error("dispute expiry poller: list overdue", "error", err)
+			break
+		}
+		expired := p.expireBatch(ctx, overdue, now)
+		total += expired
+		if len(overdue) < expiryBatch || expired == 0 {
+			break
+		}
 	}
+	if total > 0 {
+		p.logger.Info("dispute expiry poller: expired", "count", total)
+	}
+}
+
+// expireBatch vence cada disputa del lote y devuelve cuántas cerró.
+func (p *ExpiryPoller) expireBatch(ctx context.Context, overdue []*domain.Dispute, now time.Time) int {
+	expired := 0
 	for _, d := range overdue {
 		if err := d.Expire(now); err != nil {
 			continue
@@ -377,11 +409,11 @@ func (p *ExpiryPoller) runCycle(ctx context.Context) {
 			}
 			p.logger.Error("dispute expiry poller: expire dispute",
 				"dispute_id", d.ID(), "error", err)
+			continue
 		}
+		expired++
 	}
-	if len(overdue) > 0 {
-		p.logger.Info("dispute expiry poller: expired", "count", len(overdue))
-	}
+	return expired
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

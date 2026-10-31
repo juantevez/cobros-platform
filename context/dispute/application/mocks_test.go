@@ -38,6 +38,8 @@ type fakeRepo struct {
 	findPayErr error
 	listErr    error
 	overdueErr error
+	// overdueCalls cuenta las llamadas a ListOverdue (lotes del poller).
+	overdueCalls int
 
 	gotStatusFilter string
 	gotLimit        int
@@ -100,10 +102,22 @@ func (r *fakeRepo) ListByTenant(ctx context.Context, tenantID domain.TenantID, s
 }
 
 func (r *fakeRepo) ListOverdue(ctx context.Context, now time.Time, limit int) ([]*domain.Dispute, error) {
+	r.overdueCalls++
 	if r.overdueErr != nil {
 		return nil, r.overdueErr
 	}
-	return r.overdue, nil
+	// Como la base: las vencidas que no se actualizaron con éxito, hasta limit.
+	persisted := map[domain.DisputeID]bool{}
+	for _, d := range r.updated {
+		persisted[d.ID()] = true
+	}
+	var out []*domain.Dispute
+	for _, d := range r.overdue {
+		if !persisted[d.ID()] && len(out) < limit {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }
 
 func (r *fakeRepo) ListAll(ctx context.Context, statusFilter string, limit int) ([]*domain.Dispute, error) {

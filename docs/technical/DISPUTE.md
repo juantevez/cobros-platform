@@ -38,7 +38,7 @@ Cableado en dos procesos:
 - **[cmd/api/main.go](../../cmd/api/main.go)** (sección *Disputes & Chargebacks*): los 6 casos de uso HTTP.
 - **[cmd/worker/main.go](../../cmd/worker/main.go)** (sección *Dispute: Ledger consumer + ExpiryPoller*):
   `ledger.DisputeConsumer` (stream `DISPUTE`, filtro `dispute.>`) y `disputeapp.ExpiryPoller`
-  (ticker de 1 hora, lote de 100).
+  (un ciclo al arrancar y después cada 5 minutos, en lotes de 100).
 
 ### Fuera de alcance (hoy)
 
@@ -91,7 +91,7 @@ sequenceDiagram
         M->>D: POST /disputes/:id/accept {note}
         D->>DB: tx{UPDATE accepted + outbox dispute.resolved.v1(accepted)}
         N-->>L: hold DEBIT / in_transit CREDIT (el PSP descuenta el contracargo)
-    else Vence el plazo (poller horario)
+    else Vence el plazo (poller, cada 5 min)
         W->>DB: ListOverdue(now, 100)
         W->>DB: tx{UPDATE expired + outbox dispute.resolved.v1(expired)}
         N-->>L: ídem perdido
@@ -235,10 +235,9 @@ Ambos: cargar → mutar agregado → tx{Update + Publish}. Diferencias:
 
 ### 5.4 `ExpiryPoller`
 
-Goroutine en `cmd/worker`: ticker de **1 hora** (primer ciclo recién a la hora de arrancar).
-Ciclo: `ListOverdue(now, 100)` → por cada disputa: `Expire()` (falla silenciosamente si ya
-no está `open`) → tx{Update + Publish(`expired`)}. Los errores por disputa se loguean y el
-ciclo continúa. Sin paginación: más de 100 vencidas se atienden en ciclos posteriores.
+Goroutine en `cmd/worker`: un ciclo **al arrancar** y después cada **5 minutos** (`expiryInterval`), así que una disputa se cierra a lo sumo ~5 min después de vencer.
+
+Ciclo: `ListOverdue(now, 100)` como operador → por cada disputa: `Expire()` (se saltea si ya no está `open`) → tx{Update + Publish(`expired`)} con el tenant de la disputa. Repite con el siguiente lote mientras el anterior venga lleno y haya cerrado alguna, hasta 10 lotes (1000 disputas) por ciclo; el resto sigue en el próximo. Si un lote no cierra ninguna (todas fallan), corta: pedirlas otra vez daría las mismas. Los errores por disputa se loguean; `ErrOptimisticLock` (el comercio actuó justo al vencer) se saltea sin error.
 
 ### 5.5 Views
 
@@ -443,10 +442,9 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Poller: latencia y escala | Ciclo horario ⇒ hasta ~1 h entre vencimiento y cierre; el primer ciclo recién corre a la hora de arrancar; lote fijo de 100. |
-| 2 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
-| 3 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
-| 4 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
+| 1 | Baja | Evidencia: N+1 y una sola ronda | `scanWithEvidence` hace 1 query extra por disputa listada. No hay forma de agregar evidencia en `under_review`. |
+| 2 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
+| 3 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago y sin pre-arbitraje. |
 
 ---
 
@@ -455,7 +453,7 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/dispute_test.go`, `events_test.go`, `vo_test.go` | Unitarios: creación y validaciones (tenant del pago, `deadline` en el evento de apertura), cada transición de la FSM, deadline/`ErrDisputeExpired`, evidencia requerida, `IsOverdue`, `IsFinal`, parseo de enums/IDs, reconstitución, eventos registrados. |
-| Aplicación | `application/use_cases_test.go`, `expiry_poller_test.go` (+ `mocks_test.go`) | Fakes en memoria de repo/tx/publisher/clock: happy paths, duplicados, cross-tenant, outcomes inválidos, límites de `limit`, mapper `toView`, ciclo del poller (expira, publica, tolera errores) y cancelación de contexto. |
+| Aplicación | `application/use_cases_test.go`, `expiry_poller_test.go` (+ `mocks_test.go`) | Fakes en memoria de repo/tx/publisher/clock: happy paths, duplicados, cross-tenant, outcomes inválidos, límites de `limit`, mapper `toView`, ciclo del poller (expira, publica, tolera errores, lotes hasta el tope, corte sin avances, primer ciclo al arrancar) y cancelación de contexto. |
 | HTTP inbound | `inbound/http/handler_test.go` | Gin + `httptest`: códigos 201/204/400/404/409/422, `RegisterRoutes`, el guard de cada ruta (403; pánico si falta alguno), la marca de operador en abrir y resolver (y no en contestar) y el mapeo de cada error de dominio. |
 | Postgres outbound | `outbound/postgres/dispute_repo_test.go`, `integration_test.go` | **pgxmock v4**: SQL exacto de Save/Update (incluido el `WHERE version` y 0 filas → `ErrOptimisticLock`)/finds/ListByTenant/ListOverdue, scan de evidencia, `PaymentReader`, errores de scan/save, `nullStr`. Integración contra PostgreSQL: concurrencia optimista, segunda disputa del mismo pago contra la constraint real (→ `ErrDuplicatePaymentKey`) y RLS con un rol sin `BYPASSRLS` (`dispute_rls_probe`). |
 | Ledger (consumidor) | `context/ledger/.../nats/dispute_consumer_test.go` | Asientos generados por `dispute.opened.v1` / `dispute.resolved.v1` según outcome. |
