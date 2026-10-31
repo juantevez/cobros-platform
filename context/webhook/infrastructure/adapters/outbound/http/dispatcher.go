@@ -32,11 +32,19 @@ type Dispatcher struct {
 	client *http.Client
 }
 
-// NewDispatcher crea un Dispatcher con timeout de 30s.
+// NewDispatcher crea un Dispatcher con timeout de 30s que no sigue redirects.
+//
+// Ante 301/302/303 el http.Client repite el request como GET sin body: el
+// destino podía responder 2xx y la delivery quedaba entregada sin que el
+// comercio recibiera el evento. Un 3xx es un intento fallido; el comercio
+// tiene que registrar la URL final.
 func NewDispatcher() *Dispatcher {
 	return &Dispatcher{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -83,11 +91,16 @@ func (d *Dispatcher) Dispatch(
 	// Leer hasta 500 bytes de la respuesta para debugging.
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 
+	var errMsg string
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		errMsg = fmt.Sprintf("redirect not followed (Location: %q): register the final URL", resp.Header.Get("Location"))
+	}
+
 	attempt := domain.NewDeliveryAttempt(
 		delivery.AttemptCount()+1,
 		resp.StatusCode,
 		string(bodyBytes),
-		"",
+		errMsg,
 		elapsed,
 	)
 	return attempt, nil

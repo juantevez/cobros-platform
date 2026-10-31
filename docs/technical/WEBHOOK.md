@@ -185,6 +185,8 @@ X-Cobros-Timestamp: <unix, momento del intento> (no firmado, §10)
 
 Verificación en el comercio: `hmac.compare_digest(hex(HMAC-SHA256(secret, raw_body)), header[7:])`.
 
+Solo un **2xx** cuenta como entregado. Los redirects **no se siguen**: un 3xx es un intento fallido y su `error` indica el `Location`, para que el comercio registre la URL final. Seguirlos convertía un 301/302/303 en un GET sin body que podía dar la delivery por entregada.
+
 ---
 
 ## 7. Eventos
@@ -242,16 +244,15 @@ Los dos primeros se publican por outbox en la tx del caso de uso. El de agotada 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
 | 1 | Alta | SSRF | `validateURL` acepta cualquier host: `localhost`, IPs privadas, `169.254.169.254` y nombres internos de docker (`postgres`, `nats`). El worker hace el POST desde la red interna, y los primeros 500 bytes de la respuesta se le devuelven al tenant en `GET /deliveries/:id`. |
-| 2 | Alta | Redirects | El `http.Client` sigue redirects. Ante 301/302/303, Go repite el request como **GET sin body**: si el destino responde 2xx, la delivery queda `delivered` sin que el comercio reciba el evento. Verificado: POST → 302 → GET vacío → 200 → `delivered`. Además permite saltar cualquier filtro de destino (#1). |
-| 3 | Media | Persistencia del intento | `RetryDelivery.dispatch` hace el `UPDATE` de la delivery y el `INSERT` del intento sin tx, y publica `webhook.delivery.exhausted.v1` fuera de tx descartando el error. El body de la respuesta se corta en 500 bytes y puede partir un carácter UTF-8; un body con bytes inválidos o `NUL` tampoco entra en `TEXT`. Verificado: respuesta 2xx de 501 bytes con `ñ` al final → la delivery queda `delivered` y el intento se pierde (`SQLSTATE 22021`). |
-| 4 | Media | Despacho concurrente | Ni el poller ni el reintento manual reclaman la delivery. El reintento manual acepta `pending`, justo lo que el poller está por despachar. Resultado: doble POST, choque en `UNIQUE (delivery_id, attempt_num)` (se pierde un intento) y *last-write-wins*, que puede volver un `delivered` a `failed` y reenviarlo. Con dos réplicas del worker, cada delivery sale dos veces. |
-| 5 | Media | RLS no efectiva | Las políticas no tienen `NULLIF` ni operador, y `webhook_delivery_attempts` no tiene RLS ni `tenant_id`. El consumer no pone el tenant en el contexto, el poller es cross-tenant y las lecturas del API van al pool fuera de la sesión RLS. Con un rol sin `BYPASSRLS`, el consumer no encontraría endpoints y descartaría los eventos en silencio. |
-| 6 | Media | Firma sin timestamp | `X-Cobros-Timestamp` viaja pero no se firma: un request capturado se puede reenviar al comercio indefinidamente con firma válida, y el comercio no tiene cómo rechazar los viejos. |
-| 7 | Baja | IDs inválidos → 500 | `DELETE /endpoints/abc`, `GET`/`POST /deliveries/abc[/retry]`: el error de parseo cae en el `default` de `respondError`. |
-| 8 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
-| 9 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
-| 10 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
-| 11 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
+| 2 | Media | Persistencia del intento | `RetryDelivery.dispatch` hace el `UPDATE` de la delivery y el `INSERT` del intento sin tx, y publica `webhook.delivery.exhausted.v1` fuera de tx descartando el error. El body de la respuesta se corta en 500 bytes y puede partir un carácter UTF-8; un body con bytes inválidos o `NUL` tampoco entra en `TEXT`. Verificado: respuesta 2xx de 501 bytes con `ñ` al final → la delivery queda `delivered` y el intento se pierde (`SQLSTATE 22021`). |
+| 3 | Media | Despacho concurrente | Ni el poller ni el reintento manual reclaman la delivery. El reintento manual acepta `pending`, justo lo que el poller está por despachar. Resultado: doble POST, choque en `UNIQUE (delivery_id, attempt_num)` (se pierde un intento) y *last-write-wins*, que puede volver un `delivered` a `failed` y reenviarlo. Con dos réplicas del worker, cada delivery sale dos veces. |
+| 4 | Media | RLS no efectiva | Las políticas no tienen `NULLIF` ni operador, y `webhook_delivery_attempts` no tiene RLS ni `tenant_id`. El consumer no pone el tenant en el contexto, el poller es cross-tenant y las lecturas del API van al pool fuera de la sesión RLS. Con un rol sin `BYPASSRLS`, el consumer no encontraría endpoints y descartaría los eventos en silencio. |
+| 5 | Media | Firma sin timestamp | `X-Cobros-Timestamp` viaja pero no se firma: un request capturado se puede reenviar al comercio indefinidamente con firma válida, y el comercio no tiene cómo rechazar los viejos. |
+| 6 | Baja | IDs inválidos → 500 | `DELETE /endpoints/abc`, `GET`/`POST /deliveries/abc[/retry]`: el error de parseo cae en el `default` de `respondError`. |
+| 7 | Baja | `limit` sin tope | `GET /deliveries?limit=1000000` carga todo el historial del tenant. |
+| 8 | Baja | Desactivar dos veces | `DeactivateEndpoint` sobre un endpoint ya inactivo vuelve a emitir `webhook.endpoint.deactivated.v1` y pisa `updated_at`. |
+| 9 | Baja | Suscripciones sin catálogo | `events` acepta cualquier string: un typo o un tipo que no existe (el README anterior documentaba `kyc.approved`) da un endpoint que nunca recibe nada, sin error. |
+| 10 | Producto | Alcance | Secret en claro y sin rotación. Endpoints sin edición ni reactivación. No se puede reenviar una delivery `exhausted`, y las de un endpoint desactivado quedan colgadas. El reintento manual es síncrono y consume el presupuesto de reintentos. Un endpoint caído (timeout de 30 s) ocupa el batch y demora a todos los tenants: no hay *circuit breaker* ni cola por endpoint. `data` expone el evento interno tal cual. Se permite `http`. Historial sin paginación, filtros ni retención. `webhook.delivery.exhausted.v1` no lo consume nadie (no se avisa al comercio). |
 
 ---
 
@@ -263,7 +264,7 @@ Los dos primeros se publican por outbox en la tx del caso de uso. El de agotada 
 | Aplicación | `application/*_test.go` | Alta y baja con publicación en tx, `DispatchEvent` (idempotencia, fallo parcial), `RetryDelivery` (tenant ajeno, final, endpoint inactivo, exhausted), poller con concurrencia, listados. |
 | HTTP | `inbound/http/webhook_handler_test.go` | Handlers, mapeo de errores y guard en cada ruta (403; `RegisterRoutes` exige el guard). |
 | NATS | `inbound/nats/event_consumer_test.go` | Extracción de tenant, `event_id` y `occurred_at`; casos que hacen *ack* sin reintentar. |
-| Dispatcher | `outbound/http/dispatcher_test.go` | Headers, firma y errores de red contra `httptest`. |
+| Dispatcher | `outbound/http/dispatcher_test.go` | Headers, firma, errores de red y redirects no seguidos (301/302/303/307/308) contra `httptest`. |
 | Postgres | `outbound/postgres/repo_test.go` | Solo `pgxmock`: no hay integración contra una base real. |
 
 ```bash
@@ -292,7 +293,7 @@ context/webhook/
     ├── inbound/http/webhook_handler.go     # rutas /webhooks/*
     ├── inbound/nats/event_consumer.go      # 4 durables
     └── outbound/
-        ├── http/dispatcher.go              # POST firmado, timeout 30s
+        ├── http/dispatcher.go              # POST firmado, timeout 30s, sin redirects
         ├── crypto/secret_generator.go      # whsec_<64 hex>
         └── postgres/{endpoint,delivery}_repo.go
 ```

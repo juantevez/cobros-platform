@@ -101,6 +101,35 @@ func TestDispatcher_Dispatch(t *testing.T) {
 		}
 	})
 
+	// Seguir un 302 convertía el POST en un GET sin body: si el destino
+	// respondía 200, la delivery quedaba entregada sin payload.
+	for _, code := range []int{301, 302, 303, 307, 308} {
+		t.Run("redirect "+strconv.Itoa(code)+" is not followed", func(t *testing.T) {
+			finalHits := 0
+			mux := http.NewServeMux()
+			mux.HandleFunc("/hooks", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/final", code)
+			})
+			mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) { finalHits++ })
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			attempt, err := NewDispatcher().Dispatch(context.Background(), endpointFor(srv.URL+"/hooks"), deliveryWithAttempts(0))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if finalHits != 0 {
+				t.Errorf("redirect target was hit %d times", finalHits)
+			}
+			if attempt.HTTPStatus() != code || attempt.Succeeded() {
+				t.Errorf("attempt status = %d succeeded = %v, want failed %d", attempt.HTTPStatus(), attempt.Succeeded(), code)
+			}
+			if !strings.Contains(attempt.ErrMsg(), "redirect not followed") || !strings.Contains(attempt.ErrMsg(), "/final") {
+				t.Errorf("errMsg = %q", attempt.ErrMsg())
+			}
+		})
+	}
+
 	t.Run("response body is read up to 500 bytes", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(strings.Repeat("x", 2000)))
