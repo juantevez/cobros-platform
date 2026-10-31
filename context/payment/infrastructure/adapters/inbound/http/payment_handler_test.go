@@ -590,3 +590,18 @@ func TestGetDoesNotLeakPSPError(t *testing.T) {
 		t.Errorf("status = %d body = %s", rec.Code, rec.Body)
 	}
 }
+
+// Un ID mal formado en la URL caía en el default de respondDomainError (500).
+func TestMalformedPaymentIDReturns400(t *testing.T) {
+	tid := uuid.NewString()
+	h := newHandler(newRepo(), defaultOpts())
+	params := gin.Params{{Key: "paymentID", Value: "abc"}}
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"GET /payments/abc":         doRequest(h.Get, http.MethodGet, "/payments/abc", "", tid, params),
+		"POST /payments/abc/refund": doRequest(h.Refund, http.MethodPost, "/payments/abc/refund", "", tid, params),
+	} {
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid id") {
+			t.Errorf("%s: status = %d body = %s, want 400", name, rec.Code, rec.Body)
+		}
+	}
+}

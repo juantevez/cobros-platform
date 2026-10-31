@@ -7,6 +7,8 @@ import "errors"
 const FailureDeclinedByPSP = "declined by the payment provider"
 
 var (
+	// ErrInvalidID: un ID (pago, tenant) que no es un UUID.
+	ErrInvalidID            = errors.New("invalid id: must be a UUID")
 	ErrPaymentNotFound      = errors.New("payment not found")
 	ErrPaymentAlreadyExists = errors.New("payment with this idempotency key already exists")
 	// ErrIdempotencyKeyConflict: la clave ya se usó para un pago con otro

@@ -153,6 +153,7 @@ Archivo: [domain/errors.go](../../context/payment/domain/errors.go)
 | `ErrPaymentNotFound` | 404 |
 | `ErrPaymentAlreadyExists` | Lo devuelve `Save` ante el `UNIQUE (tenant_id, idempotency_key)`; el caso de uso lo resuelve como reintento (nunca llega al cliente) |
 | `ErrIdempotencyKeyConflict` (la clave ya se usó con otro monto, moneda o método) | 409 |
+| `ErrInvalidID` (pago o tenant que no es UUID, p. ej. `GET /payments/abc`) | 400 |
 | `ErrInvalidFee` (comisión negativa, o comisiones que dejan el neto del comercio ≤ 0, que Ledger no puede registrar) | 500: es un error de configuración de Billing o del PSP, no del cliente |
 | `ErrRiskRejected`, `ErrNotCaptured`, `ErrAlreadyCaptured`, `ErrInvalidTransition` | 422 |
 | `ErrInvalidAmount`, `ErrInvalidCurrency`, `ErrInvalidMethod` | 400 |
@@ -365,9 +366,8 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | IDs mal formados → 500 | `GET`/`POST /payments/abc[/refund]`: el error de parseo cae en el `default` de `respondDomainError`. |
-| 2 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
-| 3 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
+| 1 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
+| 2 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
 
 ---
 

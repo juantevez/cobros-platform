@@ -158,7 +158,8 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrAlreadyCaptured),
 		errors.Is(err, domain.ErrInvalidTransition):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrInvalidAmount),
+	case errors.Is(err, domain.ErrInvalidID),
+		errors.Is(err, domain.ErrInvalidAmount),
 		errors.Is(err, domain.ErrInvalidCurrency),
 		errors.Is(err, domain.ErrInvalidMethod):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

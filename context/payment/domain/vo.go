@@ -16,14 +16,14 @@ func NewPaymentID() PaymentID { return PaymentID(uuid.NewString()) }
 
 func ParsePaymentID(s string) (PaymentID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid payment id: %w", err)
+		return "", fmt.Errorf("%w: invalid payment id: %v", ErrInvalidID, err)
 	}
 	return PaymentID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: invalid tenant id: %v", ErrInvalidID, err)
 	}
 	return TenantID(s), nil
 }
