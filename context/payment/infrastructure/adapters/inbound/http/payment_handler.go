@@ -78,6 +78,16 @@ func (h *PaymentHandler) Process(c *gin.Context) {
 		})
 		return
 	}
+	if errors.Is(err, domain.ErrPaymentPending) {
+		// El PSP no confirmó (timeout, red): el pago sigue en processing y se
+		// resuelve después. 202 con su id para consultarlo.
+		c.JSON(http.StatusAccepted, gin.H{
+			"payment_id": result.PaymentID,
+			"status":     result.Status,
+			"detail":     domain.ErrPaymentPending.Error(),
+		})
+		return
+	}
 	if err != nil {
 		respondDomainError(c, err)
 		return

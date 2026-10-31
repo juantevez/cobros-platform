@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -333,7 +334,7 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 
 	t.Run("psp rejection fails payment and publishes failed event", func(t *testing.T) {
 		d := newProcessDeps()
-		d.psp.captureErr = errors.New("card declined")
+		d.psp.captureErr = fmt.Errorf("%w: card declined", ErrPSPDeclined)
 
 		res, err := d.uc().Execute(ctx, validProcessCmd())
 		if !errors.Is(err, domain.ErrPaymentDeclined) || !errors.Is(err, d.psp.captureErr) {
@@ -345,7 +346,7 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 
 		p := d.repo.saved[0]
-		if p.Status() != domain.StatusFailed || p.FailureReason() != "card declined" || p.PSPName() != "fakepsp" {
+		if p.Status() != domain.StatusFailed || !strings.Contains(p.FailureReason(), "card declined") || p.PSPName() != "fakepsp" {
 			t.Errorf("payment not failed: status=%q reason=%q psp=%q", p.Status(), p.FailureReason(), p.PSPName())
 		}
 		wantUpdates := []domain.PaymentStatus{domain.StatusProcessing, domain.StatusFailed}
@@ -357,9 +358,31 @@ func TestProcessPaymentUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	// Un timeout o error de red no es un rechazo: el PSP pudo haber capturado.
+	// Antes el pago quedaba failed y el pagador cobrado sin pago registrado.
+	for _, pspErr := range []error{context.DeadlineExceeded, errors.New("connection reset by peer")} {
+		t.Run("unknown psp outcome leaves the payment processing: "+pspErr.Error(), func(t *testing.T) {
+			d := newProcessDeps()
+			d.psp.captureErr = pspErr
+
+			res, err := d.uc().Execute(ctx, validProcessCmd())
+			if !errors.Is(err, domain.ErrPaymentPending) || errors.Is(err, domain.ErrPaymentDeclined) {
+				t.Fatalf("expected ErrPaymentPending, got %v", err)
+			}
+			p := d.repo.saved[0]
+			if p.Status() != domain.StatusProcessing || res.Status != domain.StatusProcessing.String() || res.PaymentID != p.ID().String() {
+				t.Errorf("payment = %q result = %+v, want processing", p.Status(), res)
+			}
+			// Solo el claim: ningún Update final ni evento.
+			if !reflect.DeepEqual(d.repo.updates, []domain.PaymentStatus{domain.StatusProcessing}) || len(d.pub.eventTypes()) != 0 {
+				t.Errorf("updates = %v events = %v", d.repo.updates, d.pub.eventTypes())
+			}
+		})
+	}
+
 	t.Run("psp rejection persist error is wrapped", func(t *testing.T) {
 		d := newProcessDeps()
-		d.psp.captureErr = errors.New("card declined")
+		d.psp.captureErr = fmt.Errorf("%w: card declined", ErrPSPDeclined)
 		d.repo.updateErr = errBoom
 		d.repo.updateErrAt = 2
 

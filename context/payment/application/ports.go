@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/payment/domain"
@@ -23,12 +24,19 @@ type PaymentRepository interface {
 
 // ── PSP ───────────────────────────────────────────────────────────────────────
 
+// ErrPSPDeclined: el PSP rechazó el pago de forma definitiva (fondos
+// insuficientes, tarjeta inválida, …). Los adaptadores lo envuelven con %w.
+// Cualquier otro error de AuthorizeAndCapture (timeout, red, contexto
+// cancelado, 5xx) es un resultado DESCONOCIDO: el PSP pudo haber capturado.
+var ErrPSPDeclined = errors.New("psp declined the payment")
+
 // PSPAdapter abstrae la comunicación con un proveedor de pago externo.
 // Cada PSP (Mercado Pago, PayPal, adquirente) implementa esta interfaz.
 // El núcleo de la aplicación nunca conoce al PSP concreto.
 type PSPAdapter interface {
 	// AuthorizeAndCapture captura fondos en un solo paso.
-	// Es la operación más común para pagos de ecommerce.
+	// Es la operación más común para pagos de ecommerce. Un rechazo definitivo
+	// debe envolver ErrPSPDeclined; otro error significa resultado desconocido.
 	AuthorizeAndCapture(ctx context.Context, req PSPCaptureRequest) (PSPCaptureResult, error)
 	// Refund devuelve fondos al pagador.
 	Refund(ctx context.Context, req PSPRefundRequest) (PSPRefundResult, error)

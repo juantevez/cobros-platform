@@ -20,7 +20,9 @@ import (
 //  6. Calcular comisión de la plataforma.
 //  7. Seleccionar PSP y reclamar el pago (initiated → processing, UPDATE condicional).
 //  8. Ejecutar captura contra el PSP.
-//  9. Si PSP falla → Payment.Fail() → publicar PaymentFailed → ErrPaymentDeclined.
+//  9. Si PSP rechaza (ErrPSPDeclined) → Payment.Fail() → publicar PaymentFailed →
+//     ErrPaymentDeclined. Si el resultado es desconocido (timeout, red) → el pago
+//     queda en processing → ErrPaymentPending.
 // 10. Si PSP ok → Payment.Capture() → RunInTx { Update + Publish PaymentCaptured }.
 //
 // Nota sobre consistencia: el Ledger registra el asiento al recibir PaymentCaptured
@@ -200,8 +202,15 @@ func (uc *ProcessPaymentUseCase) process(ctx context.Context, payment *domain.Pa
 		Metadata:       payment.Metadata(),
 	})
 
-	// ── 9. PSP rechazó ───────────────────────────────────────────────────────
+	// ── 9. PSP rechazó o no confirmó ─────────────────────────────────────────
 
+	if pspErr != nil && !errors.Is(pspErr, ErrPSPDeclined) {
+		// Resultado desconocido: el PSP pudo haber capturado. Marcarlo failed
+		// dejaba al pagador cobrado sin pago registrado (y un reintento con la
+		// misma clave devolvía el failed). Queda en processing, como está en
+		// la base desde el claim.
+		return toResult(payment, wasExisting), fmt.Errorf("%w: %w", domain.ErrPaymentPending, pspErr)
+	}
 	if pspErr != nil {
 		_ = payment.Fail(psp.Name(), pspErr.Error())
 		if updateErr := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {

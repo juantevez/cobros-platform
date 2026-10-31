@@ -263,7 +263,7 @@ func TestProcess(t *testing.T) {
 
 	t.Run("psp rejection returns 402 with payment id, without leaking details", func(t *testing.T) {
 		o := defaultOpts()
-		o.psp.captureErr = errors.New("card 4111 declined")
+		o.psp.captureErr = fmt.Errorf("%w: card 4111 declined", application.ErrPSPDeclined)
 		r := newRepo()
 		rec := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
 		if rec.Code != http.StatusPaymentRequired {
@@ -282,6 +282,24 @@ func TestProcess(t *testing.T) {
 		}
 		if body.Status != "failed" || body.PaymentID != r.byKey["order-1"].ID().String() {
 			t.Errorf("unexpected decline body: %+v", body)
+		}
+	})
+
+	t.Run("unknown psp outcome returns 202 with the processing payment", func(t *testing.T) {
+		o := defaultOpts()
+		o.psp.captureErr = errors.New("dial tcp 10.0.0.1:443: i/o timeout")
+		r := newRepo()
+		rec := doRequest(newHandler(r, o).Process, http.MethodPost, "/payments", validBody, tid, nil)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202", rec.Code)
+		}
+		var body struct {
+			PaymentID string `json:"payment_id"`
+			Status    string `json:"status"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if body.Status != "processing" || body.PaymentID != r.byKey["order-1"].ID().String() || strings.Contains(rec.Body.String(), "10.0.0.1") {
+			t.Errorf("body = %s", rec.Body)
 		}
 	})
 
