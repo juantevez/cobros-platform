@@ -146,6 +146,23 @@ func TestWebhookEndpoint_Deactivate(t *testing.T) {
 	}
 }
 
+func TestWebhookEndpoint_DeactivateTwice(t *testing.T) {
+	e := newTestEndpoint(t)
+	e.PullEvents()
+	e.Deactivate()
+	e.PullEvents()
+	deactivatedAt := e.UpdatedAt()
+
+	e.Deactivate()
+
+	if e.Active() || !e.UpdatedAt().Equal(deactivatedAt) {
+		t.Errorf("active = %v updatedAt = %v, want unchanged %v", e.Active(), e.UpdatedAt(), deactivatedAt)
+	}
+	if evs := e.PullEvents(); len(evs) != 0 {
+		t.Errorf("second Deactivate emitted %d events, want 0", len(evs))
+	}
+}
+
 func TestWebhookEndpoint_SubscribesTo(t *testing.T) {
 	e := newTestEndpoint(t, "payment.captured", "payout.confirmed")
 

@@ -187,6 +187,22 @@ func TestDeactivateEndpointUseCase_Execute(t *testing.T) {
 		}
 	})
 
+	// Un segundo DELETE volvía a emitir el evento y pisaba updated_at.
+	t.Run("already inactive endpoint is a no-op", func(t *testing.T) {
+		e := newEndpoint(tenantA)
+		e.Deactivate()
+		e.PullEvents()
+		repo, tx, pub := newEndpointRepo(e), &fakeTx{}, &fakePublisher{}
+
+		err := NewDeactivateEndpointUseCase(repo, tx, pub).Execute(ctx, DeactivateEndpointCmd{TenantID: tenantA, EndpointID: e.ID().String()})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(repo.updated) != 0 || tx.calls != 0 || pub.calls != 0 {
+			t.Errorf("updates = %d tx = %d publish = %d, want none", len(repo.updated), tx.calls, pub.calls)
+		}
+	})
+
 	t.Run("invalid tenant id", func(t *testing.T) {
 		err := NewDeactivateEndpointUseCase(newEndpointRepo(), &fakeTx{}, &fakePublisher{}).Execute(ctx, DeactivateEndpointCmd{TenantID: "x", EndpointID: domain.NewEndpointID().String()})
 		if err == nil || !strings.Contains(err.Error(), "invalid tenant id") {

@@ -105,7 +105,12 @@ func ReconstituteWebhookEndpoint(
 }
 
 // Deactivate desactiva el endpoint. Las deliveries pendientes no se enviarán.
+// Es idempotente: sobre un endpoint ya inactivo no cambia nada ni vuelve a
+// emitir EndpointDeactivatedEvent.
 func (e *WebhookEndpoint) Deactivate() {
+	if !e.active {
+		return
+	}
 	e.active = false
 	e.updatedAt = time.Now().UTC()
 	e.record(EndpointDeactivatedEvent{

@@ -104,6 +104,9 @@ func (uc *DeactivateEndpointUseCase) Execute(ctx context.Context, cmd Deactivate
 	if endpoint.TenantID() != tenantID {
 		return domain.ErrEndpointNotFound
 	}
+	if !endpoint.Active() {
+		return nil // ya desactivado: DELETE idempotente, sin escribir ni publicar
+	}
 
 	endpoint.Deactivate()
 
