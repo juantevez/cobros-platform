@@ -2,8 +2,10 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -559,6 +561,20 @@ func TestToView(t *testing.T) {
 		}
 		if len(v.Evidence) != 0 {
 			t.Errorf("expected no evidence, got %d", len(v.Evidence))
+		}
+	})
+
+	// La vista exponía version y captured_amount siempre en 0.
+	t.Run("version comes from the aggregate", func(t *testing.T) {
+		d := domain.ReconstituteDispute(domain.NewDisputeID(), tid, "pay-1", "psp", 5000, "ARS",
+			domain.ReasonGeneral, domain.StatusUnderReview, nil, "", "",
+			deadline, openedAt, &responded, nil, 3)
+		if v := toView(d, testNow); v.Version != 3 {
+			t.Errorf("version = %d, want 3", v.Version)
+		}
+		b, _ := json.Marshal(toView(d, testNow))
+		if strings.Contains(string(b), "captured_amount") {
+			t.Errorf("view still exposes captured_amount: %s", b)
 		}
 	})
 

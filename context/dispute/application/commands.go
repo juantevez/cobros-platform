@@ -69,24 +69,23 @@ type ListAllDisputesQuery struct {
 // ── Views ─────────────────────────────────────────────────────────────────────
 
 type DisputeView struct {
-	ID             string         `json:"id"`
-	TenantID       string         `json:"tenant_id"`
-	CapturedAmount int64          `json:"captured_amount"`
-	Version        int64          `json:"version"`
-	PaymentID      string         `json:"payment_id"`
-	PSPReference   string         `json:"psp_reference,omitempty"`
-	Amount         int64          `json:"amount"`
-	Currency       string         `json:"currency"`
-	Reason         string         `json:"reason"`
-	Status         string         `json:"status"`
-	Evidence       []EvidenceView `json:"evidence,omitempty"`
-	ResponseNote   string         `json:"response_note,omitempty"`
-	ResolvedNote   string         `json:"resolved_note,omitempty"`
-	Deadline       string         `json:"deadline"`
-	OpenedAt       string         `json:"opened_at"`
-	RespondedAt    *string        `json:"responded_at,omitempty"`
-	ResolvedAt     *string        `json:"resolved_at,omitempty"`
-	IsOverdue      bool           `json:"is_overdue"`
+	ID           string         `json:"id"`
+	TenantID     string         `json:"tenant_id"`
+	Version      int64          `json:"version"`
+	PaymentID    string         `json:"payment_id"`
+	PSPReference string         `json:"psp_reference,omitempty"`
+	Amount       int64          `json:"amount"`
+	Currency     string         `json:"currency"`
+	Reason       string         `json:"reason"`
+	Status       string         `json:"status"`
+	Evidence     []EvidenceView `json:"evidence,omitempty"`
+	ResponseNote string         `json:"response_note,omitempty"`
+	ResolvedNote string         `json:"resolved_note,omitempty"`
+	Deadline     string         `json:"deadline"`
+	OpenedAt     string         `json:"opened_at"`
+	RespondedAt  *string        `json:"responded_at,omitempty"`
+	ResolvedAt   *string        `json:"resolved_at,omitempty"`
+	IsOverdue    bool           `json:"is_overdue"`
 }
 
 type EvidenceView struct {

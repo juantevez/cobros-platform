@@ -26,23 +26,22 @@ import (
 //	lost:     dispute_hold DEBIT → in_transit CREDIT         (el PSP descuenta el contracargo)
 //	accepted: igual que lost
 type Dispute struct {
-	id             DisputeID
-	tenantID       TenantID
-	paymentID      string // referencia al pago disputado
-	pspReference   string // referencia del PSP para la disputa
-	amount         int64  // monto disputado en centavos
-	capturedAmount int64  // monto capturado del pago al momento de disputar
-	currency       string
-	reason         DisputeReason
-	status         DisputeStatus
-	evidence       []Evidence
-	responseNote   string    // nota del comercio al contestar
-	resolvedNote   string    // nota del operador al cerrar
-	deadline       time.Time // fecha límite para contestar
-	openedAt       time.Time
-	version        int64 // concurrencia optimista (columna `version` en DB)
-	respondedAt    *time.Time
-	resolvedAt     *time.Time
+	id           DisputeID
+	tenantID     TenantID
+	paymentID    string // referencia al pago disputado
+	pspReference string // referencia del PSP para la disputa
+	amount       int64  // monto disputado en centavos
+	currency     string
+	reason       DisputeReason
+	status       DisputeStatus
+	evidence     []Evidence
+	responseNote string    // nota del comercio al contestar
+	resolvedNote string    // nota del operador al cerrar
+	deadline     time.Time // fecha límite para contestar
+	openedAt     time.Time
+	version      int64 // concurrencia optimista (columna `version` en DB)
+	respondedAt  *time.Time
+	resolvedAt   *time.Time
 
 	events []Event
 }
@@ -98,18 +97,17 @@ func NewDispute(
 
 	now = now.UTC()
 	d := &Dispute{
-		id:             id,
-		tenantID:       tenantID,
-		paymentID:      payment.ID,
-		pspReference:   pspReference,
-		amount:         amount,
-		capturedAmount: payment.Amount,
-		currency:       currency,
-		reason:         reason,
-		status:         StatusOpen,
-		deadline:       deadline,
-		openedAt:       now,
-		version:        1,
+		id:           id,
+		tenantID:     tenantID,
+		paymentID:    payment.ID,
+		pspReference: pspReference,
+		amount:       amount,
+		currency:     currency,
+		reason:       reason,
+		status:       StatusOpen,
+		deadline:     deadline,
+		openedAt:     now,
+		version:      1,
 	}
 
 	d.record(DisputeOpenedEvent{
@@ -154,7 +152,6 @@ func ReconstituteDispute(
 		// El monto capturado no se persiste en la fila (es una foto del pago al
 		// momento de abrir la disputa): al reconstituir se toma como referencia
 		// el propio monto disputado, que nunca lo excede (validado en NewDispute).
-		capturedAmount: amount,
 	}
 }
 
@@ -306,8 +303,6 @@ func (d *Dispute) PaymentID() string    { return d.paymentID }
 func (d *Dispute) PSPReference() string { return d.pspReference }
 func (d *Dispute) Amount() int64        { return d.amount }
 
-// CapturedAmount retorna el monto capturado del pago en el momento de abrir la disputa.
-func (d *Dispute) CapturedAmount() int64   { return d.capturedAmount }
 func (d *Dispute) Currency() string        { return d.currency }
 func (d *Dispute) Reason() DisputeReason   { return d.reason }
 func (d *Dispute) Status() DisputeStatus   { return d.status }

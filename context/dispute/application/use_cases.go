@@ -439,6 +439,7 @@ func toView(d *domain.Dispute, now time.Time) DisputeView {
 		Currency:     d.Currency(),
 		Reason:       d.Reason().String(),
 		Status:       d.Status().String(),
+		Version:      d.Version(),
 		Evidence:     ev,
 		ResponseNote: d.ResponseNote(),
 		ResolvedNote: d.ResolvedNote(),

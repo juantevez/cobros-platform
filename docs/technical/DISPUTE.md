@@ -115,7 +115,6 @@ Archivo: [domain/dispute.go](../../context/dispute/domain/dispute.go)
 |---|---|
 | `id`, `tenantID` | UUIDs; `tenantID` es el del pago disputado. `ReconstituteDispute` no revalida. |
 | `paymentID` | Referencia TEXT al pago disputado (sin FK: la tabla es de otro BC). `NewDispute` recibe el `PaymentRef` leído por `PaymentReader` y valida: estado `captured` (`ErrPaymentNotCaptured`), monto disputado ≤ capturado (`ErrAmountExceedsPayment`) y misma moneda (`ErrCurrencyMismatch`). La disputa es **siempre del tenant dueño del pago** (`payment.TenantID`; sin tenant válido → error): abrirla es del operador, cuyo tenant no interviene. |
-| `capturedAmount` | Monto capturado al abrir. **No se persiste**: al reconstituir, `capturedAmount = amount` (§10). |
 | `version` | Concurrencia optimista: nace en 1, cada transición la incrementa una vez y `Update` exige la leída (§9). |
 | `pspReference` | ID de la disputa en el PSP/banco. Opcional. |
 | `amount`, `currency` | Monto disputado en centavos (> 0 en `NewDispute`). |
@@ -242,7 +241,7 @@ Ciclo: `ListOverdue(now, 100)` como operador → por cada disputa: `Expire()` (s
 ### 5.5 Views
 
 `toView(d, now)` produce `DisputeView` (snake_case, timestamps RFC3339) incluyendo
-`is_overdue` (abierta y deadline pasado) y la evidencia como `EvidenceView[]`.
+`version` (la de concurrencia optimista), `is_overdue` (abierta y deadline pasado) y la evidencia como `EvidenceView[]`.
 
 ---
 
@@ -308,7 +307,7 @@ Body: `{ "outcome": "won" | "lost", "note": "…" }` (`outcome` requerido).
 ```json
 {
   "id": "…", "tenant_id": "…", "payment_id": "…", "psp_reference": "CHB-2026-0001",
-  "amount": 125000, "currency": "ARS", "reason": "fraudulent", "status": "under_review",
+  "amount": 125000, "currency": "ARS", "reason": "fraudulent", "status": "under_review", "version": 2,
   "evidence": [{ "id": "…", "evidence_type": "receipt", "reference": "https://…",
                   "description": "Factura entregada", "submitted_at": "2026-10-27T10:00:00Z" }],
   "response_note": "El cliente recibió el producto…",
@@ -442,8 +441,7 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Campos de la vista siempre en 0 | `DisputeView` expone `captured_amount` y `version`, pero `toView` no los completa (y `captured_amount` no se persiste). |
-| 2 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago, una sola ronda de evidencia (no se agrega en `under_review`) y sin pre-arbitraje. |
+| 1 | Producto | Alcance | Sin ingesta automática desde el PSP. Sin vista global para soporte (`ListAll` existe en el repo, sin ruta). Sin alerta de Compliance por tasa de contracargos. Una sola disputa por pago, una sola ronda de evidencia (no se agrega en `under_review`) y sin pre-arbitraje. |
 
 ---
 
@@ -452,7 +450,7 @@ Archivo: [outbound/postgres/dispute_repo.go](../../context/dispute/infrastructur
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/dispute_test.go`, `events_test.go`, `vo_test.go` | Unitarios: creación y validaciones (tenant del pago, `deadline` en el evento de apertura), cada transición de la FSM, deadline/`ErrDisputeExpired`, evidencia requerida, `IsOverdue`, `IsFinal`, parseo de enums/IDs, reconstitución, eventos registrados. |
-| Aplicación | `application/use_cases_test.go`, `expiry_poller_test.go` (+ `mocks_test.go`) | Fakes en memoria de repo/tx/publisher/clock: happy paths, duplicados, cross-tenant, outcomes inválidos, límites de `limit`, mapper `toView`, ciclo del poller (expira, publica, tolera errores, lotes hasta el tope, corte sin avances, primer ciclo al arrancar) y cancelación de contexto. |
+| Aplicación | `application/use_cases_test.go`, `expiry_poller_test.go` (+ `mocks_test.go`) | Fakes en memoria de repo/tx/publisher/clock: happy paths, duplicados (incluida la carrera contra la constraint), cross-tenant, outcomes inválidos, límites de `limit`, mapper `toView`, ciclo del poller (expira, publica, tolera errores, lotes hasta el tope, corte sin avances, primer ciclo al arrancar) y cancelación de contexto. |
 | HTTP inbound | `inbound/http/handler_test.go` | Gin + `httptest`: códigos 201/204/400/404/409/422, `RegisterRoutes`, el guard de cada ruta (403; pánico si falta alguno), la marca de operador en abrir y resolver (y no en contestar) y el mapeo de cada error de dominio. |
 | Postgres outbound | `outbound/postgres/dispute_repo_test.go`, `integration_test.go` | **pgxmock v4**: SQL exacto de Save/Update (incluido el `WHERE version` y 0 filas → `ErrOptimisticLock`)/finds/ListByTenant/ListOverdue, scan de evidencia (una query para todo el listado), `PaymentReader`, errores de scan/save, `nullStr`. Integración contra PostgreSQL: concurrencia optimista, segunda disputa del mismo pago contra la constraint real (→ `ErrDuplicatePaymentKey`) y RLS con un rol sin `BYPASSRLS` (`dispute_rls_probe`). |
 | Ledger (consumidor) | `context/ledger/.../nats/dispute_consumer_test.go` | Asientos generados por `dispute.opened.v1` / `dispute.resolved.v1` según outcome. |
