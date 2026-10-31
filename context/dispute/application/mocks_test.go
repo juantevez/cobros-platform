@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
 )
 
@@ -151,6 +153,7 @@ func (f fakePayments) FindPayment(ctx context.Context, paymentID string) (domain
 	}
 	return domain.PaymentRef{
 		ID:       paymentID,
+		TenantID: paymentTenant,
 		Status:   "captured",
 		Amount:   5000,
 		Currency: "ARS",
@@ -159,12 +162,15 @@ func (f fakePayments) FindPayment(ctx context.Context, paymentID string) (domain
 
 // ── Helpers de agregados ──────────────────────────────────────────────────────
 
-func capturedPayment(id string) domain.PaymentRef {
-	return domain.PaymentRef{ID: id, Status: "captured", Amount: 5000, Currency: "ARS"}
+// paymentTenant es el dueño de los pagos que devuelve fakePayments por defecto.
+var paymentTenant = uuid.NewString()
+
+func capturedPayment(id string, tenantID domain.TenantID) domain.PaymentRef {
+	return domain.PaymentRef{ID: id, TenantID: tenantID.String(), Status: "captured", Amount: 5000, Currency: "ARS"}
 }
 
 func seedOpen(r *fakeRepo, tenantID domain.TenantID, deadline time.Time) *domain.Dispute {
-	d, _ := domain.NewDispute(domain.NewDisputeID(), tenantID, capturedPayment("pay-1"), "psp-1", 5000, "ARS",
+	d, _ := domain.NewDispute(domain.NewDisputeID(), capturedPayment("pay-1", tenantID), "psp-1", 5000, "ARS",
 		domain.ReasonFraudulent, deadline, testNow)
 	d.PullEvents()
 	r.byID[d.ID()] = d

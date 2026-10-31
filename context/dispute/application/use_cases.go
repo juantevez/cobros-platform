@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // ErrDuplicatePaymentKey es el centinela que el repositorio retorna cuando el
@@ -43,11 +44,6 @@ func NewOpenDisputeUseCase(
 }
 
 func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (OpenDisputeResult, error) {
-	tenantID, err := domain.ParseTenantID(cmd.TenantID)
-	if err != nil {
-		return OpenDisputeResult{}, err
-	}
-
 	reason, err := domain.ParseDisputeReason(cmd.Reason)
 	if err != nil {
 		return OpenDisputeResult{}, err
@@ -83,7 +79,7 @@ func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (
 
 	id := domain.NewDisputeID()
 	dispute, err := domain.NewDispute(
-		id, tenantID,
+		id,
 		payment, cmd.PSPReference,
 		cmd.Amount, cmd.Currency,
 		reason, cmd.Deadline, now,
@@ -92,6 +88,9 @@ func (uc *OpenDisputeUseCase) Execute(ctx context.Context, cmd OpenDisputeCmd) (
 		return OpenDisputeResult{}, err
 	}
 
+	// La disputa se escribe con el tenant del pago (RLS), no con el del
+	// operador que la abre.
+	ctx = pkgpostgres.WithTenantID(ctx, dispute.TenantID().String())
 	if err := uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		if err := uc.repo.Save(ctx, dispute); err != nil {
 			return fmt.Errorf("save dispute: %w", err)

@@ -56,11 +56,11 @@ func disputeRow(id, tenantID string) []any {
 // capturedRef arma el PaymentRef que OpenDisputeUseCase lee vía PaymentReader
 // antes de construir la disputa.
 func capturedRef(id string) domain.PaymentRef {
-	return domain.PaymentRef{ID: id, Status: "captured", Amount: 5000, Currency: "ARS"}
+	return domain.PaymentRef{ID: id, TenantID: uuid.NewString(), Status: "captured", Amount: 5000, Currency: "ARS"}
 }
 
 func TestDisputeRepository_Save(t *testing.T) {
-	d, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+	d, err := domain.NewDispute(domain.NewDisputeID(),
 		capturedRef("pay-1"), "psp-1", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
 	if err != nil {
 		t.Fatalf("new dispute: %v", err)
@@ -84,7 +84,7 @@ func TestDisputeRepository_Save(t *testing.T) {
 	t.Run("also inserts evidence rows", func(t *testing.T) {
 		mock := newMock(t)
 		repo := NewDisputeRepository(mock)
-		withEv, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+		withEv, err := domain.NewDispute(domain.NewDisputeID(),
 			capturedRef("pay-2"), "psp-2", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
 		if err != nil {
 			t.Fatalf("new dispute: %v", err)
@@ -121,7 +121,7 @@ func TestDisputeRepository_Save(t *testing.T) {
 }
 
 func TestDisputeRepository_Update(t *testing.T) {
-	d, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+	d, err := domain.NewDispute(domain.NewDisputeID(),
 		capturedRef("pay-1"), "psp-1", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
 	if err != nil {
 		t.Fatalf("new dispute: %v", err)
@@ -319,7 +319,7 @@ func TestDisputeRepository_ListOverdue(t *testing.T) {
 func TestDisputeRepository_Save_evidenceError(t *testing.T) {
 	mock := newMock(t)
 	repo := NewDisputeRepository(mock)
-	d, err := domain.NewDispute(domain.NewDisputeID(), domain.TenantID(uuid.NewString()),
+	d, err := domain.NewDispute(domain.NewDisputeID(),
 		capturedRef("pay-1"), "psp-1", int64(5000), "ARS", domain.ReasonFraudulent, testDeadline, testTime)
 	if err != nil {
 		t.Fatalf("new dispute: %v", err)

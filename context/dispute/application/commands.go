@@ -2,9 +2,9 @@ package application
 
 import "time"
 
-// OpenDisputeCmd es disparado por el operador cuando el banco notifica una disputa.
+// OpenDisputeCmd es disparado por el operador cuando el banco notifica una
+// disputa. No lleva tenant: la disputa es del dueño del pago.
 type OpenDisputeCmd struct {
-	TenantID     string
 	PaymentID    string
 	PSPReference string // ID de la disputa en el PSP
 	Amount       int64  // monto disputado en centavos

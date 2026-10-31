@@ -21,6 +21,9 @@ import (
 
 func init() { gin.SetMode(gin.TestMode) }
 
+// paymentTenant es el dueño de los pagos que devuelve fakePayments.
+var paymentTenant = uuid.NewString()
+
 // ── Fakes de puertos ──────────────────────────────────────────────────────────
 
 type fakeRepo struct {
@@ -82,7 +85,7 @@ func (fakePayments) FindPayment(ctx context.Context, paymentID string) (domain.P
 	if paymentID == "" {
 		return domain.PaymentRef{}, domain.ErrDisputeNotFound
 	}
-	return domain.PaymentRef{ID: paymentID, Status: "captured", Amount: 5000, Currency: "ARS"}, nil
+	return domain.PaymentRef{ID: paymentID, TenantID: paymentTenant, Status: "captured", Amount: 5000, Currency: "ARS"}, nil
 }
 
 type fixedClock struct{}
@@ -129,8 +132,8 @@ func doRequest(h gin.HandlerFunc, method, target, body, tenantID string, params 
 // seedOpen crea una disputa abierta con deadline futuro.
 func seedOpen(r *fakeRepo, tid domain.TenantID) *domain.Dispute {
 	now := time.Now()
-	d, _ := domain.NewDispute(domain.NewDisputeID(), tid,
-		domain.PaymentRef{ID: "pay-1", Status: "captured", Amount: 5000, Currency: "ARS"},
+	d, _ := domain.NewDispute(domain.NewDisputeID(),
+		domain.PaymentRef{ID: "pay-1", TenantID: tid.String(), Status: "captured", Amount: 5000, Currency: "ARS"},
 		"psp-1", 5000, "ARS",
 		domain.ReasonFraudulent, now.Add(48*time.Hour), now)
 	d.PullEvents()

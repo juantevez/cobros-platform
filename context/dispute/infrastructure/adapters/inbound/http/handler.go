@@ -37,9 +37,10 @@ func NewDisputeHandler(
 // Open registra una nueva disputa notificada por el banco.
 //
 //	POST /api/v1/disputes
+//
+// Lo ejecuta el operador de plataforma: el tenant de la disputa es el del
+// dueño del pago, no el de su JWT.
 func (h *DisputeHandler) Open(c *gin.Context) {
-	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
-
 	var req struct {
 		PaymentID    string `json:"payment_id"    binding:"required"`
 		PSPReference string `json:"psp_reference"`
@@ -54,7 +55,6 @@ func (h *DisputeHandler) Open(c *gin.Context) {
 	}
 
 	cmd := application.OpenDisputeCmd{
-		TenantID:     tenantID,
 		PaymentID:    req.PaymentID,
 		PSPReference: req.PSPReference,
 		Amount:       req.Amount,

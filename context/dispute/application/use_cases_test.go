@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/juantevez/cobros-platform/context/dispute/domain"
+	pkgpostgres "github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 func validTenant() string { return uuid.NewString() }
@@ -27,7 +28,6 @@ func tenantID(t *testing.T) domain.TenantID {
 func TestOpenDisputeUseCase_Execute(t *testing.T) {
 	baseCmd := func() OpenDisputeCmd {
 		return OpenDisputeCmd{
-			TenantID:     validTenant(),
 			PaymentID:    "pay-1",
 			PSPReference: "psp-1",
 			Amount:       5000,
@@ -93,12 +93,37 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid tenant rejected", func(t *testing.T) {
-		uc := NewOpenDisputeUseCase(newRepo(), fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
-		cmd := baseCmd()
-		cmd.TenantID = "bad"
-		if _, err := uc.Execute(context.Background(), cmd); err == nil {
-			t.Fatal("expected error")
+	// Abrir es del operador: la disputa es del dueño del pago, no del tenant
+	// del JWT, y se escribe con ese tenant (RLS). Antes el caso de uso partía
+	// del tenant del caller y el dominio lo reasignaba en silencio.
+	t.Run("dispute belongs to the payment owner and is written with its tenant", func(t *testing.T) {
+		r := newRepo()
+		p := &fakePublisher{}
+		tx := &tenantTx{}
+		owner := tenantID(t)
+		payments := fakePayments{refs: map[string]domain.PaymentRef{"pay-1": capturedPayment("pay-1", owner)}}
+		operatorCtx := pkgpostgres.WithTenantID(context.Background(), validTenant())
+
+		if _, err := NewOpenDisputeUseCase(r, payments, tx, p, newClock()).Execute(operatorCtx, baseCmd()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if r.saved[0].TenantID() != owner {
+			t.Errorf("dispute tenant = %s, want payment owner %s", r.saved[0].TenantID(), owner)
+		}
+		if ev := p.published[0].(domain.DisputeOpenedEvent); ev.TenantID != owner.String() || ev.EventTenantID() != owner.String() {
+			t.Errorf("event tenant = %s / %s, want %s", ev.TenantID, ev.EventTenantID(), owner)
+		}
+		if tx.tenant != owner.String() {
+			t.Errorf("tx tenant = %q, want payment owner %s", tx.tenant, owner)
+		}
+	})
+
+	t.Run("payment without a valid tenant rejected", func(t *testing.T) {
+		r := newRepo()
+		ref := capturedPayment("pay-1", "")
+		uc := NewOpenDisputeUseCase(r, fakePayments{refs: map[string]domain.PaymentRef{"pay-1": ref}}, fakeTx{}, &fakePublisher{}, newClock())
+		if _, err := uc.Execute(context.Background(), baseCmd()); err == nil || len(r.saved) != 0 {
+			t.Fatalf("expected error and nothing saved, got %v (saved %d)", err, len(r.saved))
 		}
 	})
 
@@ -117,7 +142,6 @@ func TestOpenDisputeUseCase_Execute(t *testing.T) {
 		seedOpen(r, tid, time.Now().Add(24*time.Hour))
 		uc := NewOpenDisputeUseCase(r, fakePayments{}, fakeTx{}, &fakePublisher{}, newClock())
 		cmd := baseCmd()
-		cmd.TenantID = tid.String()
 		cmd.PaymentID = "pay-1" // ya existe
 		if _, err := uc.Execute(context.Background(), cmd); !errors.Is(err, domain.ErrDuplicateDispute) {
 			t.Fatalf("expected ErrDuplicateDispute, got %v", err)
@@ -544,4 +568,13 @@ func TestToView(t *testing.T) {
 			t.Error("resolved dispute should not be overdue")
 		}
 	})
+}
+
+// tenantTx registra el tenant del contexto con el que se abrió la tx (el que
+// TxManager fija en app.current_tenant).
+type tenantTx struct{ tenant string }
+
+func (t *tenantTx) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	t.tenant, _ = pkgpostgres.TenantIDFromContext(ctx)
+	return fn(ctx)
 }
