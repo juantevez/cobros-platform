@@ -434,6 +434,7 @@ func TestRespondDomainError(t *testing.T) {
 		{domain.ErrInvalidMethod, http.StatusBadRequest},
 		{domain.ErrTenantNotActive, http.StatusForbidden},
 		{domain.ErrPaymentDeclined, http.StatusPaymentRequired},
+		{domain.ErrIdempotencyKeyConflict, http.StatusConflict},
 		{fmt.Errorf("find payment: %w", domain.ErrPaymentNotFound), http.StatusNotFound},
 		{domain.ErrRefundExceedsAmount, http.StatusInternalServerError},
 		{errBoom, http.StatusInternalServerError},

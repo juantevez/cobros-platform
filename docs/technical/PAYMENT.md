@@ -151,7 +151,8 @@ Archivo: [domain/errors.go](../../context/payment/domain/errors.go)
 | Error | HTTP |
 |---|---|
 | `ErrPaymentNotFound` | 404 |
-| `ErrPaymentAlreadyExists` | 409 (declarado, **nunca devuelto**) |
+| `ErrPaymentAlreadyExists` | Lo devuelve `Save` ante el `UNIQUE (tenant_id, idempotency_key)`; el caso de uso lo resuelve como reintento (nunca llega al cliente) |
+| `ErrIdempotencyKeyConflict` (la clave ya se usó con otro monto, moneda o método) | 409 |
 | `ErrRiskRejected`, `ErrNotCaptured`, `ErrAlreadyCaptured`, `ErrInvalidTransition` | 422 |
 | `ErrInvalidAmount`, `ErrInvalidCurrency`, `ErrInvalidMethod` | 400 |
 | `ErrPaymentDeclined` (el PSP rechazó: su error envuelve `ErrPSPDeclined`) | **402**, con `payment_id` y `status`; el detalle del PSP no se expone |
@@ -172,16 +173,16 @@ Archivo: [process_payment.go](../../context/payment/application/process_payment.
 | Paso | Acción | ¿En transacción? | Si falla |
 |---|---|---|---|
 | 1 | Parsear tenant, clave, `Money` y método | — | 400/500, sin persistir |
-| 2 | `FindByIdempotencyKey`: si existe y **no** está en `initiated`, devolverlo (`WasExisting`). Si está en `initiated`, se retoma desde el paso 5 | — | 500 |
+| 2 | `FindByIdempotencyKey`: si existe con otro monto, moneda o método → `ErrIdempotencyKeyConflict` (409). Si existe y **no** está en `initiated`, devolverlo (`WasExisting`). Si está en `initiated`, se retoma desde el paso 5 | — | 500 |
 | 3 | `TenantGate.EnsureCanProcessPayments` (tenant `active` y sin hold de cumplimiento) | — | 403, sin persistir ni procesar |
-| 4 | `NewPayment` + `repo.Save` (**initiated**) | No | 500 |
+| 4 | `NewPayment` + `repo.Save` (**initiated**) | No | Si otro request con la misma clave ganó la carrera (`ErrPaymentAlreadyExists`): se devuelve su pago como reintento, sin procesarlo (lo procesa el que ganó). Otro error: 500 |
 | 5 | `risk.Evaluate`; si rechaza → `RejectByRisk` | Sí: Update + outbox | Error del evaluador → queda en `initiated` y **un reintento lo retoma** |
 | 6 | `fee.Calculate` (Billing) | — | Queda en `initiated`; un reintento lo retoma |
 | 7 | `pspRouter.Route` + `MarkProcessing` + **`repo.ClaimProcessing`** (`UPDATE … WHERE status='initiated'`, persiste la comisión de la plataforma) | No (UPDATE atómico) | Si otra ejecución ya lo reclamó: se devuelve el estado actual **sin llamar al PSP** |
 | 8 | `psp.AuthorizeAndCapture` (con la misma `idempotency_key`) | — | Rechazo (`ErrPSPDeclined`) → `Fail` + outbox, `ErrPaymentDeclined` (402). Otro error → resultado desconocido: **queda en `processing`**, `ErrPaymentPending` (202) |
 | 9 | `Capture(pspName, ref, platformFee, pspFee)` | Sí: Update condicional (`WHERE status='processing'`) + outbox | PSP cobró pero no se persistió: queda en `processing` y lo resuelve el recuperador (§5.4). Si el recuperador ya lo resolvió (`ErrPaymentChanged`), se devuelve el estado que quedó |
 
-Al retomar, los montos, el método y la metadata salen del **pago persistido**, no del comando: un reintento con otro monto no altera el pago. Del comando solo se usan el `payment_token` y la descripción, que no se persisten.
+Al retomar, los montos, el método y la metadata salen del **pago persistido**, no del comando: un reintento solo se acepta si pide lo mismo (si no, 409). Del comando solo se usan el `payment_token` y la descripción, que no se persisten.
 
 Resultado: `{payment_id, status, psp_reference, amount, currency, platform_fee, captured_at, was_existing}`. Al rechazar, el resultado (con `status: failed`) acompaña al error.
 
@@ -270,7 +271,8 @@ Requeridos: `idempotency_key`, `amount ≥ 1`, `currency`, `payment_method`, `pa
 | Rechazo por riesgo | 422 |
 | Rechazo del PSP (`payment_token: "REJECT"` en el mock) | **402** `{"error":"payment declined by the payment provider","payment_id":"…","status":"failed"}` |
 | El PSP no confirmó (timeout, red; `payment_token: "TIMEOUT"` en el mock) | **202** `{"payment_id":"…","status":"processing","detail":"…"}`. El recuperador lo resuelve después (§5.4); consultarlo con `GET /payments/:id` |
-| Reintento con la misma clave | 200 con el pago en su estado actual. Si estaba trabado en `initiated`, el reintento lo procesa |
+| Reintento con la misma clave | 200 con el pago en su estado actual. Si estaba trabado en `initiated`, el reintento lo procesa. También si los dos requests fueron simultáneos |
+| Misma clave con otro monto, moneda o método | 409 `idempotency key already used with a different amount, currency or payment method` |
 
 ### 6.2 Consultar — `GET /payments/:paymentID`
 
@@ -357,16 +359,15 @@ Tabla `payments` ([migración](../../migrations/000006_payment_init.up.sql)):
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Idempotencia con carrera | Check-then-insert: dos requests concurrentes con la misma clave → la segunda choca con `UNIQUE (tenant_id, idempotency_key)` → 500 (`ErrPaymentAlreadyExists` nunca se emite). Reusar una clave con otro monto, moneda o método devuelve el pago original sin avisar. |
-| 2 | Media | Reembolso sin protección de concurrencia | Dos refunds concurrentes pasan el chequeo de `captured`, llaman dos veces al PSP (solo los protege su idempotencia) y publican dos `payment.refunded.v1` (`Update` no es condicional). La referencia del reembolso no se persiste. |
-| 3 | Media | Comisiones sin validar | Nada impide `platform_fee + psp_fee ≥ amount` (neto ≤ 0, que Ledger rechaza: el pago queda `captured` sin asiento). `psp_fee` del PSP se acepta sin validar (`ReconstituteMoney`, admite negativos). |
-| 4 | Media | RLS no efectiva | La política de `payments` tiene `NULLIF` y operador de lectura (000043), pero el repo y `TenantGate` usan el pool fuera de la sesión RLS (`Save`, `FindByID`, `FindByIdempotencyKey`, `ClaimProcessing`). Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
-| 5 | Baja | Contrato de respuesta inconsistente | `ProcessPaymentResult` y `RefundPaymentResult` no tienen tags JSON (PascalCase, y `WasExisting` interno), mientras `PaymentView` usa snake_case. |
-| 6 | Baja | Error crudo del PSP expuesto | `failure_reason` guarda el texto del error del PSP y lo expone en `GET /payments/:id`, en `payment.failed.v1` y, por ende, en el email y el webhook al comercio. |
-| 7 | Baja | Rechazo por riesgo indistinguible y duplicable | El rechazo por riesgo emite `payment.failed.v1`, igual que el del PSP. Dos ejecuciones concurrentes de un mismo pago en `initiated` pueden rechazarlo dos veces (evento duplicado): `RejectByRisk` se persiste con un `Update` no condicional. |
-| 8 | Baja | IDs mal formados → 500 | `GET`/`POST /payments/abc[/refund]`: el error de parseo cae en el `default` de `respondDomainError`. |
-| 9 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
-| 10 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
+| 1 | Media | Reembolso sin protección de concurrencia | Dos refunds concurrentes pasan el chequeo de `captured`, llaman dos veces al PSP (solo los protege su idempotencia) y publican dos `payment.refunded.v1` (`Update` no es condicional). La referencia del reembolso no se persiste. |
+| 2 | Media | Comisiones sin validar | Nada impide `platform_fee + psp_fee ≥ amount` (neto ≤ 0, que Ledger rechaza: el pago queda `captured` sin asiento). `psp_fee` del PSP se acepta sin validar (`ReconstituteMoney`, admite negativos). |
+| 3 | Media | RLS no efectiva | La política de `payments` tiene `NULLIF` y operador de lectura (000043), pero el repo y `TenantGate` usan el pool fuera de la sesión RLS (`Save`, `FindByID`, `FindByIdempotencyKey`, `ClaimProcessing`). Funciona solo porque el rol de la app tiene `BYPASSRLS`. |
+| 4 | Baja | Contrato de respuesta inconsistente | `ProcessPaymentResult` y `RefundPaymentResult` no tienen tags JSON (PascalCase, y `WasExisting` interno), mientras `PaymentView` usa snake_case. |
+| 5 | Baja | Error crudo del PSP expuesto | `failure_reason` guarda el texto del error del PSP y lo expone en `GET /payments/:id`, en `payment.failed.v1` y, por ende, en el email y el webhook al comercio. |
+| 6 | Baja | Rechazo por riesgo indistinguible y duplicable | El rechazo por riesgo emite `payment.failed.v1`, igual que el del PSP. Dos ejecuciones concurrentes de un mismo pago en `initiated` pueden rechazarlo dos veces (evento duplicado): `RejectByRisk` se persiste con un `Update` no condicional. |
+| 7 | Baja | IDs mal formados → 500 | `GET`/`POST /payments/abc[/refund]`: el error de parseo cae en el `default` de `respondDomainError`. |
+| 8 | Baja | Campos y código muerto | `authorized_at`, `checkout_id`, `ErrAlreadyCaptured`, `ErrRefundExceedsAmount`, `Money.Sub`, y un `fmt.Sprintf` descartado en `FixedRateCalculator`. |
+| 9 | Producto | Alcance | Sin `GET /payments` con filtros. Sin *sandbox* para tenants `pending`. Sin motivo de rechazo normalizado (`insufficient_funds`, `card_expired`, …) ni diferenciación por ambiente (`env`) hasta que haya PSPs reales. Solo reembolso total. |
 
 ---
 

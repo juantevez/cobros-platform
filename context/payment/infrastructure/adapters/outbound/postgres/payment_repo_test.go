@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 
 	"github.com/juantevez/cobros-platform/context/payment/domain"
@@ -380,5 +381,24 @@ func TestPaymentRepository_ListStuckProcessing(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("expectations: %v", err)
+	}
+}
+
+// Dos requests con la misma clave: el segundo INSERT choca con la constraint
+// y el repo lo informa como ErrPaymentAlreadyExists (antes, error genérico → 500).
+func TestPaymentRepository_Save_DuplicateKey(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pgErr *pgconn.PgError
+		dup   bool
+	}{
+		"idempotency unique": {&pgconn.PgError{Code: "23505", ConstraintName: "payments_tenant_id_idempotency_key_key"}, true},
+		"other unique":       {&pgconn.PgError{Code: "23505", ConstraintName: "payments_pkey"}, false},
+	} {
+		mock := newMock(t)
+		mock.ExpectExec("INSERT INTO payments").WithArgs(anyArgs(23)...).WillReturnError(tc.pgErr)
+		err := NewPaymentRepository(mock).Save(context.Background(), newPayment(t, nil))
+		if errors.Is(err, domain.ErrPaymentAlreadyExists) != tc.dup || err == nil {
+			t.Errorf("%s: err = %v", name, err)
+		}
 	}
 }

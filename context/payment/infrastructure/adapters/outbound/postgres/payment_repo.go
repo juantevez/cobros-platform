@@ -8,9 +8,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juantevez/cobros-platform/context/payment/domain"
 	"github.com/juantevez/cobros-platform/pkg/postgres"
+)
+
+const (
+	pgErrUniqueViolation  = "23505"
+	idempotencyConstraint = "payments_tenant_id_idempotency_key_key"
 )
 
 type pgPaymentRepository struct {
@@ -49,6 +55,12 @@ func (r *pgPaymentRepository) Save(ctx context.Context, p *domain.Payment) error
 		p.CreatedAt(), p.UpdatedAt(),
 	)
 	if err != nil {
+		// Dos requests con la misma clave: el segundo choca con
+		// UNIQUE(tenant_id, idempotency_key).
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUniqueViolation && pgErr.ConstraintName == idempotencyConstraint {
+			return fmt.Errorf("payment repo: save: %w", domain.ErrPaymentAlreadyExists)
+		}
 		return fmt.Errorf("payment repo: save: %w", err)
 	}
 	return nil

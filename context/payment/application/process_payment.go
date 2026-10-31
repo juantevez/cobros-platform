@@ -88,8 +88,13 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 	if err != nil && !errors.Is(err, domain.ErrPaymentNotFound) {
 		return ProcessPaymentResult{}, fmt.Errorf("check idempotency: %w", err)
 	}
-	if existing != nil && existing.Status() != domain.StatusInitiated {
-		return toResult(existing, true), nil
+	if existing != nil {
+		if err := sameRequest(existing, amount, method); err != nil {
+			return ProcessPaymentResult{}, err
+		}
+		if existing.Status() != domain.StatusInitiated {
+			return toResult(existing, true), nil
+		}
 	}
 
 	// ── 3. El comercio debe estar habilitado (KYC aprobado, no suspendido) ───
@@ -120,10 +125,32 @@ func (uc *ProcessPaymentUseCase) Execute(ctx context.Context, cmd ProcessPayment
 	}
 
 	if err := uc.repo.Save(ctx, payment); err != nil {
+		if errors.Is(err, domain.ErrPaymentAlreadyExists) {
+			// Otro request con la misma clave ganó la carrera entre el
+			// chequeo y el INSERT: es un reintento idempotente. Lo procesa
+			// el que ganó; se informa su estado.
+			winner, findErr := uc.repo.FindByIdempotencyKey(ctx, tenantID, cmd.IdempotencyKey)
+			if findErr != nil {
+				return ProcessPaymentResult{}, fmt.Errorf("reload concurrent payment: %w", findErr)
+			}
+			if err := sameRequest(winner, amount, method); err != nil {
+				return ProcessPaymentResult{}, err
+			}
+			return toResult(winner, true), nil
+		}
 		return ProcessPaymentResult{}, fmt.Errorf("save payment: %w", err)
 	}
 
 	return uc.process(ctx, payment, cmd, false)
+}
+
+// sameRequest exige que un reintento con la misma clave pida lo mismo que el
+// pago original: otra cosa es un error del cliente, no un reintento.
+func sameRequest(existing *domain.Payment, amount domain.Money, method domain.PaymentMethod) error {
+	if existing.Amount().Amount() != amount.Amount() || existing.Amount().Currency() != amount.Currency() || existing.Method() != method {
+		return domain.ErrIdempotencyKeyConflict
+	}
+	return nil
 }
 
 // process lleva un pago en initiated hasta su estado final: riesgo, comisión,

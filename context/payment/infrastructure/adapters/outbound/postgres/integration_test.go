@@ -113,3 +113,15 @@ func TestPaymentRepository_ListStuckProcessing_Integration(t *testing.T) {
 		t.Errorf("stuck=%v fresh=%v initiated=%v, want only the stuck one", seen[stuck.ID()], seen[fresh.ID()], seen[initiated.ID()])
 	}
 }
+
+// Contra la constraint real: una segunda fila con la misma clave del mismo
+// tenant devuelve ErrPaymentAlreadyExists.
+func TestPaymentRepository_Save_DuplicateKeyAgainstConstraint(t *testing.T) {
+	first := savedPayment(t)
+	amount, _ := domain.NewMoney(10_000, "ARS")
+	second, _ := domain.NewPayment(domain.NewPaymentID(), first.TenantID(), first.IdempotencyKey(), amount,
+		domain.PayerInfo{}, domain.MethodCard, nil)
+	if err := NewPaymentRepository(requireDB(t)).Save(context.Background(), second); !errors.Is(err, domain.ErrPaymentAlreadyExists) {
+		t.Fatalf("second save = %v, want ErrPaymentAlreadyExists", err)
+	}
+}

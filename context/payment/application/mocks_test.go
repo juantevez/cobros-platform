@@ -39,6 +39,10 @@ type fakeRepo struct {
 	stuck       []*domain.Payment
 	stuckErr    error
 	stuckBefore time.Time
+	// byKeyAfterSave: lo que devuelve FindByIdempotencyKey después de un Save
+	// fallido (el pago del request que ganó la carrera).
+	byKeyAfterSave *domain.Payment
+	saveCalls      int
 	// findByIDHook, si está, decide qué devuelve FindByID.
 	findByIDHook func(domain.PaymentID) *domain.Payment
 
@@ -49,6 +53,7 @@ type fakeRepo struct {
 }
 
 func (r *fakeRepo) Save(ctx context.Context, p *domain.Payment) error {
+	r.saveCalls++
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -103,6 +108,9 @@ func (r *fakeRepo) FindByIdempotencyKey(ctx context.Context, tenantID domain.Ten
 	r.lastKeyTenant = tenantID
 	if r.findKeyErr != nil {
 		return nil, r.findKeyErr
+	}
+	if r.saveCalls > 0 && r.byKeyAfterSave != nil {
+		return r.byKeyAfterSave, nil
 	}
 	if r.byKey == nil {
 		return nil, domain.ErrPaymentNotFound

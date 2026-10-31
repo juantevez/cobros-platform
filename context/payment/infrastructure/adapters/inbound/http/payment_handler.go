@@ -144,7 +144,8 @@ func respondDomainError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domain.ErrPaymentNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-	case errors.Is(err, domain.ErrPaymentAlreadyExists):
+	case errors.Is(err, domain.ErrPaymentAlreadyExists),
+		errors.Is(err, domain.ErrIdempotencyKeyConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrTenantNotActive):
 		// Mensaje fijo: el detalle (pending/suspended) no se expone al caller.

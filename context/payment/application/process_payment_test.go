@@ -505,9 +505,7 @@ func TestProcessPayment_ResumesInitiatedPayment(t *testing.T) {
 		stuck := buildPayment(tenantA, domain.StatusInitiated)
 		d.repo.byKey = stuck
 
-		cmd := validProcessCmd()
-		cmd.Amount = 99_999 // un reintento con otro monto no altera el pago existente
-		res, err := d.uc().Execute(ctx, cmd)
+		res, err := d.uc().Execute(ctx, validProcessCmd())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -526,6 +524,46 @@ func TestProcessPayment_ResumesInitiatedPayment(t *testing.T) {
 		}
 		if got := d.pub.eventTypes(); !reflect.DeepEqual(got, []string{"payment.captured.v1"}) {
 			t.Errorf("events = %v", got)
+		}
+	})
+
+	// Reusar la clave con otros datos es un error del cliente, no un
+	// reintento: antes devolvía el pago original sin avisar.
+	for name, mutate := range map[string]func(*ProcessPaymentCmd){
+		"other amount":   func(c *ProcessPaymentCmd) { c.Amount = 99_999 },
+		"other currency": func(c *ProcessPaymentCmd) { c.Currency = "USD" },
+		"other method":   func(c *ProcessPaymentCmd) { c.PaymentMethod = "wallet" },
+	} {
+		for _, status := range []domain.PaymentStatus{domain.StatusInitiated, domain.StatusCaptured} {
+			t.Run("key reused with "+name+" on a "+status.String()+" payment is a conflict", func(t *testing.T) {
+				d := newProcessDeps()
+				d.repo.byKey = buildPayment(tenantA, status)
+				cmd := validProcessCmd()
+				mutate(&cmd)
+				if _, err := d.uc().Execute(ctx, cmd); !errors.Is(err, domain.ErrIdempotencyKeyConflict) {
+					t.Fatalf("expected ErrIdempotencyKeyConflict, got %v", err)
+				}
+				if len(d.psp.captures) != 0 || len(d.repo.updates) != 0 {
+					t.Error("a conflicting request must not process anything")
+				}
+			})
+		}
+	}
+
+	// Dos requests con la misma clave pasan el chequeo; el segundo choca con
+	// la constraint al guardar. Antes respondía 500.
+	t.Run("concurrent request with the same key returns the winner", func(t *testing.T) {
+		d := newProcessDeps()
+		winner := buildPayment(tenantA, domain.StatusProcessing)
+		d.repo.saveErr = fmt.Errorf("payment repo: save: %w", domain.ErrPaymentAlreadyExists)
+		d.repo.byKeyAfterSave = winner
+
+		res, err := d.uc().Execute(ctx, validProcessCmd())
+		if err != nil || res.PaymentID != winner.ID().String() || !res.WasExisting || res.Status != "processing" {
+			t.Fatalf("res = %+v err = %v, want the winner as existing", res, err)
+		}
+		if len(d.psp.captures) != 0 {
+			t.Error("the loser must not call the PSP")
 		}
 	})
 
