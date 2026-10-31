@@ -99,6 +99,19 @@ func TestExpiryPoller_runCycle(t *testing.T) {
 		}
 	})
 
+	// ListOverdue es cross-tenant (operador); cada vencimiento se escribe con
+	// el tenant de su disputa para pasar RLS.
+	t.Run("each expiry is written with the tenant of its dispute", func(t *testing.T) {
+		r := newRepo()
+		d := overdueDispute()
+		r.overdue = []*domain.Dispute{d}
+		tx := &tenantTx{}
+		NewExpiryPoller(r, tx, &fakePublisher{}, newClock(), discardLogger()).runCycle(context.Background())
+		if tx.tenant != d.TenantID().String() {
+			t.Errorf("tx tenant = %q, want %q", tx.tenant, d.TenantID())
+		}
+	})
+
 	t.Run("update error is logged, does not abort cycle", func(t *testing.T) {
 		r := newRepo()
 		r.overdue = []*domain.Dispute{overdueDispute(), overdueDispute()}

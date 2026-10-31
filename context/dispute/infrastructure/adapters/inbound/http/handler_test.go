@@ -30,6 +30,8 @@ type fakeRepo struct {
 	byID      map[domain.DisputeID]*domain.Dispute
 	byPayment map[string]*domain.Dispute
 	listed    []*domain.Dispute
+	// finds registra, por cada búsqueda, si llegó marcada como operador (RLS).
+	finds []bool
 }
 
 func newRepo() *fakeRepo {
@@ -46,6 +48,7 @@ func (r *fakeRepo) Save(ctx context.Context, d *domain.Dispute) error {
 }
 func (r *fakeRepo) Update(ctx context.Context, d *domain.Dispute) error { return nil }
 func (r *fakeRepo) FindByID(ctx context.Context, id domain.DisputeID) (*domain.Dispute, error) {
+	r.finds = append(r.finds, postgres.IsPlatformOperator(ctx))
 	d, ok := r.byID[id]
 	if !ok {
 		return nil, domain.ErrDisputeNotFound
@@ -53,6 +56,7 @@ func (r *fakeRepo) FindByID(ctx context.Context, id domain.DisputeID) (*domain.D
 	return d, nil
 }
 func (r *fakeRepo) FindByPaymentID(ctx context.Context, paymentID string) (*domain.Dispute, error) {
+	r.finds = append(r.finds, postgres.IsPlatformOperator(ctx))
 	d, ok := r.byPayment[paymentID]
 	if !ok {
 		return nil, domain.ErrDisputeNotFound
@@ -455,6 +459,38 @@ func TestRespondError(t *testing.T) {
 		respondError(c, tc.err)
 		if rec.Code != tc.code {
 			t.Errorf("%v: status = %d, want %d", tc.err, rec.Code, tc.code)
+		}
+	}
+}
+
+// Abrir y resolver leen disputas (y el pago) de otro tenant: bajo RLS solo
+// pasan con la marca de operador. Contestar es del comercio, sin la marca.
+func TestRegisterRoutes_OperatorScope(t *testing.T) {
+	tid, _ := domain.ParseTenantID(uuid.NewString())
+	r := newRepo()
+	d := seedOpen(r, tid)
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(postgres.WithTenantID(c.Request.Context(), tid.String()))
+		c.Next()
+	})
+	allow := func(c *gin.Context) { c.Next() }
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(r), RouteGuards{Operator: allow, Manage: allow, Read: allow})
+
+	cases := []struct {
+		path, body string
+		operator   bool
+	}{
+		{"/api/v1/disputes", `{"payment_id":"pay-2","amount":5000,"currency":"ARS","reason":"fraudulent"}`, true},
+		{"/api/v1/disputes/" + d.ID().String() + "/contest", `{"evidence":[{"evidence_type":"receipt","reference":"r"}]}`, false},
+		{"/api/v1/disputes/" + d.ID().String() + "/resolve", `{"outcome":"won"}`, true},
+	}
+	for _, tc := range cases {
+		r.finds = nil
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+		if len(r.finds) == 0 || r.finds[0] != tc.operator {
+			t.Errorf("%s: finds as operator = %v, want %v (status %d)", tc.path, r.finds, tc.operator, rec.Code)
 		}
 	}
 }

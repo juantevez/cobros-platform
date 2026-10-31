@@ -19,61 +19,72 @@ func NewDisputeRepository(pool pkgpostgres.Conn) *pgDisputeRepository {
 }
 
 func (r *pgDisputeRepository) Save(ctx context.Context, d *domain.Dispute) error {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	_, err := conn.Exec(ctx, `
-		INSERT INTO disputes
-			(id, tenant_id, payment_id, psp_reference, amount, currency,
-			 reason, status, response_note, resolved_note,
-			 deadline, opened_at, responded_at, resolved_at, version)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-		d.ID().String(), d.TenantID().String(),
-		d.PaymentID(), nullStr(d.PSPReference()),
-		d.Amount(), d.Currency(),
-		d.Reason().String(), d.Status().String(),
-		nullStr(d.ResponseNote()), nullStr(d.ResolvedNote()),
-		d.Deadline(), d.OpenedAt(),
-		d.RespondedAt(), d.ResolvedAt(),
-		d.Version(),
-	)
-	if err != nil {
-		return fmt.Errorf("dispute repo: save: %w", err)
-	}
-	return r.saveEvidence(ctx, conn, d)
+	return withTenant(ctx, r.pool, d.TenantID().String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		_, err := conn.Exec(ctx, `
+			INSERT INTO disputes
+				(id, tenant_id, payment_id, psp_reference, amount, currency,
+				 reason, status, response_note, resolved_note,
+				 deadline, opened_at, responded_at, resolved_at, version)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			d.ID().String(), d.TenantID().String(),
+			d.PaymentID(), nullStr(d.PSPReference()),
+			d.Amount(), d.Currency(),
+			d.Reason().String(), d.Status().String(),
+			nullStr(d.ResponseNote()), nullStr(d.ResolvedNote()),
+			d.Deadline(), d.OpenedAt(),
+			d.RespondedAt(), d.ResolvedAt(),
+			d.Version(),
+		)
+		if err != nil {
+			return fmt.Errorf("dispute repo: save: %w", err)
+		}
+		return r.saveEvidence(ctx, conn, d)
+	})
 }
 
 func (r *pgDisputeRepository) Update(ctx context.Context, d *domain.Dispute) error {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	// Cada transición incrementa la versión una vez: el UPDATE exige la que
-	// se leyó. Si otra transición ganó la carrera, 0 filas → ErrOptimisticLock.
-	tag, err := conn.Exec(ctx, `
-		UPDATE disputes SET
-			status=$2, response_note=$3, resolved_note=$4,
-			responded_at=$5, resolved_at=$6, version=$7
-		WHERE id=$1 AND version=$8`,
-		d.ID().String(), d.Status().String(),
-		nullStr(d.ResponseNote()), nullStr(d.ResolvedNote()),
-		d.RespondedAt(), d.ResolvedAt(),
-		d.Version(), d.Version()-1,
-	)
-	if err != nil {
-		return fmt.Errorf("dispute repo: update: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("dispute repo: update %s: %w", d.ID(), domain.ErrOptimisticLock)
-	}
-	return r.saveEvidence(ctx, conn, d)
+	return withTenant(ctx, r.pool, d.TenantID().String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		// Cada transición incrementa la versión una vez: el UPDATE exige la que
+		// se leyó. Si otra transición ganó la carrera, 0 filas → ErrOptimisticLock.
+		tag, err := conn.Exec(ctx, `
+			UPDATE disputes SET
+				status=$2, response_note=$3, resolved_note=$4,
+				responded_at=$5, resolved_at=$6, version=$7
+			WHERE id=$1 AND version=$8`,
+			d.ID().String(), d.Status().String(),
+			nullStr(d.ResponseNote()), nullStr(d.ResolvedNote()),
+			d.RespondedAt(), d.ResolvedAt(),
+			d.Version(), d.Version()-1,
+		)
+		if err != nil {
+			return fmt.Errorf("dispute repo: update: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("dispute repo: update %s: %w", d.ID(), domain.ErrOptimisticLock)
+		}
+		return r.saveEvidence(ctx, conn, d)
+	})
 }
 
+// FindByID y FindByPaymentID corren con el tenant del llamador; el operador
+// de plataforma (WithPlatformOperator en el contexto) ve las de cualquiera.
 func (r *pgDisputeRepository) FindByID(ctx context.Context, id domain.DisputeID) (*domain.Dispute, error) {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, baseSelect+" WHERE id=$1", id.String())
-	return r.scanWithEvidence(ctx, conn, row)
+	var d *domain.Dispute
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		var err error
+		d, err = r.scanWithEvidence(ctx, conn, conn.QueryRow(ctx, baseSelect+" WHERE id=$1", id.String()))
+		return err
+	})
+	return d, err
 }
 
 func (r *pgDisputeRepository) FindByPaymentID(ctx context.Context, paymentID string) (*domain.Dispute, error) {
-	conn := pkgpostgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, baseSelect+" WHERE payment_id=$1", paymentID)
-	d, err := r.scanWithEvidence(ctx, conn, row)
+	var d *domain.Dispute
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		var err error
+		d, err = r.scanWithEvidence(ctx, conn, conn.QueryRow(ctx, baseSelect+" WHERE payment_id=$1", paymentID))
+		return err
+	})
 	if errors.Is(err, domain.ErrDisputeNotFound) {
 		return nil, domain.ErrDisputeNotFound
 	}
@@ -81,86 +92,72 @@ func (r *pgDisputeRepository) FindByPaymentID(ctx context.Context, paymentID str
 }
 
 func (r *pgDisputeRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, statusFilter string, limit int) ([]*domain.Dispute, error) {
-	var (
-		rows pgx.Rows
-		err  error
-	)
-	if statusFilter != "" {
-		rows, err = r.pool.Query(ctx,
-			baseSelect+" WHERE tenant_id=$1 AND status=$2 ORDER BY opened_at DESC LIMIT $3",
-			tenantID.String(), statusFilter, limit)
-	} else {
-		rows, err = r.pool.Query(ctx,
-			baseSelect+" WHERE tenant_id=$1 ORDER BY opened_at DESC LIMIT $2",
-			tenantID.String(), limit)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("dispute repo: list: %w", err)
-	}
-	defer rows.Close()
-
 	var disputes []*domain.Dispute
-	for rows.Next() {
-		d, err := r.scanWithEvidence(ctx, r.pool, rows)
-		if err != nil {
-			return nil, err
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn pkgpostgres.Conn) error {
+		var (
+			rows pgx.Rows
+			err  error
+		)
+		if statusFilter != "" {
+			rows, err = conn.Query(ctx,
+				baseSelect+" WHERE tenant_id=$1 AND status=$2 ORDER BY opened_at DESC LIMIT $3",
+				tenantID.String(), statusFilter, limit)
+		} else {
+			rows, err = conn.Query(ctx,
+				baseSelect+" WHERE tenant_id=$1 ORDER BY opened_at DESC LIMIT $2",
+				tenantID.String(), limit)
 		}
-		disputes = append(disputes, d)
-	}
-	return disputes, rows.Err()
+		if err != nil {
+			return fmt.Errorf("dispute repo: list: %w", err)
+		}
+		disputes, err = r.scanAll(ctx, conn, rows)
+		return err
+	})
+	return disputes, err
 }
 
 // ListAll retorna disputas de TODOS los tenants (vista operatoria global del
-// back-office). No filtra por tenant_id: se ejecuta con una conexión sin RLS
-// activado, igual que ListOverdue.
+// back-office): corre con la política de operador (solo lectura).
 func (r *pgDisputeRepository) ListAll(ctx context.Context, statusFilter string, limit int) ([]*domain.Dispute, error) {
-	var (
-		rows pgx.Rows
-		err  error
-	)
-	if statusFilter != "" {
-		rows, err = r.pool.Query(ctx,
-			baseSelect+" WHERE status=$1 ORDER BY opened_at DESC LIMIT $2",
-			statusFilter, limit)
-	} else {
-		rows, err = r.pool.Query(ctx,
-			baseSelect+" ORDER BY opened_at DESC LIMIT $1",
-			limit)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("dispute repo: list all: %w", err)
-	}
-	defer rows.Close()
-
 	var disputes []*domain.Dispute
-	for rows.Next() {
-		d, err := r.scanWithEvidence(ctx, r.pool, rows)
-		if err != nil {
-			return nil, err
+	err := asPlatformOperator(ctx, r.pool, func(ctx context.Context, conn pkgpostgres.Conn) error {
+		var (
+			rows pgx.Rows
+			err  error
+		)
+		if statusFilter != "" {
+			rows, err = conn.Query(ctx,
+				baseSelect+" WHERE status=$1 ORDER BY opened_at DESC LIMIT $2",
+				statusFilter, limit)
+		} else {
+			rows, err = conn.Query(ctx,
+				baseSelect+" ORDER BY opened_at DESC LIMIT $1",
+				limit)
 		}
-		disputes = append(disputes, d)
-	}
-	return disputes, rows.Err()
+		if err != nil {
+			return fmt.Errorf("dispute repo: list all: %w", err)
+		}
+		disputes, err = r.scanAll(ctx, conn, rows)
+		return err
+	})
+	return disputes, err
 }
 
+// ListOverdue es cross-tenant (ExpiryPoller): corre con la política de
+// operador. Cada vencimiento se escribe después con el tenant de la disputa.
 func (r *pgDisputeRepository) ListOverdue(ctx context.Context, now time.Time, limit int) ([]*domain.Dispute, error) {
-	rows, err := r.pool.Query(ctx,
-		baseSelect+" WHERE status='open' AND deadline < $1 ORDER BY deadline ASC LIMIT $2",
-		now, limit)
-	if err != nil {
-		return nil, fmt.Errorf("dispute repo: list overdue: %w", err)
-	}
-	defer rows.Close()
-
 	var disputes []*domain.Dispute
-	for rows.Next() {
-		d, err := r.scanWithEvidence(ctx, r.pool, rows)
+	err := asPlatformOperator(ctx, r.pool, func(ctx context.Context, conn pkgpostgres.Conn) error {
+		rows, err := conn.Query(ctx,
+			baseSelect+" WHERE status='open' AND deadline < $1 ORDER BY deadline ASC LIMIT $2",
+			now, limit)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("dispute repo: list overdue: %w", err)
 		}
-		disputes = append(disputes, d)
-	}
-	return disputes, rows.Err()
+		disputes, err = r.scanAll(ctx, conn, rows)
+		return err
+	})
+	return disputes, err
 }
 
 const baseSelect = `
@@ -170,35 +167,75 @@ const baseSelect = `
 	       deadline, opened_at, responded_at, resolved_at, version
 	FROM disputes`
 
-func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}, row interface{ Scan(...any) error }) (*domain.Dispute, error) {
-	var (
-		idStr, tenantIDStr, paymentID, pspRef string
-		amount                                int64
-		currency, reasonStr, statusStr        string
-		responseNote, resolvedNote            string
-		deadline, openedAt                    time.Time
-		respondedAt, resolvedAt               *time.Time
-		version                               int64
-	)
+// disputeRecord son las columnas de baseSelect, antes de cargar la evidencia.
+type disputeRecord struct {
+	idStr, tenantIDStr, paymentID, pspRef string
+	amount                                int64
+	currency, reasonStr, statusStr        string
+	responseNote, resolvedNote            string
+	deadline, openedAt                    time.Time
+	respondedAt, resolvedAt               *time.Time
+	version                               int64
+}
+
+func scanDisputeRecord(row interface{ Scan(...any) error }) (disputeRecord, error) {
+	var rec disputeRecord
 	if err := row.Scan(
-		&idStr, &tenantIDStr, &paymentID, &pspRef,
-		&amount, &currency, &reasonStr, &statusStr,
-		&responseNote, &resolvedNote,
-		&deadline, &openedAt, &respondedAt, &resolvedAt,
-		&version,
+		&rec.idStr, &rec.tenantIDStr, &rec.paymentID, &rec.pspRef,
+		&rec.amount, &rec.currency, &rec.reasonStr, &rec.statusStr,
+		&rec.responseNote, &rec.resolvedNote,
+		&rec.deadline, &rec.openedAt, &rec.respondedAt, &rec.resolvedAt,
+		&rec.version,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, domain.ErrDisputeNotFound
+			return rec, domain.ErrDisputeNotFound
 		}
-		return nil, fmt.Errorf("dispute repo: scan: %w", err)
+		return rec, fmt.Errorf("dispute repo: scan: %w", err)
 	}
+	return rec, nil
+}
 
-	// Cargar evidencia.
+func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn pkgpostgres.Conn, row interface{ Scan(...any) error }) (*domain.Dispute, error) {
+	rec, err := scanDisputeRecord(row)
+	if err != nil {
+		return nil, err
+	}
+	return r.withEvidence(ctx, conn, rec)
+}
+
+// scanAll lee todas las filas antes de cargar la evidencia de cada una: con
+// una sola conexión (la de la sesión RLS) no se puede consultar mientras el
+// cursor de rows sigue abierto.
+func (r *pgDisputeRepository) scanAll(ctx context.Context, conn pkgpostgres.Conn, rows pgx.Rows) ([]*domain.Dispute, error) {
+	var recs []disputeRecord
+	for rows.Next() {
+		rec, err := scanDisputeRecord(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		recs = append(recs, rec)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	disputes := make([]*domain.Dispute, 0, len(recs))
+	for _, rec := range recs {
+		d, err := r.withEvidence(ctx, conn, rec)
+		if err != nil {
+			return nil, err
+		}
+		disputes = append(disputes, d)
+	}
+	return disputes, nil
+}
+
+// withEvidence carga la evidencia de la disputa y reconstituye el agregado.
+func (r *pgDisputeRepository) withEvidence(ctx context.Context, conn pkgpostgres.Conn, rec disputeRecord) (*domain.Dispute, error) {
 	evRows, err := conn.Query(ctx, `
 		SELECT id, evidence_type, reference, COALESCE(description,''), submitted_at
-		FROM dispute_evidence WHERE dispute_id=$1 ORDER BY submitted_at`, idStr)
+		FROM dispute_evidence WHERE dispute_id=$1 ORDER BY submitted_at`, rec.idStr)
 	if err != nil {
 		return nil, fmt.Errorf("dispute repo: load evidence: %w", err)
 	}
@@ -215,18 +252,21 @@ func (r *pgDisputeRepository) scanWithEvidence(ctx context.Context, conn interfa
 			domain.EvidenceID(eid), evType, ref, desc, submittedAt.UTC(),
 		))
 	}
+	if err := evRows.Err(); err != nil {
+		return nil, fmt.Errorf("dispute repo: load evidence: %w", err)
+	}
 
-	reason, _ := domain.ParseDisputeReason(reasonStr)
+	reason, _ := domain.ParseDisputeReason(rec.reasonStr)
 	return domain.ReconstituteDispute(
-		domain.DisputeID(idStr), domain.TenantID(tenantIDStr),
-		paymentID, pspRef,
-		amount, currency,
-		reason, domain.DisputeStatus(statusStr),
+		domain.DisputeID(rec.idStr), domain.TenantID(rec.tenantIDStr),
+		rec.paymentID, rec.pspRef,
+		rec.amount, rec.currency,
+		reason, domain.DisputeStatus(rec.statusStr),
 		evidence,
-		responseNote, resolvedNote,
-		deadline.UTC(), openedAt.UTC(),
-		respondedAt, resolvedAt,
-		version,
+		rec.responseNote, rec.resolvedNote,
+		rec.deadline.UTC(), rec.openedAt.UTC(),
+		rec.respondedAt, rec.resolvedAt,
+		rec.version,
 	), nil
 }
 
@@ -234,10 +274,10 @@ func (r *pgDisputeRepository) saveEvidence(ctx context.Context, conn pkgpostgres
 	for _, e := range d.Evidence() {
 		if _, err := conn.Exec(ctx, `
 			INSERT INTO dispute_evidence
-				(id, dispute_id, evidence_type, reference, description, submitted_at)
-			VALUES ($1,$2,$3,$4,$5,$6)
+				(id, dispute_id, tenant_id, evidence_type, reference, description, submitted_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
 			ON CONFLICT (id) DO NOTHING`,
-			e.ID().String(), d.ID().String(),
+			e.ID().String(), d.ID().String(), d.TenantID().String(),
 			e.EvidenceType(), e.Reference(),
 			nullStr(e.Description()), e.SubmittedAt(),
 		); err != nil {

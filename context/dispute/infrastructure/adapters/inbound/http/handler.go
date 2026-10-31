@@ -221,7 +221,8 @@ func respondError(c *gin.Context, err error) {
 	}
 }
 
-// RouteGuards autoriza cada operación. Se inyectan desde el composition root
+// RouteGuards autoriza cada operación. Las rutas de Operator corren además con
+// platformOperatorScope (RLS). Se inyectan desde el composition root
 // para no acoplar este contexto con Auth:
 //   - Operator: abrir la disputa y registrar el fallo del banco son acciones
 //     del operador de plataforma (RequireRole(platform_support)). Abrir
@@ -242,11 +243,20 @@ func RegisterRoutes(rg *gin.RouterGroup, h *DisputeHandler, guards RouteGuards) 
 
 	d := rg.Group("/disputes")
 	{
-		d.POST("", guards.Operator, h.Open)
+		d.POST("", guards.Operator, platformOperatorScope, h.Open)
 		d.GET("", guards.Read, h.List)
 		d.GET("/:disputeID", guards.Read, h.Get)
 		d.POST("/:disputeID/contest", guards.Manage, h.Contest)
 		d.POST("/:disputeID/accept", guards.Manage, h.Accept)
-		d.POST("/:disputeID/resolve", guards.Operator, h.Resolve)
+		d.POST("/:disputeID/resolve", guards.Operator, platformOperatorScope, h.Resolve)
 	}
+}
+
+// platformOperatorScope marca el request como acción de operador para RLS:
+// la disputa (y el pago) son de otro tenant, así que la lectura pasa por la
+// política de operador, nunca por el tenant del JWT. Debe ir siempre DESPUÉS
+// del guard de rol.
+func platformOperatorScope(c *gin.Context) {
+	c.Request = c.Request.WithContext(postgres.WithPlatformOperator(c.Request.Context()))
+	c.Next()
 }

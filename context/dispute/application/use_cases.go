@@ -237,6 +237,9 @@ func (uc *ResolveDisputeUseCase) Execute(ctx context.Context, cmd ResolveDispute
 		return err
 	}
 
+	// El operador lee la disputa con la política de operador (solo lectura);
+	// la escritura corre con el tenant de la disputa (RLS).
+	ctx = pkgpostgres.WithTenantID(ctx, dispute.TenantID().String())
 	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
 		if err := uc.repo.Update(ctx, dispute); err != nil {
 			return err
@@ -357,7 +360,10 @@ func (p *ExpiryPoller) runCycle(ctx context.Context) {
 		if err := d.Expire(now); err != nil {
 			continue
 		}
-		if err := p.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		// ListOverdue es cross-tenant; cada vencimiento se escribe con el
+		// tenant de su disputa (RLS).
+		tctx := pkgpostgres.WithTenantID(ctx, d.TenantID().String())
+		if err := p.txManager.RunInTx(tctx, func(ctx context.Context) error {
 			if err := p.repo.Update(ctx, d); err != nil {
 				return err
 			}
