@@ -329,3 +329,16 @@ func TestBuildTemplateData_Disputes(t *testing.T) {
 		}
 	}
 }
+
+// Un payout unknown no notificaba nada: el comercio no sabía que su retiro
+// estaba en estado ambiguo.
+func TestBuildTemplateData_PayoutUnknown(t *testing.T) {
+	data := buildTemplateData("payout.unknown.v1", eventPayload{TenantID: "t", Amount: 500000, Currency: "ARS", FailureReason: "dial tcp 10.0.0.9: i/o timeout"})
+	if data["amount"] != "5000.00" || data["currency"] != "ARS" {
+		t.Fatalf("data = %v", data)
+	}
+	subject, body := domain.Templates["payout.unknown"].Render(data)
+	if !strings.Contains(subject, "5000.00 ARS") || strings.Contains(subject+body, "{{.") || strings.Contains(body, "10.0.0.9") {
+		t.Errorf("rendered = %q / %q", subject, body)
+	}
+}

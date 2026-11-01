@@ -308,7 +308,7 @@ Archivo: [domain/events.go](../../context/payout/domain/events.go). Se publican 
 | Consumidor | Filtro | Acción |
 |---|---|---|
 | **Ledger** ([payout_consumer.go](../../context/ledger/infrastructure/adapters/inbound/nats/payout_consumer.go)) | `payout.>` | Asientos de initiated / confirmed / reversa de failed (ver tabla FSM §3.2). Ignora `payout.unknown.v1` — correcto: no hay reversa. Cada asiento es idempotente por clave (`payout_initiated_…`, `payout_confirmed_…`, `payout_failed_…`). |
-| **Notification** | `payout.>` | Emails en `payout.confirmed.v1` y `payout.failed.v1`. ⚠️ No hay plantilla para `unknown`: el comercio no es notificado del estado ambiguo. |
+| **Notification** | `payout.>` | Emails en `payout.confirmed.v1`, `payout.failed.v1` y `payout.unknown.v1` (este último avisa que el desembolso está en verificación y los fondos siguen reservados, sin el motivo técnico). |
 | **Webhook** | `payout.>` | Entrega a endpoints suscriptos a `payout.confirmed` / `payout.failed`. |
 | Compliance / Reporting | — | **No consumen eventos de payout** hoy. |
 
@@ -354,10 +354,9 @@ Tabla `payouts` ([000007](../../migrations/000007_payout_init.up.sql) + [000015]
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Sin notificación de `unknown` | Notification no tiene plantilla para `payout.unknown.v1`: el comercio no sabe que su retiro está en estado ambiguo. |
-| 2 | Baja | IDs mal formados y `limit` sin tope | `GET /payouts/abc` responde 500; `GET /payouts?limit=1000000` no tiene tope. |
-| 3 | Baja | Código muerto | `ConfirmPayoutCmd`, `FailPayoutCmd`, `ReconstitutePayout` (sin clave), `ErrPayoutAlreadyConfirmed`, `ErrPayoutAlreadyFailed`; `TransferResult.Status` se ignora. |
-| 4 | Producto | Alcance | `bank_acct_num` (CBU) en claro, sin cifrado ni retención. Sin comisión de desembolso. Una sola cuenta por tenant. Desembolsos por API key (hoy solo JWT). El mock de transferencia ignora la clave de idempotencia (un banco real debe honrarla). Los adaptadores reales tienen que envolver `ErrBankRejected` en sus rechazos definitivos. |
+| 1 | Baja | IDs mal formados y `limit` sin tope | `GET /payouts/abc` responde 500; `GET /payouts?limit=1000000` no tiene tope. |
+| 2 | Baja | Código muerto | `ConfirmPayoutCmd`, `FailPayoutCmd`, `ReconstitutePayout` (sin clave), `ErrPayoutAlreadyConfirmed`, `ErrPayoutAlreadyFailed`; `TransferResult.Status` se ignora. |
+| 3 | Producto | Alcance | `bank_acct_num` (CBU) en claro, sin cifrado ni retención. Sin comisión de desembolso. Una sola cuenta por tenant. Desembolsos por API key (hoy solo JWT). El mock de transferencia ignora la clave de idempotencia (un banco real debe honrarla). Los adaptadores reales tienen que envolver `ErrBankRejected` en sus rechazos definitivos. |
 
 ---
 

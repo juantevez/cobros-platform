@@ -12,7 +12,7 @@
 ## 1. Propósito
 
 Notification es el contexto que **avisa al comercio por email** cuando ocurre algo relevante
-en la plataforma (pago capturado o rechazado, reembolso, payout confirmado o fallido, KYC
+en la plataforma (pago capturado o rechazado, reembolso, payout confirmado, fallido o en verificación, KYC
 aprobado o rechazado, suspensión de cuenta). No publica eventos propios: es un **consumidor
 puro** del bus.
 
@@ -230,12 +230,13 @@ failure_reason, payment_method, bank_reference, rejection_reason, reason, outcom
 | `payment.refunded.v1` | `payment.refunded` | payment_id, amount (`refund_amount`), currency |
 | `payout.confirmed.v1` | `payout.confirmed` | amount, currency, bank_reference |
 | `payout.failed.v1` | `payout.failed` | amount, currency, failure_reason |
+| `payout.unknown.v1` | `payout.unknown` | amount, currency (el motivo técnico no se incluye: el email solo avisa que el desembolso está en verificación y los fondos siguen reservados) |
 | `onboarding.application.approved.v1` | `onboarding.application.approved` | — |
 | `onboarding.application.rejected.v1` | `onboarding.application.rejected` | rejection_reason |
 | `auth.tenant.suspended.v1` | `auth.tenant.suspended` | — (motivo genérico, anti tipping-off) |
 | `dispute.opened.v1` | `dispute.opened` | payment_id, amount, currency, reason, deadline (`dd/mm/aaaa hh:mm (UTC)`; sin fecha → "sin fecha informada"). El email explica que el monto quedó retenido y que sin respuesta se pierde. |
 | `dispute.resolved.v1` | `dispute.resolved` | payment_id, amount, currency, outcome (`won`/`lost`/`accepted`/`expired` traducido) |
-| Otros subjects de los streams (`payout.initiated`, `payout.unknown`, `onboarding.application.submitted`, …) | — | ack sin acción |
+| Otros subjects de los streams (`payout.initiated`, `onboarding.application.submitted`, …) | — | ack sin acción |
 
 `TestTemplateCatalogConsistency` exige que cada template sea alcanzable desde su subject
 `.v1` y que cada subject manejado tenga template: un renombre de clave no puede volver a
@@ -293,7 +294,7 @@ sin `BYPASSRLS`.
 
 | # | Tema | Detalle | Tipo |
 |---|---|---|---|
-| 1 | Cobertura de eventos | `payout.initiated`, `payout.unknown`, `onboarding.application.submitted`/`more_info`, `webhook.*`, `reconciliation.*` no notifican. Qué recibe el comercio por email es una decisión de producto. | Producto |
+| 1 | Cobertura de eventos | `payout.initiated`, `onboarding.application.submitted`/`more_info`, `webhook.*`, `reconciliation.*` no notifican. Qué recibe el comercio por email es una decisión de producto. | Producto |
 | 2 | Templates en el binario | Cambiar un texto requiere redeploy; sin edición por operador ni plantillas por tenant. | Fase 4 |
 | 3 | Moneda e idioma | Monto siempre `/100` con dos decimales (monedas sin subunidad, como CLP, se verían `1000.00`); HTML embebido sin i18n. | Fase 4 |
 

@@ -86,6 +86,16 @@ var Templates = map[string]Template{
 <p>Los fondos fueron devueltos a tu saldo disponible. Por favor verificá los datos de tu cuenta bancaria.</p>`,
 	},
 
+	"payout.unknown": {
+		Subject: "⏳ Desembolso en verificación: {{.amount}} {{.currency}}",
+		Body: `<p>Hola,</p>
+<p>El banco todavía no confirmó tu desembolso:</p>
+<ul>
+  <li><strong>Monto:</strong> {{.amount}} {{.currency}}</li>
+</ul>
+<p>Lo estamos verificando con el banco. Los fondos siguen reservados y no tenés que volver a pedirlo: te avisamos cuando se acredite o, si no salió, cuando el monto vuelva a tu saldo disponible.</p>`,
+	},
+
 	"onboarding.application.approved": {
 		Subject: "🎉 Tu cuenta fue aprobada",
 		Body: `<p>Hola,</p>
