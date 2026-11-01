@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/auth/domain"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // mocks_test.go define test doubles in-memory para los puertos del contexto Auth.
@@ -73,6 +74,9 @@ type fakeUserRepo struct {
 	byEmail map[string]*domain.User // key: tenantID|email
 	findErr error
 	saveErr error
+	// rls emula la política de users: FindByID solo ve usuarios del tenant
+	// del contexto.
+	rls bool
 }
 
 func newFakeUserRepo(users ...*domain.User) *fakeUserRepo {
@@ -98,7 +102,7 @@ func (r *fakeUserRepo) FindByID(ctx context.Context, id domain.UserID) (*domain.
 		return nil, r.findErr
 	}
 	u, ok := r.byID[id]
-	if !ok {
+	if tid, _ := postgres.TenantIDFromContext(ctx); !ok || (r.rls && tid != u.TenantID().String()) {
 		return nil, domain.ErrUserNotFound
 	}
 	return u, nil
@@ -217,6 +221,10 @@ type fakeRefreshRepo struct {
 	revokedByID   string
 	revokeCalled  bool
 	revokeErr     error
+	// alreadyRevoked simula que otro request rotó el token entre la lectura
+	// y el UPDATE condicional.
+	alreadyRevoked bool
+	revokedAllFor  domain.UserID
 }
 
 func (r *fakeRefreshRepo) Save(ctx context.Context, token RefreshToken) error {
@@ -237,16 +245,21 @@ func (r *fakeRefreshRepo) FindByHash(ctx context.Context, tokenHash string) (*Re
 	if r.saved != nil && r.saved.TokenHash == tokenHash {
 		return r.saved, nil
 	}
-	return nil, domain.ErrUserNotFound
+	return nil, ErrRefreshTokenNotFound
 }
 
-func (r *fakeRefreshRepo) Revoke(ctx context.Context, tokenID, replacedBy string) error {
+func (r *fakeRefreshRepo) Revoke(ctx context.Context, tokenID, replacedBy string) (bool, error) {
 	if r.revokeErr != nil {
-		return r.revokeErr
+		return false, r.revokeErr
 	}
 	r.revokeCalled = true
 	r.revokedID = tokenID
 	r.revokedByID = replacedBy
+	return !r.alreadyRevoked, nil
+}
+
+func (r *fakeRefreshRepo) RevokeAllForUser(ctx context.Context, userID domain.UserID) error {
+	r.revokedAllFor = userID
 	return nil
 }
 
@@ -256,6 +269,7 @@ type fakeHasher struct {
 	verifyResult bool
 	verifyErr    error
 	hashErr      error
+	verifyCalls  int
 }
 
 func (h *fakeHasher) Hash(plaintext string) (string, error) {
@@ -266,6 +280,7 @@ func (h *fakeHasher) Hash(plaintext string) (string, error) {
 }
 
 func (h *fakeHasher) Verify(plaintext, hash string) (bool, error) {
+	h.verifyCalls++
 	if h.verifyErr != nil {
 		return false, h.verifyErr
 	}

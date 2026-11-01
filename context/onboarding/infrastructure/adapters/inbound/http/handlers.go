@@ -232,30 +232,42 @@ func respondDomainError(c *gin.Context, err error) {
 	}
 }
 
-// RegisterRoutes registra las rutas de onboarding en el grupo protegido por JWT.
+// RouteGuards autoriza cada grupo de rutas. Se inyectan desde el composition
+// root para no acoplar este contexto con Auth.
 //
-// reviewGuard autoriza las acciones del operador (aprobar/rechazar/pedir info).
-// Se inyecta desde el composition root para no acoplar este contexto con Auth;
-// en producción es RequireRole(platform_support). Sin él, cualquier usuario
-// autenticado podría aprobar su propia solicitud y saltear el KYC.
+//   - Manage: escrituras del comercio (crear la solicitud, documentos,
+//     personas, cuenta bancaria, enviar a revisión). En producción es
+//     RequirePermission(onboarding:manage), solo admin: la cuenta bancaria
+//     aprobada es el destino de los payouts.
+//   - Review: acciones del operador (aprobar/rechazar/pedir info). En
+//     producción es RequireRole(platform_support). Sin él, cualquier usuario
+//     autenticado podría aprobar su propia solicitud y saltear el KYC.
+//
+// Leer la solicitud no lleva guard: cualquier usuario del tenant puede verla.
 //
 // Las rutas de operador corren además con platformOperatorScope: la solicitud
 // revisada pertenece a otro tenant, así que RLS la expone solo vía la política
 // de operador (app.platform_operator), nunca por el tenant del JWT.
-func RegisterRoutes(rg *gin.RouterGroup, onboarding *OnboardingHandler, review *ReviewHandler, reviewGuard gin.HandlerFunc) {
-	if reviewGuard == nil {
-		panic("onboarding: RegisterRoutes requires a reviewGuard")
+type RouteGuards struct {
+	Manage gin.HandlerFunc
+	Review gin.HandlerFunc
+}
+
+// RegisterRoutes registra las rutas de onboarding en el grupo protegido por JWT.
+func RegisterRoutes(rg *gin.RouterGroup, onboarding *OnboardingHandler, review *ReviewHandler, guards RouteGuards) {
+	if guards.Manage == nil || guards.Review == nil {
+		panic("onboarding: RegisterRoutes requires Manage and Review guards")
 	}
 
 	ob := rg.Group("/onboarding")
 	{
-		ob.POST("", onboarding.Submit)
+		ob.POST("", guards.Manage, onboarding.Submit)
 		ob.GET("", onboarding.Get)
-		ob.POST("/documents", onboarding.UploadDocument)
-		ob.POST("/persons", onboarding.AddPerson)
-		ob.PUT("/bank-account", onboarding.SetBankAccount)
-		ob.POST("/submit", onboarding.SubmitForReview)
-		ob.POST("/applications/:id/review", reviewGuard, platformOperatorScope, review.Review)
+		ob.POST("/documents", guards.Manage, onboarding.UploadDocument)
+		ob.POST("/persons", guards.Manage, onboarding.AddPerson)
+		ob.PUT("/bank-account", guards.Manage, onboarding.SetBankAccount)
+		ob.POST("/submit", guards.Manage, onboarding.SubmitForReview)
+		ob.POST("/applications/:id/review", guards.Review, platformOperatorScope, review.Review)
 	}
 }
 

@@ -107,11 +107,21 @@ func (h *NotificationHandler) UpdatePreference(c *gin.Context) {
 }
 
 // RegisterRoutes registra las rutas de Notifications en el grupo protegido.
-func RegisterRoutes(rg *gin.RouterGroup, h *NotificationHandler) {
+// RouteGuards autoriza las escrituras. Las preferencias son del tenant, no de
+// cada usuario: en producción Manage es RequirePermission(notifications:manage),
+// solo admin. Consultar el historial y las preferencias no lleva guard.
+type RouteGuards struct {
+	Manage gin.HandlerFunc
+}
+
+func RegisterRoutes(rg *gin.RouterGroup, h *NotificationHandler, guards RouteGuards) {
+	if guards.Manage == nil {
+		panic("notification: RegisterRoutes requires a Manage guard")
+	}
 	notif := rg.Group("/notifications")
 	{
 		notif.GET("", h.ListNotifications)
 		notif.GET("/preferences", h.GetPreferences)
-		notif.PUT("/preferences/:eventType", h.UpdatePreference)
+		notif.PUT("/preferences/:eventType", guards.Manage, h.UpdatePreference)
 	}
 }

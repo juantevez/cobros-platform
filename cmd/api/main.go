@@ -155,21 +155,24 @@ func main() {
 	suspendTenant := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
 	registerUser := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
 	authenticate := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock, txManager, authPub)
-	refreshTokenUC := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock)
+	refreshTokenUC := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock, txManager)
 	logoutUC := application.NewLogoutUseCase(refreshRepo, txManager, authPub)
 	issueApiKey := application.NewIssueApiKeyUseCase(tenantRepo, apiKeyRepo, hasher, txManager, authPub)
 	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)
 	assignRole := application.NewAssignRoleUseCase(tenantRepo, userRepo, membershipRepo, txManager, authPub)
 
-	tenantHandler := authttp.NewTenantHandler(registerTenant, activateTenant, suspendTenant)
+	reactivateTenant := application.NewReactivateTenantUseCase(tenantRepo, txManager, authPub)
+	tenantHandler := authttp.NewTenantHandler(registerTenant, activateTenant, suspendTenant, reactivateTenant)
 	authHandler := authttp.NewAuthHandler(authenticate, refreshTokenUC, logoutUC)
 	userHandler := authttp.NewUserHandler(registerUser, assignRole)
 	apiKeyHandler := authttp.NewApiKeyHandler(issueApiKey, revokeApiKey)
 
-	router := authttp.NewRouter(jwtIssuer, apiKeyRepo, hasher, tenantHandler, authHandler, userHandler, apiKeyHandler)
+	// Una suspensión corta las credenciales vigentes en a lo sumo TenantStatusTTL.
+	tenantStatus := application.NewCachedTenantStatus(tenantRepo, clock, application.TenantStatusTTL)
+	router := authttp.NewRouter(jwtIssuer, apiKeyRepo, hasher, tenantStatus, tenantHandler, authHandler, userHandler, apiKeyHandler)
 
 	protected := router.Group("/api/v1")
-	protected.Use(authttp.JWTMiddleware(jwtIssuer))
+	protected.Use(authttp.JWTMiddleware(jwtIssuer, tenantStatus))
 
 	// ── Ledger ────────────────────────────────────────────────────────────────
 
@@ -213,7 +216,10 @@ func main() {
 	onboardinghttp.RegisterRoutes(protected,
 		onboardinghttp.NewOnboardingHandler(submitApp, uploadDoc, addPerson, setBankAcct, submitForReview, getApp),
 		onboardinghttp.NewReviewHandler(reviewApp),
-		authttp.RequireRole(authdomain.RolePlatformSupport),
+		onboardinghttp.RouteGuards{
+			Manage: authttp.RequirePermission(authdomain.ActionManageOnboarding),
+			Review: authttp.RequireRole(authdomain.RolePlatformSupport),
+		},
 	)
 
 	// ── Billing & Fees ────────────────────────────────────────────────────────
@@ -261,7 +267,7 @@ func main() {
 	// Payments acepta JWT (panel del comercio) o API key (integraciones
 	// server-to-server), por eso usa su propio grupo y no `protected`.
 	paymentsAPI := router.Group("/api/v1")
-	paymentsAPI.Use(authttp.JWTOrApiKeyMiddleware(jwtIssuer, apiKeyRepo, hasher))
+	paymentsAPI.Use(authttp.JWTOrApiKeyMiddleware(jwtIssuer, apiKeyRepo, hasher, tenantStatus))
 	paymenthttp.RegisterRoutes(paymentsAPI,
 		paymenthttp.NewPaymentHandler(processPayment, refundPayment, getPayment),
 		paymenthttp.RouteGuards{
@@ -352,7 +358,9 @@ func main() {
 
 	notificationhttp.RegisterRoutes(protected, notificationhttp.NewNotificationHandler(
 		listNotifs, getPrefs, updatePref,
-	))
+	), notificationhttp.RouteGuards{
+		Manage: authttp.RequirePermission(authdomain.ActionManageNotifications),
+	})
 
 	// ── Disputes & Chargebacks ────────────────────────────────────────────────
 

@@ -30,6 +30,18 @@ var (
 	// ErrTenantSuspended se retorna cuando se intenta operar sobre un tenant suspendido.
 	ErrTenantSuspended = errors.New("tenant is suspended")
 
+	// ErrReactivationNotAllowed: quien pide levantar la suspensión no es quien
+	// puede hacerlo (la de cumplimiento la levanta un compliance_officer; la
+	// del operador, platform_support).
+	ErrReactivationNotAllowed = errors.New("this suspension cannot be lifted by your role")
+
+	// ErrTenantNotInProduction: se pidió una API key de producción para un
+	// tenant que sigue en test.
+	ErrTenantNotInProduction = errors.New("tenant is not approved for production")
+
+	// ErrSuspensionReasonRequired: toda suspensión lleva motivo.
+	ErrSuspensionReasonRequired = errors.New("suspension reason is required")
+
 	// ErrTenantNotActive se retorna cuando la operación requiere un tenant activo.
 	ErrTenantNotActive = errors.New("tenant is not active")
 
@@ -54,6 +66,10 @@ var (
 	// ErrEmptyPassword se retorna cuando se intenta establecer una contraseña vacía.
 	ErrEmptyPassword = errors.New("password cannot be empty")
 
+	// ErrWeakPassword se retorna cuando la contraseña nueva no cumple la
+	// política de longitud (ValidatePassword).
+	ErrWeakPassword = errors.New("password must be between 12 and 128 characters")
+
 	// ── ApiKey ───────────────────────────────────────────────────────────────
 
 	// ErrApiKeyNotFound se retorna cuando la API key no existe o el prefix no coincide.
@@ -61,6 +77,14 @@ var (
 
 	// ErrApiKeyRevoked se retorna cuando se usa una API key que fue revocada.
 	ErrApiKeyRevoked = errors.New("api key has been revoked")
+
+	// ErrApiKeyNameRequired y ErrApiKeyScopesRequired: datos obligatorios al
+	// emitir una key.
+	ErrApiKeyNameRequired   = errors.New("api key name is required")
+	ErrApiKeyScopesRequired = errors.New("api key must have at least one scope")
+
+	// ErrInvalidScope: el scope no está en el catálogo (AllScopes).
+	ErrInvalidScope = errors.New("invalid scope")
 
 	// ErrApiKeyAlreadyRevoked se retorna cuando se intenta revocar una key ya revocada.
 	ErrApiKeyAlreadyRevoked = errors.New("api key is already revoked")

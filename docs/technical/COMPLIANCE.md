@@ -584,6 +584,12 @@ Propiedades:
   `auth.tenant.suspended.v1`, pero con el motivo genérico *"Cuenta en revisión
   preventiva por controles de seguridad"*. Los errores HTTP de los gates son los
   mismos que para cualquier tenant inhabilitado.
+- **Levantar la suspensión**: la suspensión por confirmación queda marcada
+  (`tenants.suspended_for_compliance`, también si un operador ya lo había
+  suspendido). Solo un `compliance_officer` la levanta, con
+  `POST /tenants/:id/reactivate` (AUTH.md §6.6), y un `platform_support` recibe
+  403. Reactivar no libera el hold: cobros y payouts siguen bloqueados hasta el
+  `compliance.sanction.cleared.v1`.
 - **Idempotencia y orden**: `Place` es `ON CONFLICT DO NOTHING`; `Release` es
   un upsert que conserva el primer `released_at`. Si el release llega antes que
   el place (re-entrega desordenada), el place posterior no reactiva el hold.

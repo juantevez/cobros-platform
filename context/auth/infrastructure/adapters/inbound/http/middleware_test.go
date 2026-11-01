@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,7 +44,7 @@ func TestJWTMiddleware(t *testing.T) {
 		Role: domain.RoleAdmin, Environment: domain.EnvironmentProduction,
 	}
 	issuer := &fakeTokenIssuer{claimsByToken: map[string]application.AccessTokenClaims{"good": claims}}
-	mw := JWTMiddleware(issuer)
+	mw := JWTMiddleware(issuer, openTenants)
 
 	t.Run("missing header", func(t *testing.T) {
 		rec, reached := runMW(mw, nil)
@@ -98,7 +99,7 @@ func TestApiKeyMiddleware(t *testing.T) {
 	repo := newFakeApiKeyRepo(key)
 
 	t.Run("no header passes through", func(t *testing.T) {
-		mw := ApiKeyMiddleware(repo, &fakeHasher{})
+		mw := ApiKeyMiddleware(repo, &fakeHasher{}, openTenants)
 		rec, reached := runMW(mw, nil)
 		if rec.Code != http.StatusOK || !*reached {
 			t.Fatalf("expected pass-through 200, got %d reached=%v", rec.Code, *reached)
@@ -106,7 +107,7 @@ func TestApiKeyMiddleware(t *testing.T) {
 	})
 
 	t.Run("malformed key aborts 401", func(t *testing.T) {
-		mw := ApiKeyMiddleware(repo, &fakeHasher{})
+		mw := ApiKeyMiddleware(repo, &fakeHasher{}, openTenants)
 		rec, reached := runMW(mw, func(r *http.Request) { r.Header.Set("X-Api-Key", "garbage") })
 		if rec.Code != http.StatusUnauthorized || *reached {
 			t.Fatalf("expected 401, got %d", rec.Code)
@@ -114,7 +115,7 @@ func TestApiKeyMiddleware(t *testing.T) {
 	})
 
 	t.Run("unknown prefix aborts 401", func(t *testing.T) {
-		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: true})
+		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: true}, openTenants)
 		rec, reached := runMW(mw, func(r *http.Request) { r.Header.Set("X-Api-Key", "production_UNKNOWN0_secret") })
 		if rec.Code != http.StatusUnauthorized || *reached {
 			t.Fatalf("expected 401, got %d", rec.Code)
@@ -125,7 +126,7 @@ func TestApiKeyMiddleware(t *testing.T) {
 		revoked := newApiKey(t, tenantID)
 		_ = revoked.Revoke()
 		revoked.PullEvents()
-		mw := ApiKeyMiddleware(newFakeApiKeyRepo(revoked), &fakeHasher{verifyResult: true})
+		mw := ApiKeyMiddleware(newFakeApiKeyRepo(revoked), &fakeHasher{verifyResult: true}, openTenants)
 		rec, reached := runMW(mw, func(r *http.Request) {
 			r.Header.Set("X-Api-Key", "production_"+revoked.Prefix()+"_s3cr3t")
 		})
@@ -135,7 +136,7 @@ func TestApiKeyMiddleware(t *testing.T) {
 	})
 
 	t.Run("wrong secret aborts 401", func(t *testing.T) {
-		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: false})
+		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: false}, openTenants)
 		rec, reached := runMW(mw, func(r *http.Request) {
 			r.Header.Set("X-Api-Key", "production_"+key.Prefix()+"_wrong")
 		})
@@ -144,8 +145,18 @@ func TestApiKeyMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("environment mismatch aborts 401", func(t *testing.T) {
+		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: true}, openTenants)
+		rec, reached := runMW(mw, func(r *http.Request) {
+			r.Header.Set("X-Api-Key", "test_"+key.Prefix()+"_s3cr3t") // la key es production
+		})
+		if rec.Code != http.StatusUnauthorized || *reached {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+	})
+
 	t.Run("valid key sets tenant and passes", func(t *testing.T) {
-		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: true})
+		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: true}, openTenants)
 		rec, reached := runMW(mw, func(r *http.Request) {
 			r.Header.Set("X-Api-Key", "production_"+key.Prefix()+"_s3cr3t")
 		})
@@ -153,6 +164,44 @@ func TestApiKeyMiddleware(t *testing.T) {
 			t.Fatalf("expected 200 pass, got %d reached=%v", rec.Code, *reached)
 		}
 	})
+}
+
+// Una suspensión corta las credenciales vigentes: antes el JWT seguía
+// valiendo hasta 15 minutos y la API key sin límite.
+func TestMiddlewares_RejectSuspendedTenant(t *testing.T) {
+	tenantID := domain.NewTenantID()
+	key := newApiKey(t, tenantID)
+	claims := application.AccessTokenClaims{UserID: domain.NewUserID(), TenantID: tenantID, Role: domain.RoleAdmin}
+	issuer := &fakeTokenIssuer{claimsByToken: map[string]application.AccessTokenClaims{"good": claims}}
+	withKey := func(r *http.Request) { r.Header.Set("X-Api-Key", "production_"+key.Prefix()+"_s3cr3t") }
+	withJWT := func(r *http.Request) { r.Header.Set("Authorization", "Bearer good") }
+
+	cases := []struct {
+		name   string
+		status fakeTenantStatus
+		want   int
+	}{
+		{"suspended", fakeTenantStatus{err: domain.ErrTenantSuspended}, http.StatusForbidden},
+		{"deleted", fakeTenantStatus{err: domain.ErrTenantNotFound}, http.StatusUnauthorized},
+		{"lookup error", fakeTenantStatus{err: errors.New("db down")}, http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		mws := map[string]struct {
+			mw    gin.HandlerFunc
+			setup func(*http.Request)
+		}{
+			"jwt":     {JWTMiddleware(issuer, tc.status), withJWT},
+			"api key": {ApiKeyMiddleware(newFakeApiKeyRepo(key), &fakeHasher{verifyResult: true}, tc.status), withKey},
+		}
+		for name, m := range mws {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				rec, reached := runMW(m.mw, m.setup)
+				if rec.Code != tc.want || *reached {
+					t.Fatalf("status = %d reached=%v, want %d", rec.Code, *reached, tc.want)
+				}
+			})
+		}
+	}
 }
 
 func TestRequireRole(t *testing.T) {
@@ -225,7 +274,7 @@ func TestClaimsFromContext_Absent(t *testing.T) {
 func TestApiKeyMiddleware_SetsIntegrationClaimsAndActor(t *testing.T) {
 	tenantID := domain.NewTenantID()
 	key := newApiKey(t, tenantID)
-	mw := ApiKeyMiddleware(newFakeApiKeyRepo(key), &fakeHasher{verifyResult: true})
+	mw := ApiKeyMiddleware(newFakeApiKeyRepo(key), &fakeHasher{verifyResult: true}, openTenants)
 
 	var claims application.AccessTokenClaims
 	var actor string
@@ -265,7 +314,7 @@ func TestJWTOrApiKeyMiddleware(t *testing.T) {
 		Role: domain.RoleOperator, Environment: domain.EnvironmentProduction,
 	}
 	issuer := &fakeTokenIssuer{claimsByToken: map[string]application.AccessTokenClaims{"good": jwtClaims}}
-	mw := JWTOrApiKeyMiddleware(issuer, newFakeApiKeyRepo(key), &fakeHasher{verifyResult: true})
+	mw := JWTOrApiKeyMiddleware(issuer, newFakeApiKeyRepo(key), &fakeHasher{verifyResult: true}, openTenants)
 
 	t.Run("api key header authenticates with the key", func(t *testing.T) {
 		rec, reached := runMW(mw, func(r *http.Request) {

@@ -53,8 +53,8 @@ func TestRefreshTokenRepo_SaveAndFindByHash(t *testing.T) {
 func TestRefreshTokenRepo_FindByHash_NotFound(t *testing.T) {
 	pool := requireDB(t)
 	repo := NewRefreshTokenRepository(pool)
-	if _, err := repo.FindByHash(context.Background(), "does-not-exist"); !errors.Is(err, domain.ErrUserNotFound) {
-		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	if _, err := repo.FindByHash(context.Background(), "does-not-exist"); !errors.Is(err, application.ErrRefreshTokenNotFound) {
+		t.Fatalf("expected ErrRefreshTokenNotFound, got %v", err)
 	}
 }
 
@@ -71,8 +71,8 @@ func TestRefreshTokenRepo_RevokeLogout(t *testing.T) {
 	}
 
 	// Logout: revocar sin sucesor.
-	if err := repo.Revoke(ctx, tok.ID, ""); err != nil {
-		t.Fatalf("revoke: %v", err)
+	if ok, err := repo.Revoke(ctx, tok.ID, ""); err != nil || !ok {
+		t.Fatalf("revoke = %v, %v", ok, err)
 	}
 
 	got, _ := repo.FindByHash(ctx, tok.TokenHash)
@@ -102,7 +102,7 @@ func TestRefreshTokenRepo_RevokeRotation(t *testing.T) {
 	}
 
 	// Rotación: revocar el viejo registrando al sucesor.
-	if err := repo.Revoke(ctx, oldTok.ID, newTok.ID); err != nil {
+	if _, err := repo.Revoke(ctx, oldTok.ID, newTok.ID); err != nil {
 		t.Fatalf("revoke rotation: %v", err)
 	}
 
@@ -127,11 +127,42 @@ func TestRefreshTokenRepo_RevokeIdempotent(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	if err := repo.Revoke(ctx, tok.ID, ""); err != nil {
-		t.Fatalf("first revoke: %v", err)
+	if ok, err := repo.Revoke(ctx, tok.ID, ""); err != nil || !ok {
+		t.Fatalf("first revoke = %v, %v", ok, err)
 	}
-	// Revocar de nuevo no es error (rowsAffected 0 → nil).
-	if err := repo.Revoke(ctx, tok.ID, ""); err != nil {
-		t.Fatalf("second revoke should be idempotent, got %v", err)
+	// Revocar de nuevo no es error, pero informa que no revocó nada: el
+	// refresh lo usa para detectar que otro request rotó el token antes.
+	if ok, err := repo.Revoke(ctx, tok.ID, ""); err != nil || ok {
+		t.Fatalf("second revoke = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestRefreshTokenRepo_RevokeAllForUser(t *testing.T) {
+	pool := requireDB(t)
+	repo := NewRefreshTokenRepository(pool)
+	ctx := context.Background()
+
+	tenant := seedTenant(t, pool)
+	user := seedUser(t, pool, tenant.ID(), "all@example.com")
+	other := seedUser(t, pool, tenant.ID(), "other@example.com")
+	a := makeRefreshToken(user.ID(), tenant.ID(), "a-"+uuid.NewString())
+	b := makeRefreshToken(user.ID(), tenant.ID(), "b-"+uuid.NewString())
+	keep := makeRefreshToken(other.ID(), tenant.ID(), "k-"+uuid.NewString())
+	for _, tok := range []application.RefreshToken{a, b, keep} {
+		if err := repo.Save(ctx, tok); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+
+	if err := repo.RevokeAllForUser(ctx, user.ID()); err != nil {
+		t.Fatalf("revoke all: %v", err)
+	}
+	for _, tok := range []application.RefreshToken{a, b} {
+		if got, _ := repo.FindByHash(ctx, tok.TokenHash); !got.IsRevoked() {
+			t.Errorf("token %s of the user should be revoked", tok.ID)
+		}
+	}
+	if got, _ := repo.FindByHash(ctx, keep.TokenHash); got.IsRevoked() {
+		t.Error("another user's token must stay valid")
 	}
 }

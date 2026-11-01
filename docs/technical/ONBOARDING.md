@@ -216,13 +216,15 @@ Todas las rutas cuelgan de `/api/v1` y requieren `Authorization: Bearer <JWT>`. 
 
 | Método | Ruta | Actor | Éxito |
 |---|---|---|---|
-| `POST` | `/onboarding` | Comercio | `201 {"application_id": "..."}` |
-| `GET` | `/onboarding` | Comercio | `200 ApplicationView` |
-| `POST` | `/onboarding/documents` | Comercio | `201` (sin body) |
-| `POST` | `/onboarding/persons` | Comercio | `201` (sin body) |
-| `PUT` | `/onboarding/bank-account` | Comercio | `204` |
-| `POST` | `/onboarding/submit` | Comercio | `204` |
+| `POST` | `/onboarding` | Comercio (`admin`) | `201 {"application_id": "..."}` |
+| `GET` | `/onboarding` | Comercio (cualquier rol) | `200 ApplicationView` |
+| `POST` | `/onboarding/documents` | Comercio (`admin`) | `201` (sin body) |
+| `POST` | `/onboarding/persons` | Comercio (`admin`) | `201` (sin body) |
+| `PUT` | `/onboarding/bank-account` | Comercio (`admin`) | `204` |
+| `POST` | `/onboarding/submit` | Comercio (`admin`) | `204` |
 | `POST` | `/onboarding/applications/:id/review` | Operador (`platform_support`) | `204` (`409` si hubo una escritura concurrente) |
+
+Las escrituras del comercio exigen `onboarding:manage`, que en la matriz de Auth tiene solo `admin`, porque la cuenta bancaria aprobada es el destino de los payouts. Otro rol → `403 insufficient permissions`. Los guards llegan en `RouteGuards{Manage, Review}` desde `cmd/api`, y `RegisterRoutes` entra en pánico si falta alguno.
 
 Un body que no pasa el binding de Gin (JSON inválido o campo `required` ausente) responde `400 {"error": "invalid request body"}`.
 
@@ -298,7 +300,7 @@ Sin body. Valida completitud (§4.3).
 | `request_more_info` | **requerido** | `requires_more_info` |
 | `reopen` | **requerido** (qué corregir) | `requires_more_info` (solo desde `rejected`) |
 
-Requiere rol `platform_support`; si no → `403 insufficient permissions`. El guard se inyecta en `RegisterRoutes(..., reviewGuard)` desde `cmd/api` (`authttp.RequireRole(authdomain.RolePlatformSupport)`), así Onboarding no importa Auth. `RegisterRoutes` entra en pánico si el guard es `nil`. Detrás del guard, `platformOperatorScope` marca el request como acción de operador para RLS (§9).
+Requiere rol `platform_support`; si no → `403 insufficient permissions`. El guard llega en `RouteGuards.Review` desde `cmd/api` (`authttp.RequireRole(authdomain.RolePlatformSupport)`), así Onboarding no importa Auth. Detrás del guard, `platformOperatorScope` marca el request como acción de operador para RLS (§9).
 
 Una `decision` desconocida o un `:id` que no es UUID responden `400`.
 

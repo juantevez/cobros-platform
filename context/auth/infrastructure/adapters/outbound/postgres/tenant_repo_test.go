@@ -79,3 +79,29 @@ func TestTenantRepo_Update_NotFound(t *testing.T) {
 		t.Fatalf("expected ErrTenantNotFound, got %v", err)
 	}
 }
+
+func TestTenantRepo_PersistsComplianceSuspension(t *testing.T) {
+	pool := requireDB(t)
+	repo := NewTenantRepository(pool)
+	ctx := context.Background()
+	tenant := seedTenant(t, pool)
+
+	tenant.SuspendForCompliance()
+	if err := repo.Update(ctx, tenant); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := repo.FindByID(ctx, tenant.ID())
+	if err != nil || got.Status() != domain.TenantStatusSuspended || !got.SuspendedForCompliance() {
+		t.Fatalf("got %+v, %v; want suspended for compliance", got, err)
+	}
+
+	if err := got.Reactivate(true); err != nil {
+		t.Fatalf("reactivate: %v", err)
+	}
+	if err := repo.Update(ctx, got); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if again, _ := repo.FindByID(ctx, tenant.ID()); again.Status() != domain.TenantStatusActive || again.SuspendedForCompliance() {
+		t.Errorf("after reactivation: %s compliance=%v", again.Status(), again.SuspendedForCompliance())
+	}
+}

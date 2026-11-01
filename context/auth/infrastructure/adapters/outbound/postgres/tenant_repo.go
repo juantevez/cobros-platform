@@ -45,12 +45,13 @@ func (r *pgTenantRepository) Update(ctx context.Context, t *domain.Tenant) error
 	conn := postgres.ConnFromContext(ctx, r.pool)
 	tag, err := conn.Exec(ctx, `
 		UPDATE tenants
-		SET status = $2, environment = $3, updated_at = $4
+		SET status = $2, environment = $3, updated_at = $4, suspended_for_compliance = $5
 		WHERE id = $1`,
 		t.ID().String(),
 		string(t.Status()),
 		string(t.Environment()),
 		t.UpdatedAt(),
+		t.SuspendedForCompliance(),
 	)
 	if err != nil {
 		return fmt.Errorf("tenant repo: update: %w", err)
@@ -64,7 +65,7 @@ func (r *pgTenantRepository) Update(ctx context.Context, t *domain.Tenant) error
 func (r *pgTenantRepository) FindByID(ctx context.Context, id domain.TenantID) (*domain.Tenant, error) {
 	conn := postgres.ConnFromContext(ctx, r.pool)
 	row := conn.QueryRow(ctx, `
-		SELECT id, legal_name, status, environment, created_at, updated_at
+		SELECT id, legal_name, status, environment, suspended_for_compliance, created_at, updated_at
 		FROM tenants
 		WHERE id = $1`,
 		id.String(),
@@ -77,10 +78,11 @@ func (r *pgTenantRepository) FindByID(ctx context.Context, id domain.TenantID) (
 func scanTenant(row pgx.Row) (*domain.Tenant, error) {
 	var (
 		idStr, legalName, status, env string
+		forCompliance                 bool
 		createdAt, updatedAt          time.Time
 	)
 
-	if err := row.Scan(&idStr, &legalName, &status, &env, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&idStr, &legalName, &status, &env, &forCompliance, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrTenantNotFound
 		}
@@ -92,6 +94,7 @@ func scanTenant(row pgx.Row) (*domain.Tenant, error) {
 		legalName,
 		domain.TenantStatus(status),
 		domain.Environment(env),
+		forCompliance,
 		createdAt.UTC(),
 		updatedAt.UTC(),
 	), nil

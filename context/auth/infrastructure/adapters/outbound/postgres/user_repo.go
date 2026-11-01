@@ -25,8 +25,17 @@ func NewUserRepository(pool *pgxpool.Pool) *pgUserRepository {
 	return &pgUserRepository{pool: pool}
 }
 
+// Cada método corre en la sesión RLS del tenant que corresponde (withTenant):
+// el del usuario al escribir, el pedido en FindByEmail y el del llamador en
+// FindByID.
+
 func (r *pgUserRepository) Save(ctx context.Context, u *domain.User) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, u.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return saveUser(ctx, conn, u)
+	})
+}
+
+func saveUser(ctx context.Context, conn postgres.Conn, u *domain.User) error {
 	_, err := conn.Exec(ctx, `
 		INSERT INTO users (id, tenant_id, email, password_hash, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -50,7 +59,12 @@ func (r *pgUserRepository) Save(ctx context.Context, u *domain.User) error {
 }
 
 func (r *pgUserRepository) Update(ctx context.Context, u *domain.User) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, u.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return updateUser(ctx, conn, u)
+	})
+}
+
+func updateUser(ctx context.Context, conn postgres.Conn, u *domain.User) error {
 	tag, err := conn.Exec(ctx, `
 		UPDATE users
 		SET password_hash = $2, status = $3, updated_at = $4
@@ -70,26 +84,34 @@ func (r *pgUserRepository) Update(ctx context.Context, u *domain.User) error {
 }
 
 func (r *pgUserRepository) FindByID(ctx context.Context, id domain.UserID) (*domain.User, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, email, password_hash, status, created_at, updated_at
-		FROM users
-		WHERE id = $1`,
-		id.String(),
-	)
-	return scanUser(row)
+	var u *domain.User
+	err := withTenant(ctx, r.pool, callerTenant(ctx), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		u, err = scanUser(conn.QueryRow(ctx, `
+			SELECT id, tenant_id, email, password_hash, status, created_at, updated_at
+			FROM users
+			WHERE id = $1`,
+			id.String(),
+		))
+		return err
+	})
+	return u, err
 }
 
 func (r *pgUserRepository) FindByEmail(ctx context.Context, tenantID domain.TenantID, email domain.Email) (*domain.User, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT id, tenant_id, email, password_hash, status, created_at, updated_at
-		FROM users
-		WHERE tenant_id = $1 AND email = $2`,
-		tenantID.String(),
-		email.String(),
-	)
-	return scanUser(row)
+	var u *domain.User
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		u, err = scanUser(conn.QueryRow(ctx, `
+			SELECT id, tenant_id, email, password_hash, status, created_at, updated_at
+			FROM users
+			WHERE tenant_id = $1 AND email = $2`,
+			tenantID.String(),
+			email.String(),
+		))
+		return err
+	})
+	return u, err
 }
 
 func scanUser(row pgx.Row) (*domain.User, error) {

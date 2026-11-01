@@ -194,9 +194,12 @@ func (r *fakeRefreshRepo) FindByHash(ctx context.Context, h string) (*applicatio
 	if r.saved != nil && r.saved.TokenHash == h {
 		return r.saved, nil
 	}
-	return nil, domain.ErrUserNotFound
+	return nil, application.ErrRefreshTokenNotFound
 }
-func (r *fakeRefreshRepo) Revoke(ctx context.Context, id, replacedBy string) error { return nil }
+func (r *fakeRefreshRepo) Revoke(ctx context.Context, id, replacedBy string) (bool, error) {
+	return true, nil
+}
+func (r *fakeRefreshRepo) RevokeAllForUser(context.Context, domain.UserID) error { return nil }
 
 type fakeHasher struct {
 	verifyResult bool
@@ -327,15 +330,15 @@ func newTestEnv(
 	suspendTenant := application.NewSuspendTenantUseCase(tenants, tx, pub)
 	registerUser := application.NewRegisterUserUseCase(tenants, users, members, hasher, tx, pub)
 	authenticate := application.NewAuthenticateUseCase(tenants, users, members, refresh, hasher, issuer, clock, tx, pub)
-	refreshUC := application.NewRefreshTokenUseCase(users, members, tenants, refresh, issuer, clock)
+	refreshUC := application.NewRefreshTokenUseCase(users, members, tenants, refresh, issuer, clock, tx)
 	logoutUC := application.NewLogoutUseCase(refresh, tx, pub)
 	issueApiKey := application.NewIssueApiKeyUseCase(tenants, apiKeys, hasher, tx, pub)
 	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeys, tx, pub)
 	assignRole := application.NewAssignRoleUseCase(tenants, users, members, tx, pub)
 
 	engine := NewRouter(
-		issuer, apiKeys, hasher,
-		NewTenantHandler(registerTenant, activateTenant, suspendTenant),
+		issuer, apiKeys, hasher, application.NewCachedTenantStatus(tenants, clock, 0),
+		NewTenantHandler(registerTenant, activateTenant, suspendTenant, application.NewReactivateTenantUseCase(tenants, tx, pub)),
 		NewAuthHandler(authenticate, refreshUC, logoutUC),
 		NewUserHandler(registerUser, assignRole),
 		NewApiKeyHandler(issueApiKey, revokeApiKey),
@@ -373,6 +376,13 @@ func (e *testEnv) registerToken(token string, claims application.AccessTokenClai
 		e.issuer.claimsByToken = map[string]application.AccessTokenClaims{}
 	}
 	e.issuer.claimsByToken[token] = claims
+	// Los middlewares verifican que el tenant del token exista y no esté
+	// suspendido: si el test no lo sembró, se siembra activo.
+	if _, ok := e.tenants.tenants[claims.TenantID]; !ok && !claims.TenantID.IsZero() {
+		now := time.Now().UTC()
+		e.tenants.tenants[claims.TenantID] = domain.ReconstituteTenant(claims.TenantID, "Token Tenant",
+			domain.TenantStatusActive, domain.EnvironmentProduction, false, now, now)
+	}
 }
 
 func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
@@ -389,3 +399,10 @@ func newTestCtx() (*gin.Context, *httptest.ResponseRecorder) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	return c, rec
 }
+
+// fakeTenantStatus responde err a todo chequeo; el valor cero deja pasar.
+type fakeTenantStatus struct{ err error }
+
+func (f fakeTenantStatus) EnsureNotSuspended(context.Context, domain.TenantID) error { return f.err }
+
+var openTenants = fakeTenantStatus{}

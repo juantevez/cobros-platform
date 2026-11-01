@@ -17,7 +17,7 @@ func TestRegisterUser_Success(t *testing.T) {
 	})
 
 	rec := env.do(http.MethodPost, "/api/v1/tenants/"+tenant.ID().String()+"/users", "adm", map[string]string{
-		"email": "new@example.com", "password": "s3cret", "role": "operator",
+		"email": "new@example.com", "password": "correct-horse-battery", "role": "operator",
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -38,7 +38,7 @@ func TestRegisterUser_TenantMismatchForbidden(t *testing.T) {
 	})
 
 	rec := env.do(http.MethodPost, "/api/v1/tenants/"+tenant.ID().String()+"/users", "adm", map[string]string{
-		"email": "new@example.com", "password": "s3cret", "role": "operator",
+		"email": "new@example.com", "password": "correct-horse-battery", "role": "operator",
 	})
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)

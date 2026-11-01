@@ -22,9 +22,7 @@ func NewRefreshTokenRepository(pool *pgxpool.Pool) *pgRefreshTokenRepository {
 	return &pgRefreshTokenRepository{pool: pool}
 }
 
-// Save persiste un nuevo refresh token.
-// No usa ConnFromContext porque los refresh tokens se guardan fuera de la
-// transacción del dominio (en authenticate.go no hay TxManager).
+// Save persiste un nuevo refresh token (en la tx del login o de la rotación).
 func (r *pgRefreshTokenRepository) Save(ctx context.Context, token application.RefreshToken) error {
 	_, err := postgres.ConnFromContext(ctx, r.pool).Exec(ctx, `
 		INSERT INTO refresh_tokens
@@ -65,7 +63,7 @@ func (r *pgRefreshTokenRepository) FindByHash(ctx context.Context, tokenHash str
 		&issuedAt, &expiresAt, &revokedAt, &replacedBy,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, domain.ErrUserNotFound // usamos este error genérico como "not found"
+			return nil, application.ErrRefreshTokenNotFound
 		}
 		return nil, fmt.Errorf("refresh token repo: find by hash: %w", err)
 	}
@@ -83,7 +81,7 @@ func (r *pgRefreshTokenRepository) FindByHash(ctx context.Context, tokenHash str
 }
 
 // Revoke marca el token como revocado y registra su sucesor (puede ser vacío en logout).
-func (r *pgRefreshTokenRepository) Revoke(ctx context.Context, tokenID string, replacedBy string) error {
+func (r *pgRefreshTokenRepository) Revoke(ctx context.Context, tokenID string, replacedBy string) (bool, error) {
 	var replacedByPtr *string
 	if replacedBy != "" {
 		replacedByPtr = &replacedBy
@@ -98,11 +96,22 @@ func (r *pgRefreshTokenRepository) Revoke(ctx context.Context, tokenID string, r
 		replacedByPtr,
 	)
 	if err != nil {
-		return fmt.Errorf("refresh token repo: revoke: %w", err)
+		return false, fmt.Errorf("refresh token repo: revoke: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		// Ya estaba revocado: idempotente, no es error.
-		return nil
+	// 0 filas: ya estaba revocado. El refresh lo trata como reuso; el
+	// logout, como idempotente.
+	return tag.RowsAffected() == 1, nil
+}
+
+// RevokeAllForUser revoca todos los tokens vigentes del usuario.
+func (r *pgRefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID domain.UserID) error {
+	_, err := postgres.ConnFromContext(ctx, r.pool).Exec(ctx, `
+		UPDATE refresh_tokens SET revoked_at = $2
+		WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID.String(), time.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("refresh token repo: revoke all for user: %w", err)
 	}
 	return nil
 }

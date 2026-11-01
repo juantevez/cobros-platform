@@ -230,7 +230,7 @@ Los tres se publican por outbox en la tx del caso de uso. El de agotada va en la
 | `webhook-auth-consumer` | `AUTH` | `auth.tenant.>` | 3 |
 | `webhook-dispute-consumer` | `DISPUTE` | `dispute.>` | 3 |
 
-- El catálogo suscribible (`SubscribableEvents`) son exactamente los tipos que hoy llegan por estos filtros: `payment.{captured,failed,refunded}`, `payout.{initiated,confirmed,failed,unknown}`, `onboarding.application.{submitted,sent_for_review,approved,rejected,more_info,reopened}` `auth.tenant.{created,activated,suspended}` y `dispute.{opened,resolved}` (`dispute.opened` trae el `deadline` para responder).
+- El catálogo suscribible (`SubscribableEvents`) son exactamente los tipos que hoy llegan por estos filtros: `payment.{captured,failed,refunded}`, `payout.{initiated,confirmed,failed,unknown}`, `onboarding.application.{submitted,sent_for_review,approved,rejected,more_info,reopened}` `auth.tenant.{created,activated,suspended,reactivated}` y `dispute.{opened,resolved}` (`dispute.opened` trae el `deadline` para responder).
 - No se consumen `ledger.*`, `billing.*`, `compliance.*` ni `reconciliation.*`. Compliance queda afuera a propósito (anti *tipping-off*, ver AUTH.md §7.2).
 - El consumer hace *ack* sin reintentar si el payload no es JSON, si no trae `tenant_id` o si el `tenant_id` es inválido. Un error de base de datos hace *nak*.
 

@@ -21,8 +21,15 @@ func NewMembershipRepository(pool *pgxpool.Pool) *pgMembershipRepository {
 	return &pgMembershipRepository{pool: pool}
 }
 
+// Cada método corre en la sesión RLS del tenant de la membership (withTenant).
+
 func (r *pgMembershipRepository) Save(ctx context.Context, m domain.Membership) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, m.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return saveMembership(ctx, conn, m)
+	})
+}
+
+func saveMembership(ctx context.Context, conn postgres.Conn, m domain.Membership) error {
 
 	var assignedBy *string
 	if !m.AssignedBy().IsZero() {
@@ -48,7 +55,12 @@ func (r *pgMembershipRepository) Save(ctx context.Context, m domain.Membership) 
 }
 
 func (r *pgMembershipRepository) Update(ctx context.Context, m domain.Membership) error {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	return withTenant(ctx, r.pool, m.TenantID().String(), func(ctx context.Context, conn postgres.Conn) error {
+		return updateMembership(ctx, conn, m)
+	})
+}
+
+func updateMembership(ctx context.Context, conn postgres.Conn, m domain.Membership) error {
 
 	var assignedBy *string
 	if !m.AssignedBy().IsZero() {
@@ -80,22 +92,35 @@ func (r *pgMembershipRepository) FindByUserAndTenant(
 	userID domain.UserID,
 	tenantID domain.TenantID,
 ) (*domain.Membership, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
-	row := conn.QueryRow(ctx, `
-		SELECT user_id, tenant_id, role, assigned_by, created_at, updated_at
-		FROM memberships
-		WHERE user_id = $1 AND tenant_id = $2`,
-		userID.String(),
-		tenantID.String(),
-	)
-	return scanMembership(row)
+	var m *domain.Membership
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		m, err = scanMembership(conn.QueryRow(ctx, `
+			SELECT user_id, tenant_id, role, assigned_by, created_at, updated_at
+			FROM memberships
+			WHERE user_id = $1 AND tenant_id = $2`,
+			userID.String(),
+			tenantID.String(),
+		))
+		return err
+	})
+	return m, err
 }
 
 func (r *pgMembershipRepository) ListByTenant(
 	ctx context.Context,
 	tenantID domain.TenantID,
 ) ([]domain.Membership, error) {
-	conn := postgres.ConnFromContext(ctx, r.pool)
+	var out []domain.Membership
+	err := withTenant(ctx, r.pool, tenantID.String(), func(ctx context.Context, conn postgres.Conn) error {
+		var err error
+		out, err = listMemberships(ctx, conn, tenantID)
+		return err
+	})
+	return out, err
+}
+
+func listMemberships(ctx context.Context, conn postgres.Conn, tenantID domain.TenantID) ([]domain.Membership, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT user_id, tenant_id, role, assigned_by, created_at, updated_at
 		FROM memberships

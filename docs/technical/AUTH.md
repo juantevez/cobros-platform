@@ -1,7 +1,7 @@
 # Auth & Multi-Tenant — Documentación técnico-funcional
 
 > **Bounded Context:** `context/auth`
-> **Migración:** [`000002_auth_init`](../../migrations/000002_auth_init.up.sql)
+> **Migraciones:** [`000002_auth_init`](../../migrations/000002_auth_init.up.sql), [`000050_auth_rls`](../../migrations/000050_auth_rls.up.sql), [`000051_tenant_compliance_suspension`](../../migrations/000051_tenant_compliance_suspension.up.sql)
 > **Stream NATS:** `AUTH` (`auth.>`)
 
 ---
@@ -10,18 +10,18 @@
 
 Auth es la **raíz del multi-tenant** de la plataforma. Gestiona:
 
-- El ciclo de vida del **comercio** (`Tenant`): alta, activación y suspensión.
+- El ciclo de vida del **comercio** (`Tenant`): alta, activación, pase a producción, suspensión y reactivación.
 - Los **usuarios** de cada comercio y su **rol** (RBAC).
 - La **autenticación** interactiva (JWT de acceso + refresh token con rotación).
 - Las **API keys** para integraciones server-to-server.
 - La **propagación del tenant** al resto del sistema: el `JWTMiddleware` pone el `tenant_id` en el `context.Context`, y el `TxManager` lo usa para configurar el RLS de PostgreSQL en todos los BCs.
 
-Todos los demás contextos dependen de Auth para saber "quién es el tenant" de un request. Ninguno consulta el estado del tenant por su cuenta (ver §10).
+Todos los demás contextos dependen de Auth para saber "quién es el tenant" de un request. Solo Payment (`StatusGate`) y Payout (`PayoutGate`) leen el estado del tenant antes de mover dinero (ver §10).
 
 ### Fuera de alcance (hoy)
 
-- Alta del primer usuario de un tenant (ver §10, punto 3).
 - Recuperación o cambio de contraseña, verificación de email y MFA.
+- Rate limiting y bloqueo por intentos fallidos (login, refresh, `POST /tenants`): van en el API gateway, un repo aparte con Redis, no en Auth.
 - Gestión de usuarios: listar, suspender o borrar (el dominio tiene `User.Suspend()` pero no hay caso de uso).
 - Usuarios en varios tenants: el modelo de `Membership` lo contempla, pero `users.tenant_id` ata cada usuario a un único tenant.
 
@@ -59,9 +59,8 @@ sequenceDiagram
     participant OB as Onboarding
     participant N as NATS
 
-    C->>A: POST /tenants {legal_name}  (público)
-    A-->>N: auth.tenant.created.v1
-    Note over C,A: ⚠️ No hay endpoint para crear el primer usuario (§10.3)
+    C->>A: POST /tenants {legal_name, email, password}  (público)
+    A-->>N: auth.tenant.created.v1 + auth.user.registered.v1 (admin inicial)
     C->>A: POST /auth/login {tenant_id, email, password}
     A-->>C: access_token (15m) + refresh_token (7d)
     C->>OB: Flujo KYC (ver ONBOARDING.MD)
@@ -69,8 +68,8 @@ sequenceDiagram
     N-->>A: auth-onboarding-consumer → ActivateTenant(production)
     A-->>N: auth.tenant.activated.v1
     opt Intervención manual
-        P->>A: POST /tenants/:id/activate | /suspend
-        A-->>N: auth.tenant.activated.v1 | auth.tenant.suspended.v1
+        P->>A: POST /tenants/:id/activate | /suspend | /reactivate
+        A-->>N: auth.tenant.activated.v1 | suspended.v1 | reactivated.v1
     end
 ```
 
@@ -81,7 +80,7 @@ sequenceDiagram
 | JWT | `Authorization: Bearer <jwt>` | Todas las rutas protegidas de todos los BCs (`protected` en `cmd/api`). |
 | API key | `X-Api-Key: <env>_<prefix>_<secret>` | Rutas montadas con `JWTOrApiKeyMiddleware`: hoy **`/api/v1/payments`**. El grupo `/api/v1/integrations` sigue vacío. |
 
-El `JWTMiddleware` **no consulta la base**: valida firma y expiración y confía en los claims. Por eso un cambio de rol o una suspensión recién se refleja cuando el usuario obtiene un token nuevo (hasta 15 minutos después).
+El `JWTMiddleware` valida firma y expiración y confía en los claims, salvo en un punto: el estado del tenant. Tanto el JWT como la API key pasan por `TenantStatusChecker` (`CachedTenantStatus`, que lee `tenants` con una caché de 30 s por réplica). Un tenant suspendido recibe `403 tenant is suspended` a lo sumo 30 s después, y uno inexistente, `401`. Un cambio de rol, en cambio, recién se refleja cuando el usuario obtiene un token nuevo (hasta 15 minutos después).
 
 ---
 
@@ -96,19 +95,22 @@ Archivo: [domain/tenant.go](../../context/auth/domain/tenant.go)
 | `id` | UUID generado en el alta. |
 | `legalName` | Obligatorio (`ErrEmptyLegalName`). |
 | `status` | `pending` → `active` / `suspended`. |
-| `environment` | Nace en `test`; se define al activar. |
+| `environment` | Nace en `test`; se define al activar y puede pasar de `test` a `production`. |
+| `suspendedForCompliance` | La suspensión vigente es por cumplimiento: solo la levanta un `compliance_officer`. |
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending: RegisterTenant (env=test)
     pending --> active: Activate(env)
-    pending --> suspended: Suspend(reason)
-    active --> suspended: Suspend(reason)
-    suspended --> [*]
+    active --> active: Activate(production) desde test
+    pending --> suspended: Suspend(reason) / SuspendForCompliance
+    active --> suspended: Suspend(reason) / SuspendForCompliance
+    suspended --> active: Reactivate(byCompliance)
 ```
 
-- `Activate` **solo desde `pending`**. No existe la transición `active(test)` → `active(production)` ni la reactivación de un tenant suspendido.
-- `Suspend` desde cualquier estado excepto `suspended`.
+- `Activate` desde `pending`, o desde `active(test)` con `production` (pase a producción). Activar en el ambiente que ya tiene es un no-op sin evento. `production → test` y `Activate` sobre un suspendido → `ErrTenantCannotTransition`.
+- `Suspend` desde cualquier estado excepto `suspended`. `SuspendForCompliance` suspende con el motivo genérico y marca `suspendedForCompliance`; si ya estaba suspendido, solo marca (sin otro evento).
+- `Reactivate(byCompliance)`: `suspended → active` con el ambiente que tenía (un tenant suspendido estando `pending` queda activo en `test`). La suspensión por cumplimiento solo la levanta cumplimiento (`byCompliance=true`), y la del operador solo el operador. Si no → `ErrReactivationNotAllowed` (403).
 - `IsActive()` = `status == active`. `CanProcessRealPayments()` = `active && production`.
 
 ### 4.2 Agregado `User`
@@ -138,8 +140,10 @@ Clave `(user_id, tenant_id)` con `role` y `assignedBy`. Define una matriz de per
 | `webhooks:manage` | ✅ | | | | |
 | `disputes:manage` | ✅ | | | | |
 | `payouts:create` | ✅ | | | | |
+| `onboarding:manage` | ✅ | | | | |
+| `notifications:manage` | ✅ | | | | |
 
-La matriz se consulta con `RoleHasPermission(role, action)`, que usa el middleware `RequirePermission` (§6.7). Hoy la aplican **Payments** (cobrar, consultar, reembolsar), **Webhooks**, **Reporting**, **Payouts** (desembolsar con `payouts:create`, sin API key; consultar con `payments:read`) y **Disputes** (contestar/aceptar con `disputes:manage`, consultar con `payments:read`; abrir y resolver con `RequireRole(platform_support)`). Las rutas de Auth usan `RequireRole`, y Onboarding y Ledger usan `RequireRole(platform_support)` en sus escrituras. Los demás BCs todavía no aplican control por rol.
+La matriz se consulta con `RoleHasPermission(role, action)`, que usa el middleware `RequirePermission` (§6.7). Hoy la aplican **Payments** (cobrar, consultar, reembolsar), **Webhooks**, **Reporting**, **Payouts** (desembolsar con `payouts:create`, sin API key; consultar con `payments:read`) y **Disputes** (contestar/aceptar con `disputes:manage`, consultar con `payments:read`; abrir y resolver con `RequireRole(platform_support)`). Las rutas de Auth, Audit, Billing, Reconciliation, Compliance y Ledger usan `RequireRole`. Onboarding exige `onboarding:manage` para las escrituras del comercio (incluida la cuenta bancaria) y `platform_support` para revisar. Notification exige `notifications:manage` para cambiar las preferencias del tenant. Leer la solicitud y el historial de notificaciones no lleva guard de rol.
 
 ### 4.4 Agregado `ApiKey`
 
@@ -161,7 +165,7 @@ test_Xk3mPQrS_Xk3mPQrS7fGhJ9kLpQrStUvWxYzAb12
 
 Archivo: [application/token.go](../../context/auth/application/token.go)
 
-No es un agregado: es un registro en `refresh_tokens` con `token_hash` (SHA-256 hex, determinístico, para poder buscar por igualdad), `expires_at` (emisión + 7 días), `revoked_at` y `replaced_by` (el token sucesor tras la rotación).
+No es un agregado: es un registro en `refresh_tokens` con `token_hash` (SHA-256 hex, determinístico, para poder buscar por igualdad), `expires_at` (emisión + 7 días), `revoked_at` y `replaced_by` (el token sucesor tras la rotación). `replaced_by` distingue un token rotado de uno cerrado por logout: solo el reuso de uno rotado se trata como robo.
 
 ### 4.6 Value Objects y errores
 
@@ -169,13 +173,13 @@ Archivos: [domain/vo.go](../../context/auth/domain/vo.go), [domain/errors.go](..
 
 | Error | HTTP |
 |---|---|
-| `ErrInvalidEmail`, `ErrInvalidRole`, `ErrInvalidEnvironment`, `ErrInvalidID`, `ErrEmptyLegalName`, `ErrEmptyPassword` | 400 |
+| `ErrInvalidEmail`, `ErrInvalidRole`, `ErrInvalidEnvironment`, `ErrInvalidID`, `ErrEmptyLegalName`, `ErrEmptyPassword`, `ErrWeakPassword`, `ErrInvalidScope`, `ErrApiKeyNameRequired`, `ErrApiKeyScopesRequired`, `ErrSuspensionReasonRequired` | 400 |
 | `ErrInvalidCredentials`, `ErrApiKeyRevoked` | 401 |
-| `ErrTenantSuspended`, `ErrUserSuspended`, `ErrTenantNotActive`, `ErrRoleNotAssignable` | 403 |
+| `ErrTenantSuspended`, `ErrUserSuspended`, `ErrTenantNotActive`, `ErrTenantNotInProduction`, `ErrRoleNotAssignable`, `ErrReactivationNotAllowed` | 403 |
 | `ErrTenantNotFound`, `ErrUserNotFound`, `ErrApiKeyNotFound`, `ErrMembershipNotFound` | 404 |
 | `ErrEmailAlreadyExists`, `ErrApiKeyAlreadyRevoked` | 409 |
 | `ErrTenantCannotTransition` | 422 |
-| Cualquier otro (incluye errores con `fmt.Errorf` sin tipar) | 500 |
+| Cualquier otro (infraestructura) | 500, sin detalle |
 
 ---
 
@@ -185,27 +189,28 @@ Directorio: [application/](../../context/auth/application/)
 
 | Caso de uso | Precondiciones | Efecto | Evento |
 |---|---|---|---|
-| `RegisterTenant` | `legal_name` no vacío | Tenant `pending` / `test` | `auth.tenant.created.v1` |
-| `ActivateTenant` | Tenant `pending`; env válido | `active` + env | `auth.tenant.activated.v1` |
+| `RegisterTenant` | `legal_name` no vacío; email válido; password de 12 a 128 caracteres | Tenant `pending` / `test` + usuario `admin` inicial con su Membership, en una tx | `auth.tenant.created.v1`, `auth.user.registered.v1`, `auth.role.assigned.v1` (`assigned_by: system`) |
+| `ActivateTenant` | Tenant `pending`, o `active(test)` → `production`; env válido | `active` + env. Ya activo en ese env: no-op | `auth.tenant.activated.v1` |
+| `ReactivateTenant` | Tenant `suspended`; rol que puede levantar esa suspensión | `active`, mismo env. No libera holds de cumplimiento | `auth.tenant.reactivated.v1` |
 | `SuspendTenant` | Motivo no vacío; tenant no suspendido | `suspended` | `auth.tenant.suspended.v1` |
-| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password no vacío; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
+| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password de 12 a 128 caracteres; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership (`assigned_by` = el admin del JWT) | `auth.user.registered.v1`, `auth.role.assigned.v1` |
 | `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol asignable por el tenant (no `platform_support` ni `compliance_officer`) | Crea o actualiza la Membership | `auth.role.assigned.v1` |
-| `Authenticate` | Tenant no suspendido; usuario activo; password correcto; membership existente | Access + refresh token (el refresh token y el evento se guardan en la misma tx) | `auth.user.login.v1` |
-| `RefreshToken` | Token vigente y no revocado; usuario y tenant OK | Nuevo par; revoca el anterior (`replaced_by`) | — |
+| `Authenticate` | Password correcto; después, tenant no suspendido, usuario activo y membership existente | Access + refresh token (el refresh token y el evento se guardan en la misma tx) | `auth.user.login.v1` |
+| `RefreshToken` | Token vigente y no revocado; usuario y tenant OK | Nuevo par; revoca el anterior (`replaced_by`) en la misma tx, condicionado a que siga vigente. Reuso de un token rotado, o carrera perdida: revoca todas las sesiones del usuario | — |
 | `Logout` | — (idempotente) | Revoca el refresh token (en tx con el evento) | `auth.user.logout.v1` |
 | `IssueApiKey` | Tenant **activo**; para `production`, el tenant debe estar en `production`; ≥1 scope válido | API key nueva | `auth.apikey.issued.v1` |
 | `RevokeApiKey` | La key pertenece al tenant del caller | Revocada | `auth.apikey.revoked.v1` |
 | `ProvisionPlatformUser` | Solo CLI ([cmd/provision](../../cmd/provision/main.go)); rol de **plataforma** (`compliance_officer`/`platform_support`), el inverso de `RegisterUser`; mismas validaciones de tenant, email y password | User `active` + Membership | `auth.user.registered.v1` |
 | `PlaceComplianceHold` | `compliance.sanction.matched.v1` | Hold vigente `(tenant, alerta)`; idempotente | — (anti tipping-off) |
 | `ReleaseComplianceHold` | `compliance.sanction.cleared.v1` | `released_at` del hold; tolera llegar antes que el place | — |
-| `SuspendForCompliance` | `compliance.sanction.confirmed.v1` | `SuspendTenant` con `ComplianceReviewReason` (genérico); ya suspendido = no-op | `auth.tenant.suspended.v1` |
+| `SuspendForCompliance` | `compliance.sanction.confirmed.v1` | Suspende con `ComplianceReviewReason` (genérico) y marca `suspended_for_compliance`. Si ya estaba suspendido, solo marca | `auth.tenant.suspended.v1` (no si ya estaba suspendido) |
 
 Detalles relevantes:
 
-- **Transacciones:** los comandos que mutan agregados usan `RunInTx { repo.Save/Update; publisher.Publish }` (Outbox). `Authenticate` y `Logout` guardan/revocan el refresh token y publican el evento de sesión (auditoría) en la misma tx; `RefreshToken` escribe directo al pool.
+- **Transacciones:** los comandos que mutan agregados usan `RunInTx { repo.Save/Update; publisher.Publish }` (Outbox). `Authenticate` y `Logout` guardan/revocan el refresh token y publican el evento de sesión (auditoría) en la misma tx. `RefreshToken` guarda el token nuevo y revoca el anterior en una tx.
 - **Hash fuera de la tx:** `RegisterUser` e `IssueApiKey` calculan Argon2 (~80 ms) antes de abrir la transacción.
-- **Anti-enumeración en login:** email inexistente o tenant inexistente → `ErrInvalidCredentials`. Pero un tenant suspendido (403) o un usuario suspendido (403) se informan **antes** de verificar la contraseña.
-- **`RegisterUser` no publica `RoleAssigned`:** el rol inicial queda registrado solo en `user.registered.v1`, que no incluye el rol.
+- **Anti-enumeración en login:** tenant o email inexistente, email mal formado, contraseña incorrecta o usuario sin membership → `401 invalid credentials`. La contraseña se verifica siempre, también sin usuario (contra un hash señuelo calculado una vez), para que el tiempo de respuesta no delate si el email existe. Tenant o usuario suspendido (403) se informa **solo después** de validar la contraseña.
+- **Rol inicial auditado:** `RegisterTenant`, `RegisterUser` y `ProvisionPlatformUser` publican `auth.role.assigned.v1` junto con `user.registered.v1`. `assigned_by` es el actor del request: el admin del JWT, o `system` en el alta pública y en el CLI.
 
 ---
 
@@ -216,7 +221,7 @@ Directorio: [infrastructure/adapters/inbound/http/](../../context/auth/infrastru
 | Método | Ruta | Auth | Rol | Éxito |
 |---|---|---|---|---|
 | `GET` | `/health` | — | — | `200 {"status":"ok"}` |
-| `POST` | `/api/v1/tenants` | **Pública** | — | `201 {"tenant_id"}` |
+| `POST` | `/api/v1/tenants` | **Pública** | — | `201 {"tenant_id", "user_id"}` (crea el admin inicial) |
 | `POST` | `/api/v1/auth/login` | Pública | — | `200 tokenResponse` |
 | `POST` | `/api/v1/auth/refresh` | Pública | — | `200 tokenResponse` |
 | `POST` | `/api/v1/auth/logout` | Pública | — | `204` |
@@ -226,11 +231,12 @@ Directorio: [infrastructure/adapters/inbound/http/](../../context/auth/infrastru
 | `DELETE` | `/api/v1/tenants/:tenantID/api-keys/:keyID` | JWT | `admin`, `platform_support` | `204` |
 | `POST` | `/api/v1/tenants/:tenantID/activate` | JWT | `platform_support` | `204` |
 | `POST` | `/api/v1/tenants/:tenantID/suspend` | JWT | `platform_support` | `204` |
+| `POST` | `/api/v1/tenants/:tenantID/reactivate` | JWT | `platform_support`, `compliance_officer` | `204` |
 
 Reglas transversales:
 
 - En las rutas de usuarios y API keys, el handler exige `:tenantID == claims.tid`. Si no coincide → `403`. Esto aplica **también a `platform_support`**, que entonces solo puede gestionar usuarios y keys de su propio tenant.
-- `activate` y `suspend` **no** comparan `:tenantID` con el token: actúan sobre cualquier tenant.
+- `activate`, `suspend` y `reactivate` **no** comparan `:tenantID` con el token: actúan sobre cualquier tenant.
 - Todo request recibe o propaga `X-Correlation-ID` (`CorrelationIDMiddleware`).
 - Un body inválido o al que le falta un campo `required` → `400 {"error":"invalid request body"}`.
 
@@ -264,7 +270,7 @@ Claims del JWT:
 { "refresh_token": "q2V9…" }
 ```
 
-El refresh devuelve un par nuevo y revoca el token presentado (`replaced_by`). Si se reusa un token ya rotado, responde `401`. El logout es idempotente.
+El refresh devuelve un par nuevo y revoca el token presentado (`replaced_by`). Si se reusa un token ya rotado, responde `401` y revoca **todas** las sesiones del usuario, porque alguien más tiene el token. Dos refresh simultáneos con el mismo token cuentan como reuso: gana uno, y el otro revoca todo, incluido el par del ganador. Un token cerrado por logout solo responde `401`. El logout es idempotente.
 
 ### 6.3 Registrar usuario — `POST /api/v1/tenants/:tenantID/users`
 
@@ -272,7 +278,7 @@ El refresh devuelve un par nuevo y revoca el token presentado (`replaced_by`). S
 { "email": "contador@elsol.com.ar", "password": "••••••", "role": "accountant" }
 ```
 
-No hay política de contraseñas (longitud ni complejidad): solo que no sea vacía. `role: "platform_support"` → `403 role cannot be assigned by a tenant`.
+Política de contraseñas (`domain.ValidatePassword`): entre 12 y 128 caracteres (runas), sin reglas de composición, como recomienda NIST SP 800-63B. Si no se cumple → `400`. Aplica al alta de tenant, al de usuario y a `cmd/provision`, pero no al login: los usuarios anteriores a la política siguen entrando con la contraseña que tienen. `role: "platform_support"` → `403 role cannot be assigned by a tenant`.
 
 ### 6.4 Asignar rol — `PUT /api/v1/tenants/:tenantID/members/:userID/role`
 
@@ -294,23 +300,24 @@ Requiere el tenant `active`. Tampoco acepta `platform_support` (→ `403`).
 
 Errores particulares:
 
-- Tenant no activo → `403`.
-- Key de `production` en un tenant `test` → **500**: el error es un `fmt.Errorf` no tipado.
-- Scope inválido → **500**, por el mismo motivo.
+- Tenant no activo, o key de `production` en un tenant `test` → `403`.
+- Scope inválido → `400 invalid scope: "<scope>"`.
 
-### 6.6 Activar / suspender — `POST /api/v1/tenants/:tenantID/activate | /suspend`
+### 6.6 Activar / suspender / reactivar — `POST /api/v1/tenants/:tenantID/activate | /suspend | /reactivate`
 
 ```json
 { "environment": "production" }
 { "reason": "Contracargos por encima del umbral" }
 ```
 
+`activate` también pasa un tenant de `test` a `production`. `reactivate` no lleva body: decide por el rol del token. Un `platform_support` levanta las suspensiones del operador y un `compliance_officer` las de cumplimiento. Si el rol no corresponde → `403 this suspension cannot be lifted by your role`.
+
 ### 6.7 Middlewares para otros BCs
 
 | Middleware | Qué hace |
 |---|---|
-| `JWTMiddleware` | Bearer JWT → claims (`sub`, `tid`, `role`, `env`) + tenant y actor en el contexto. |
-| `ApiKeyMiddleware` | `X-Api-Key` → claims de integración (`TenantID`, `Environment`, `ApiKeyID`, `Scopes`; sin `UserID` ni `Role`) + tenant y actor `apikey:<id>`. Sin header, deja pasar. |
+| `JWTMiddleware` | Bearer JWT → claims (`sub`, `tid`, `role`, `env`) + tenant y actor en el contexto. Tenant suspendido → 403 (§3.2). |
+| `ApiKeyMiddleware` | `X-Api-Key` → claims de integración (el `<env>` del header debe coincidir con el guardado, si no → 401) (`TenantID`, `Environment`, `ApiKeyID`, `Scopes`; sin `UserID` ni `Role`) + tenant y actor `apikey:<id>`. Sin header, deja pasar. Tenant suspendido → 403. |
 | `JWTOrApiKeyMiddleware` | Si viene `X-Api-Key` autentica con la key (una key inválida da 401, sin caer al JWT). Si no, con el JWT. |
 | `RequireRole(roles…)` | El rol del JWT debe estar en la lista. |
 | `RequirePermission(acción, scopes…)` | JWT: `RoleHasPermission(rol, acción)`. API key: tener al menos uno de los scopes; sin scopes, la ruta es solo para usuarios. |
@@ -325,14 +332,15 @@ Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican po
 |---|---|---|
 | `auth.tenant.created.v1` | `tenant_id`, `legal_name` | `RegisterTenant` |
 | `auth.tenant.activated.v1` | `tenant_id`, `environment` | `ActivateTenant` (HTTP o consumer) |
-| `auth.tenant.suspended.v1` | `tenant_id`, `reason` | `SuspendTenant` |
+| `auth.tenant.suspended.v1` | `tenant_id`, `reason` | `SuspendTenant`, `SuspendForCompliance` |
+| `auth.tenant.reactivated.v1` | `tenant_id`, `environment` (sin el motivo de la suspensión) | `ReactivateTenant` |
 | `auth.user.registered.v1` | `tenant_id`, `user_id`, `email` | `RegisterUser` |
 | `auth.user.suspended.v1` | `tenant_id`, `user_id` | **Nunca** (no hay caso de uso) |
 | `auth.user.login.v1` | `tenant_id`, `user_id` | `Authenticate` (login exitoso) |
 | `auth.user.logout.v1` | `tenant_id`, `user_id` | `Logout` (sesión revocada) |
 | `auth.apikey.issued.v1` | `tenant_id`, `api_key_id`, `prefix`, `environment` | `IssueApiKey` |
 | `auth.apikey.revoked.v1` | `tenant_id`, `api_key_id` | `RevokeApiKey` |
-| `auth.role.assigned.v1` | `tenant_id`, `user_id`, `role`, `assigned_by` | `AssignRole` |
+| `auth.role.assigned.v1` | `tenant_id`, `user_id`, `role`, `assigned_by` | `AssignRole`, `RegisterTenant`, `RegisterUser`, `ProvisionPlatformUser` |
 
 ### 7.1 Consumidores de eventos de Auth
 
@@ -342,7 +350,7 @@ Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican po
 | **Notification** | `auth.tenant.suspended.>` | Email de suspensión al comercio. |
 | **Webhook** | `auth.tenant.>` | Entrega a los endpoints del comercio (los eventos de sesión `auth.user.*` no se reenvían). |
 
-> Ningún BC de negocio (Payment, Payout, Ledger, etc.) reacciona a `auth.tenant.suspended.v1` ni consulta `tenants.status`. Un tenant suspendido sigue operando con los tokens y API keys vigentes.
+> Ningún BC de negocio reacciona a `auth.tenant.suspended.v1`: no hace falta, porque los middlewares de Auth cortan las credenciales del tenant suspendido en a lo sumo 30 s (§3.2). Payment y Payout además leen `tenants.status` y los holds de cumplimiento antes de mover dinero, sin caché.
 
 ### 7.2 Eventos que consume Auth
 
@@ -357,7 +365,7 @@ cumplimiento usa el motivo genérico `domain.ComplianceReviewReason`. Los gates
 que leen el hold (Payment `StatusGate`, Payout `PayoutGate`) responden con el
 mismo error que para cualquier tenant inhabilitado.
 
-`MaxDeliver: 5`. Si el tenant no está `pending` (por ejemplo, un operador ya lo activó en `test`), `Activate` falla con `ErrTenantCannotTransition` en los 5 intentos y el mensaje se descarta: **el tenant queda en `test` aunque el KYC esté aprobado**, mientras Ledger sí crea sus cuentas.
+`MaxDeliver: 5`. Si un operador ya lo había activado en `test`, la aprobación lo pasa a `production`. Si ya está en `production`, es un no-op (re-entrega). Si está suspendido, falla con `ErrTenantCannotTransition` y el mensaje se descarta tras 5 intentos: la aprobación del KYC no levanta una suspensión.
 
 ---
 
@@ -377,7 +385,8 @@ erDiagram
     tenants { uuid id PK
               text legal_name
               text status
-              text environment }
+              text environment
+              bool suspended_for_compliance }
     users { uuid id PK
             uuid tenant_id FK
             citext email
@@ -405,11 +414,11 @@ erDiagram
 
 | Tabla | RLS | Aislamiento |
 |---|---|---|
-| `tenants` | No | Raíz del sistema. |
-| `users` | Sí | `UNIQUE(tenant_id, email)` con `CITEXT`. |
-| `memberships` | Sí | PK `(user_id, tenant_id)`; `Save` usa `ON CONFLICT DO NOTHING`. |
-| `api_keys` | No | `prefix` único global (se busca sin tenant); el aislamiento se hace en código. |
-| `refresh_tokens` | No | Se busca por `token_hash` global. |
+| `tenants` | No | Raíz del sistema. `suspended_for_compliance` (000051) marca quién puede levantar la suspensión. |
+| `users` | Sí (000050: `NULLIF(current_setting('app.current_tenant', true), '')::uuid`) | `UNIQUE(tenant_id, email)` con `CITEXT`. |
+| `memberships` | Sí (ídem) | PK `(user_id, tenant_id)`; `Save` usa `ON CONFLICT DO NOTHING`. |
+| `api_keys` | No | `prefix` único global: el middleware la busca antes de conocer el tenant. El aislamiento se hace en código (`RevokeApiKey` compara el tenant). |
+| `refresh_tokens` | No | Se busca por `token_hash` global, antes de conocer el tenant. |
 | `tenant_compliance_holds` | No | PK `(tenant_id, alert_id)`, FK a `tenants` con `ON DELETE CASCADE`; vigente = `released_at IS NULL` (índice parcial). Lo leen los gates de Payment y Payout. Migración 000020. |
 
 La violación de `UNIQUE(tenant_id, email)` (`23505`) se mapea a `ErrEmailAlreadyExists` → `409`.
@@ -437,27 +446,16 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 ```
 
 - Los handlers de otros BCs obtienen el tenant con `postgres.TenantIDFromContext(ctx)`.
-- El RLS solo se aplica dentro de `RunInTx` y siempre que el rol de DB no lo saltee. La app conecta como `cobros`, owner de las tablas y sin `FORCE ROW LEVEL SECURITY`, así que **hoy el RLS no filtra nada**. El aislamiento real depende de que cada query filtre por `tenant_id` (ver ONBOARDING.MD §10.2).
+- Los repos de `users` y `memberships` corren cada método en la sesión RLS ([rls.go](../../context/auth/infrastructure/adapters/outbound/postgres/rls.go)): con el tenant de la entidad al escribir, el pedido en `FindByEmail` / `FindByUserAndTenant` / `ListByTenant` y el del llamador en `FindByID`. Login y alta de tenant no traen JWT y funcionan igual, porque reciben el tenant. El refresh pone en el contexto el tenant del token guardado antes de leer el usuario.
+- La app conecta hoy como `cobros`, owner de las tablas, que saltea RLS. El aislamiento se verifica con un rol sin `BYPASSRLS` (§11): pasar a un rol sin bypass no requiere cambios en Auth.
 
 ---
 
 ## 10. Limitaciones conocidas y deuda técnica
 
-| # | Tema | Detalle | Impacto |
+| # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | ~~Refresh y logout rotos~~ ✅ **Resuelto** | Se buscaba por un hash Argon2 con salt aleatorio, que nunca coincidía. Ahora se usa `hashRefreshToken` (SHA-256 determinístico), y `RefreshToken`/`Logout` ya no dependen del `PasswordHasher`. Los tokens guardados con el esquema anterior quedan inválidos: los usuarios deben volver a loguearse. El comentario de `token_hash` en la migración `000002` sigue diciendo argon2id (no se editan migraciones aplicadas). | — |
-| 2 | ~~Escalada a `platform_support`~~ ✅ **Resuelto** | `RegisterUser` y `AssignRole` rechazan `platform_support` con `ErrRoleNotAssignable` (403). Contrapartida: no hay forma de crear usuarios `platform_support` por API; se provisionan por fuera, igual que el primer usuario (#3). | — |
-| 3 | No hay alta del primer usuario | `POST /tenants` es público pero no crea usuario, y `POST /tenants/:id/users` requiere un JWT admin de ese tenant. Un comercio recién registrado no puede loguearse. No hay seed ni bootstrap en el repo. | **Alto (funcional)** |
-| 4 | Suspensión sin efecto operativo | El JWT no consulta el estado del tenant (vale hasta 15 min), `ApiKeyMiddleware` tampoco, y ningún BC reacciona a `auth.tenant.suspended.v1`. | Alto |
-| 5 | API keys — uso parcial | Ya se usan en Payments, con scopes vía `RequirePermission`. Pendiente: `ApiKeyMiddleware` no verifica que el `<env>` de la key coincida con el guardado, ni el estado del tenant (Payments lo cubre con su `TenantGate`). | Medio |
-| 6 | RBAC parcial | `RequirePermission` aplica la matriz en Payments; Onboarding y Ledger exigen `platform_support` en sus escrituras. El resto de los BCs de negocio todavía no aplica control por rol. | Medio |
-| 7 | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Combinado con el consumer de onboarding (§7.2), una activación manual previa en `test` bloquea el pase a producción. | Medio |
-| 8 | Errores no tipados → 500 | Scope inválido, key `production` en tenant `test`, `suspension reason is required`, `api key name is required`. | Bajo |
-| 9 | Enumeración en login | Tenant o usuario suspendido devuelven 403 antes de verificar la contraseña. Un email inexistente responde más rápido, porque no corre Argon2 (timing). | Bajo |
-| 10 | Refresh sin atomicidad ni detección de reuso | `Save` del nuevo token y `Revoke` del anterior no son transaccionales. Ante el reuso de un token revocado solo se rechaza; no se revoca la familia. | Bajo (bloqueado por #1) |
-| 11 | Sin gestión de usuarios | No hay listar, suspender ni cambiar password; `auth.user.suspended.v1` nunca se emite; `SuspendUserCmd` está sin uso. | Funcional |
-| 12 | Sin política de contraseñas | Solo se exige que no sea vacía. | Medio |
-| 13 | Rol inicial no auditado | `RegisterUser` no emite `auth.role.assigned.v1`, así que Audit no registra el rol inicial. | Bajo |
+| 1 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 
@@ -466,11 +464,11 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 | Capa | Archivos | Tipo |
 |---|---|---|
 | Dominio | `domain/*_test.go` | Unitarios: FSM de Tenant, User, ApiKey, VOs, eventos, permisos. |
-| Aplicación | `application/*_test.go` (+ `mocks_test.go`) | Unitarios con repos, hasher y token issuer falsos. `TestHashRefreshToken_IsDeterministic` cubre la regresión del bug #1. |
-| HTTP | `infrastructure/adapters/inbound/http/*_test.go` | Handlers, middleware (JWT, ApiKey, RequireRole), guards de tenant, router y mapeo de errores. |
+| Aplicación | `application/*_test.go` (+ `mocks_test.go`) | Unitarios con repos, hasher y token issuer falsos. `TestHashRefreshToken_IsDeterministic` cubre la regresión del refresh que nunca encontraba el token. |
+| HTTP | `infrastructure/adapters/inbound/http/*_test.go` | Handlers, middleware (JWT, ApiKey, RequireRole; tenant suspendido → 403, inexistente → 401), guards de tenant, router y mapeo de errores. |
 | NATS | `inbound/nats/onboarding_consumer_test.go`, `compliance_consumer_test.go` | Consumer de aprobación de onboarding; enforcement de cumplimiento (hold, release, suspensión genérica, acks/naks). |
 | Crypto / Token | `outbound/crypto`, `outbound/token` | Argon2 real y JWT real. |
-| Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`); se saltan si no hay DB. `compliance_hold_repo_mock_test.go` usa pgxmock (SQL idempotente). |
+| Postgres | `outbound/postgres/*_test.go` | Integración contra PostgreSQL (`DATABASE_URL`); se saltan si no hay DB. `compliance_hold_repo_mock_test.go` usa pgxmock (SQL idempotente). `refresh_race_test.go`: dos refresh concurrentes con el mismo token (gana uno, no queda ninguna sesión vigente). `rls_test.go` corre con un rol sin `BYPASSRLS` (`auth_rls_probe`): login sin tenant en el contexto, aislamiento entre tenants y escritura rechazada con la sesión de otro tenant. |
 
 ```bash
 go test ./context/auth/...
@@ -487,10 +485,10 @@ context/auth/
 ├── domain/
 │   ├── tenant.go          # Agregado Tenant + FSM
 │   ├── user.go            # Agregado User
-│   ├── membership.go      # Membership + matriz de permisos (sin uso)
+│   ├── membership.go      # Membership + matriz de permisos (RequirePermission)
 │   ├── apikey.go          # Agregado ApiKey + ParseRawApiKey
 │   ├── vo.go              # IDs, Email, Role, Environment, Scope
-│   ├── events.go          # 10 eventos
+│   ├── events.go          # 11 eventos
 │   └── errors.go
 ├── application/
 │   ├── ports.go           # Repos, PasswordHasher, TokenIssuer, EventPublisher, Clock

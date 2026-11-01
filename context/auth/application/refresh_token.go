@@ -7,16 +7,19 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/juantevez/cobros-platform/context/auth/domain"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // RefreshTokenUseCase renueva un par de tokens usando un refresh token válido.
 //
-// Implementa rotación: el token presentado se revoca y se emite uno nuevo.
-// Si el token presentado ya estaba revocado (indicador de posible robo),
-// se retorna ErrInvalidCredentials sin emitir tokens nuevos.
+// Implementa rotación: el token presentado se revoca y se emite uno nuevo,
+// en una sola transacción y condicionado a que el token siga vigente.
 //
-// La rotación garantiza que un token robado sea inútil después de que el
-// usuario legítimo lo use una vez.
+// Reuso: si el token ya había sido rotado (alguien lo usó antes, el usuario o
+// un atacante), o si dos requests lo rotan a la vez, se revocan todas las
+// sesiones del usuario y se retorna ErrInvalidCredentials. Un cliente que
+// refresca dos veces en paralelo pierde la sesión: es el costo de no poder
+// distinguirlo de un robo.
 type RefreshTokenUseCase struct {
 	userRepo       UserRepository
 	membershipRepo MembershipRepository
@@ -24,6 +27,7 @@ type RefreshTokenUseCase struct {
 	refreshRepo    RefreshTokenRepository
 	tokenIssuer    TokenIssuer
 	clock          Clock
+	txManager      TxManager
 }
 
 func NewRefreshTokenUseCase(
@@ -33,8 +37,10 @@ func NewRefreshTokenUseCase(
 	refreshRepo RefreshTokenRepository,
 	tokenIssuer TokenIssuer,
 	clock Clock,
+	txManager TxManager,
 ) *RefreshTokenUseCase {
 	return &RefreshTokenUseCase{
+		txManager:      txManager,
 		userRepo:       userRepo,
 		membershipRepo: membershipRepo,
 		tenantRepo:     tenantRepo,
@@ -54,7 +60,7 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 
 	stored, err := uc.refreshRepo.FindByHash(ctx, hashRefreshToken(cmd.RawRefreshToken))
 	if err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
+		if errors.Is(err, ErrRefreshTokenNotFound) {
 			return TokenPair{}, domain.ErrInvalidCredentials
 		}
 		return TokenPair{}, fmt.Errorf("find refresh token: %w", err)
@@ -64,10 +70,12 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 
 	now := uc.clock.Now()
 
+	if stored.IsRotated() {
+		// Token ya rotado presentado de nuevo: posible robo.
+		return TokenPair{}, uc.revokeAllSessions(ctx, stored)
+	}
 	if stored.IsRevoked() {
-		// Token ya revocado: posible robo de token.
-		// En una implementación completa, se invalidarían todos los tokens
-		// de la familia. Para Fase 1, rechazamos la operación.
+		// Revocado por logout: no indica robo, solo se rechaza.
 		return TokenPair{}, domain.ErrInvalidCredentials
 	}
 
@@ -76,6 +84,9 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 	}
 
 	// ── 3. Verificar que el usuario y tenant siguen activos ──────────────────
+	// El request es público (sin JWT): el tenant sale del token guardado, y
+	// users/memberships solo se leen en la sesión RLS de ese tenant.
+	ctx = postgres.WithTenantID(ctx, stored.TenantID.String())
 
 	user, err := uc.userRepo.FindByID(ctx, stored.UserID)
 	if err != nil {
@@ -127,13 +138,27 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 		ExpiresAt: now.Add(refreshTokenDuration),
 	}
 
-	if err := uc.refreshRepo.Save(ctx, newToken); err != nil {
-		return TokenPair{}, fmt.Errorf("save new refresh token: %w", err)
+	// El nuevo token y la revocación del anterior van juntos: si el anterior
+	// ya no estaba vigente (otro request lo rotó entre la lectura y acá), la
+	// tx se deshace y no queda un segundo par válido.
+	err = uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.refreshRepo.Save(ctx, newToken); err != nil {
+			return fmt.Errorf("save new refresh token: %w", err)
+		}
+		revoked, err := uc.refreshRepo.Revoke(ctx, stored.ID, newID)
+		if err != nil {
+			return fmt.Errorf("revoke old refresh token: %w", err)
+		}
+		if !revoked {
+			return errRefreshTokenReused
+		}
+		return nil
+	})
+	if errors.Is(err, errRefreshTokenReused) {
+		return TokenPair{}, uc.revokeAllSessions(ctx, stored)
 	}
-
-	// Revocar el token anterior, registrando su sucesor.
-	if err := uc.refreshRepo.Revoke(ctx, stored.ID, newID); err != nil {
-		return TokenPair{}, fmt.Errorf("revoke old refresh token: %w", err)
+	if err != nil {
+		return TokenPair{}, err
 	}
 
 	return TokenPair{
@@ -141,6 +166,15 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 		RefreshToken: rawRefresh,
 		ExpiresIn:    accessTokenSeconds,
 	}, nil
+}
+
+// revokeAllSessions responde a un reuso: revoca todos los refresh tokens
+// vigentes del usuario y rechaza el request.
+func (uc *RefreshTokenUseCase) revokeAllSessions(ctx context.Context, stored *RefreshToken) error {
+	if err := uc.refreshRepo.RevokeAllForUser(ctx, stored.UserID); err != nil {
+		return fmt.Errorf("revoke sessions after refresh token reuse: %w", err)
+	}
+	return domain.ErrInvalidCredentials
 }
 
 // LogoutUseCase revoca el refresh token activo del usuario, cerrando la sesión.
@@ -170,7 +204,7 @@ func (uc *LogoutUseCase) Execute(ctx context.Context, cmd LogoutCmd) error {
 
 	// La revocación y el evento de logout (auditoría) se guardan juntos.
 	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
-		if err := uc.refreshRepo.Revoke(ctx, stored.ID, ""); err != nil {
+		if _, err := uc.refreshRepo.Revoke(ctx, stored.ID, ""); err != nil {
 			return err
 		}
 		return uc.publisher.Publish(ctx, domain.NewUserLoggedOutEvent(stored.TenantID, stored.UserID))

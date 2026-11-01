@@ -41,8 +41,8 @@ func TestSuspendTenant_EmptyReason(t *testing.T) {
 	uc := NewSuspendTenantUseCase(newFakeTenantRepo(tenant), fakeTx{}, &fakePublisher{})
 
 	err := uc.Execute(context.Background(), SuspendTenantCmd{TenantID: tenant.ID().String(), Reason: ""})
-	if err == nil {
-		t.Fatal("expected error for empty reason")
+	if !errors.Is(err, domain.ErrSuspensionReasonRequired) {
+		t.Fatalf("expected ErrSuspensionReasonRequired, got %v", err)
 	}
 }
 

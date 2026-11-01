@@ -224,7 +224,7 @@ tipo de recurso y el campo del payload con su ID:
 
 | Subjects | `resource_type` | `resource_id` | Notas |
 |---|---|---|---|
-| `auth.tenant.{created,activated,suspended}.v1` | `tenant` | `tenant_id` | |
+| `auth.tenant.{created,activated,suspended,reactivated}.v1` | `tenant` | `tenant_id` | |
 | `auth.user.{registered,suspended}.v1` | `user` | `user_id` | |
 | `auth.user.{login,logout}.v1` | `user` | `user_id` | actor = `user_id` del payload |
 | `auth.apikey.{issued,revoked}.v1` | `api_key` | `api_key_id` | |

@@ -31,6 +31,7 @@ var SubscribableEvents = []string{
 	"auth.tenant.created",
 	"auth.tenant.activated",
 	"auth.tenant.suspended",
+	"auth.tenant.reactivated",
 	"dispute.opened",
 	"dispute.resolved",
 }
