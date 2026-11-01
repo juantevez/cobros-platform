@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/juantevez/cobros-platform/context/auth/domain"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // mocks_test.go define test doubles in-memory para los puertos del contexto Auth.
@@ -73,6 +74,9 @@ type fakeUserRepo struct {
 	byEmail map[string]*domain.User // key: tenantID|email
 	findErr error
 	saveErr error
+	// rls emula la política de users: FindByID solo ve usuarios del tenant
+	// del contexto.
+	rls bool
 }
 
 func newFakeUserRepo(users ...*domain.User) *fakeUserRepo {
@@ -98,7 +102,7 @@ func (r *fakeUserRepo) FindByID(ctx context.Context, id domain.UserID) (*domain.
 		return nil, r.findErr
 	}
 	u, ok := r.byID[id]
-	if !ok {
+	if tid, _ := postgres.TenantIDFromContext(ctx); !ok || (r.rls && tid != u.TenantID().String()) {
 		return nil, domain.ErrUserNotFound
 	}
 	return u, nil

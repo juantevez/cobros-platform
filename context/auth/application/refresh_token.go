@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/juantevez/cobros-platform/context/auth/domain"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // RefreshTokenUseCase renueva un par de tokens usando un refresh token válido.
@@ -76,6 +77,9 @@ func (uc *RefreshTokenUseCase) Execute(ctx context.Context, cmd RefreshTokenCmd)
 	}
 
 	// ── 3. Verificar que el usuario y tenant siguen activos ──────────────────
+	// El request es público (sin JWT): el tenant sale del token guardado, y
+	// users/memberships solo se leen en la sesión RLS de ese tenant.
+	ctx = postgres.WithTenantID(ctx, stored.TenantID.String())
 
 	user, err := uc.userRepo.FindByID(ctx, stored.UserID)
 	if err != nil {

@@ -84,6 +84,27 @@ func TestRefreshToken_SuccessRotates(t *testing.T) {
 	}
 }
 
+// El refresh es público (sin JWT): el usuario se busca en la sesión RLS del
+// tenant del token guardado; sin eso, con RLS efectiva no lo encontraba.
+func TestRefreshToken_ReadsUserInTokenTenant(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	user := newActiveUser(t, tenant.ID(), "user@example.com")
+	membership := domain.NewMembership(user.ID(), tenant.ID(), domain.RoleAdmin, domain.NewUserID())
+	_, byHash := storedToken("old-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), false)
+
+	userRepo := newFakeUserRepo()
+	userRepo.byID[user.ID()] = user
+	userRepo.rls = true
+	tenantRepo := newFakeTenantRepo()
+	tenantRepo.tenants[tenant.ID()] = tenant
+	uc := NewRefreshTokenUseCase(userRepo, newFakeMembershipRepo(membership), tenantRepo,
+		&fakeRefreshRepo{byHash: byHash}, &fakeTokenIssuer{access: "a", refresh: "r"}, fakeClock{now: refreshNow})
+
+	if _, err := uc.Execute(context.Background(), RefreshTokenCmd{RawRefreshToken: "raw-refresh"}); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+}
+
 func TestRefreshToken_EmptyToken(t *testing.T) {
 	uc := newRefreshUC(nil, nil, nil, &fakeRefreshRepo{}, &fakeTokenIssuer{})
 	_, err := uc.Execute(context.Background(), RefreshTokenCmd{RawRefreshToken: ""})
