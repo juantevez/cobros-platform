@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/juantevez/cobros-platform/context/auth/domain"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 func TestRegisterUser_Success(t *testing.T) {
@@ -15,8 +16,10 @@ func TestRegisterUser_Success(t *testing.T) {
 	hasher := &fakeHasher{}
 	pub := &fakePublisher{}
 	uc := NewRegisterUserUseCase(newFakeTenantRepo(tenant), userRepo, memberRepo, hasher, fakeTx{}, pub)
+	admin := domain.NewUserID()
+	ctx := postgres.WithActor(context.Background(), admin.String()) // el admin del JWT
 
-	res, err := uc.Execute(context.Background(), RegisterUserCmd{
+	res, err := uc.Execute(ctx, RegisterUserCmd{
 		TenantID: tenant.ID().String(),
 		Email:    "New.User@Example.com",
 		Password: "correct-horse-battery",
@@ -44,12 +47,20 @@ func TestRegisterUser_Success(t *testing.T) {
 	if memberRepo.saved == nil || memberRepo.saved.Role() != domain.RoleAdmin {
 		t.Fatal("membership not created with admin role")
 	}
-	// Se publica UserRegisteredEvent.
-	if len(pub.published) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(pub.published))
+	// Se publican UserRegisteredEvent y, para que Audit registre el rol
+	// inicial, RoleAssignedEvent con quien lo otorgó.
+	if len(pub.published) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(pub.published))
 	}
 	if _, ok := pub.published[0].(domain.UserRegisteredEvent); !ok {
 		t.Fatalf("expected UserRegisteredEvent, got %T", pub.published[0])
+	}
+	ev, ok := pub.published[1].(domain.RoleAssignedEvent)
+	if !ok || ev.Role != "admin" || ev.UserID != res.UserID || ev.AssignedBy != admin.String() {
+		t.Errorf("role event = %+v", pub.published[1])
+	}
+	if memberRepo.saved.AssignedBy() != admin {
+		t.Errorf("membership assigned_by = %q, want the acting admin", memberRepo.saved.AssignedBy())
 	}
 }
 

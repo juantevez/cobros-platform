@@ -104,7 +104,11 @@ func (uc *RegisterTenantUseCase) Execute(ctx context.Context, cmd RegisterTenant
 		if err := uc.membershipRepo.Save(ctx, membership); err != nil {
 			return fmt.Errorf("save admin membership: %w", err)
 		}
-		return uc.publisher.Publish(ctx, append(tenant.PullEvents(), admin.PullEvents()...)...)
+		// El admin inicial se audita como una asignación de rol del sistema
+		// (alta pública, no hay quién lo otorgue).
+		events := append(tenant.PullEvents(), admin.PullEvents()...)
+		events = append(events, domain.NewRoleAssignedEvent(tenantID.String(), userID.String(), domain.RoleAdmin.String(), "system"))
+		return uc.publisher.Publish(ctx, events...)
 	}); err != nil {
 		return RegisterTenantResult{}, err
 	}

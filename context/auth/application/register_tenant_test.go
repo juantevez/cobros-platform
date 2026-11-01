@@ -136,3 +136,22 @@ func TestRegisterTenant_WeakPasswordRejected(t *testing.T) {
 		t.Fatalf("err = %v, want ErrWeakPassword", err)
 	}
 }
+
+// El admin inicial se audita como asignación de rol del sistema.
+func TestRegisterTenant_PublishesInitialRole(t *testing.T) {
+	pub := &fakePublisher{}
+	uc := NewRegisterTenantUseCase(newFakeTenantRepo(), newFakeUserRepo(), newFakeMembershipRepo(), &fakeHasher{}, fakeTx{}, pub)
+	res, err := uc.Execute(context.Background(), validRegisterCmd())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, e := range pub.published {
+		if ev, ok := e.(domain.RoleAssignedEvent); ok {
+			if ev.Role != "admin" || ev.UserID != res.UserID || ev.AssignedBy != "system" || ev.TenantID != res.TenantID {
+				t.Errorf("role event = %+v", ev)
+			}
+			return
+		}
+	}
+	t.Fatalf("no RoleAssignedEvent among %d events", len(pub.published))
+}

@@ -189,11 +189,11 @@ Directorio: [application/](../../context/auth/application/)
 
 | Caso de uso | Precondiciones | Efecto | Evento |
 |---|---|---|---|
-| `RegisterTenant` | `legal_name` no vacío; email válido; password de 12 a 128 caracteres | Tenant `pending` / `test` + usuario `admin` inicial con su Membership, en una tx | `auth.tenant.created.v1`, `auth.user.registered.v1` |
+| `RegisterTenant` | `legal_name` no vacío; email válido; password de 12 a 128 caracteres | Tenant `pending` / `test` + usuario `admin` inicial con su Membership, en una tx | `auth.tenant.created.v1`, `auth.user.registered.v1`, `auth.role.assigned.v1` (`assigned_by: system`) |
 | `ActivateTenant` | Tenant `pending`, o `active(test)` → `production`; env válido | `active` + env. Ya activo en ese env: no-op | `auth.tenant.activated.v1` |
 | `ReactivateTenant` | Tenant `suspended`; rol que puede levantar esa suspensión | `active`, mismo env. No libera holds de cumplimiento | `auth.tenant.reactivated.v1` |
 | `SuspendTenant` | Motivo no vacío; tenant no suspendido | `suspended` | `auth.tenant.suspended.v1` |
-| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password de 12 a 128 caracteres; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
+| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password de 12 a 128 caracteres; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership (`assigned_by` = el admin del JWT) | `auth.user.registered.v1`, `auth.role.assigned.v1` |
 | `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol asignable por el tenant (no `platform_support` ni `compliance_officer`) | Crea o actualiza la Membership | `auth.role.assigned.v1` |
 | `Authenticate` | Password correcto; después, tenant no suspendido, usuario activo y membership existente | Access + refresh token (el refresh token y el evento se guardan en la misma tx) | `auth.user.login.v1` |
 | `RefreshToken` | Token vigente y no revocado; usuario y tenant OK | Nuevo par; revoca el anterior (`replaced_by`) en la misma tx, condicionado a que siga vigente. Reuso de un token rotado, o carrera perdida: revoca todas las sesiones del usuario | — |
@@ -210,7 +210,7 @@ Detalles relevantes:
 - **Transacciones:** los comandos que mutan agregados usan `RunInTx { repo.Save/Update; publisher.Publish }` (Outbox). `Authenticate` y `Logout` guardan/revocan el refresh token y publican el evento de sesión (auditoría) en la misma tx. `RefreshToken` guarda el token nuevo y revoca el anterior en una tx.
 - **Hash fuera de la tx:** `RegisterUser` e `IssueApiKey` calculan Argon2 (~80 ms) antes de abrir la transacción.
 - **Anti-enumeración en login:** tenant o email inexistente, email mal formado, contraseña incorrecta o usuario sin membership → `401 invalid credentials`. La contraseña se verifica siempre, también sin usuario (contra un hash señuelo calculado una vez), para que el tiempo de respuesta no delate si el email existe. Tenant o usuario suspendido (403) se informa **solo después** de validar la contraseña.
-- **`RegisterTenant` y `RegisterUser` no publican `RoleAssigned`:** el rol inicial queda registrado solo en `user.registered.v1`, que no incluye el rol.
+- **Rol inicial auditado:** `RegisterTenant`, `RegisterUser` y `ProvisionPlatformUser` publican `auth.role.assigned.v1` junto con `user.registered.v1`. `assigned_by` es el actor del request: el admin del JWT, o `system` en el alta pública y en el CLI.
 
 ---
 
@@ -340,7 +340,7 @@ Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican po
 | `auth.user.logout.v1` | `tenant_id`, `user_id` | `Logout` (sesión revocada) |
 | `auth.apikey.issued.v1` | `tenant_id`, `api_key_id`, `prefix`, `environment` | `IssueApiKey` |
 | `auth.apikey.revoked.v1` | `tenant_id`, `api_key_id` | `RevokeApiKey` |
-| `auth.role.assigned.v1` | `tenant_id`, `user_id`, `role`, `assigned_by` | `AssignRole` |
+| `auth.role.assigned.v1` | `tenant_id`, `user_id`, `role`, `assigned_by` | `AssignRole`, `RegisterTenant`, `RegisterUser`, `ProvisionPlatformUser` |
 
 ### 7.1 Consumidores de eventos de Auth
 
@@ -455,8 +455,7 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
-| 2 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
+| 1 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 

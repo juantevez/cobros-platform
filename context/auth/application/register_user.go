@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/juantevez/cobros-platform/context/auth/domain"
+	"github.com/juantevez/cobros-platform/pkg/postgres"
 )
 
 // RegisterUserUseCase registra un usuario en un tenant existente.
@@ -98,7 +99,10 @@ func (uc *RegisterUserUseCase) Execute(ctx context.Context, cmd RegisterUserCmd)
 		return RegisterUserResult{}, err
 	}
 
-	membership := domain.NewMembership(userID, tenantID, role, domain.UserID(""))
+	// Quién otorga el rol inicial: el admin del JWT, o "system" desde el CLI.
+	actor := postgres.ActorFromContext(ctx)
+	assignedBy, _ := domain.ParseUserID(actor) // "" si no es un usuario
+	membership := domain.NewMembership(userID, tenantID, role, assignedBy)
 
 	// ── 5. Persistir todo en una sola transacción ─────────────────────────────
 
@@ -116,8 +120,9 @@ func (uc *RegisterUserUseCase) Execute(ctx context.Context, cmd RegisterUserCmd)
 			return fmt.Errorf("save membership: %w", err)
 		}
 
-		// UserRegisteredEvent + RoleAssignedEvent (si membership lo emite)
-		return uc.publisher.Publish(ctx, user.PullEvents()...)
+		// El rol inicial se audita como cualquier asignación de rol.
+		return uc.publisher.Publish(ctx, append(user.PullEvents(),
+			domain.NewRoleAssignedEvent(tenantID.String(), userID.String(), role.String(), actor))...)
 	}); err != nil {
 		return RegisterUserResult{}, err
 	}
