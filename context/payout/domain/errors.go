@@ -2,6 +2,13 @@ package domain
 
 import "errors"
 
+// Motivos públicos de un payout fallido o ambiguo: el error crudo del banco
+// puede traer datos de la cuenta o del banco y va a bank_failure_detail.
+const (
+	FailureRejectedByBank    = "rejected by the bank"
+	FailureUnconfirmedByBank = "the bank did not confirm the transfer"
+)
+
 var (
 	ErrPayoutNotFound         = errors.New("payout not found")
 	ErrInsufficientBalance    = errors.New("insufficient available balance for payout")

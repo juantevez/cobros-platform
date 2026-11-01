@@ -24,7 +24,9 @@ type Payout struct {
 	bankAccount    BankAccountInfo
 	status         PayoutStatus
 	bankReference  string // referencia asignada por el banco/adapter
-	failureReason  string // motivo técnico del fallo (se persiste, no se expone en la API)
+	failureReason  string // motivo público del fallo (vista, eventos, email, webhook)
+	// bankFailureDetail: error crudo del banco. Interno: no se expone.
+	bankFailureDetail string
 	ledgerEntryKey string // clave de idempotencia del asiento en Ledger
 	idempotencyKey string // clave de idempotencia de negocio del desembolso
 	initiatedAt    *time.Time
@@ -88,7 +90,7 @@ func ReconstitutePayout(
 	return ReconstitutePayoutWithIdempotency(
 		id, tenantID, amount, bankAccount, status,
 		bankReference, failureReason, ledgerEntryKey, "",
-		initiatedAt, confirmedAt, failedAt, createdAt, updatedAt,
+		initiatedAt, confirmedAt, failedAt, createdAt, updatedAt, "",
 	)
 }
 
@@ -101,8 +103,10 @@ func ReconstitutePayoutWithIdempotency(
 	bankReference, failureReason, ledgerEntryKey, idempotencyKey string,
 	initiatedAt, confirmedAt, failedAt *time.Time,
 	createdAt, updatedAt time.Time,
+	bankFailureDetail string,
 ) *Payout {
 	return &Payout{
+		bankFailureDetail: bankFailureDetail,
 		id: id, tenantID: tenantID,
 		amount: amount, bankAccount: bankAccount,
 		status: status,
@@ -156,8 +160,10 @@ func (p *Payout) Confirm(bankReference string) error {
 // Fail registra el fallo definitivo de la transferencia (rechazo conocido del
 // banco). Emite PayoutFailedEvent para que el Ledger revierta el asiento.
 // Permitido desde processing y desde unknown (resolución de reconciliación:
-// se confirma que el banco NO acreditó los fondos).
-func (p *Payout) Fail(reason string) error {
+// se confirma que el banco NO acreditó los fondos). reason es el motivo
+// público; detail, el error crudo del banco, que se guarda solo para
+// diagnóstico.
+func (p *Payout) Fail(reason, detail string) error {
 	if p.status != StatusProcessing && p.status != StatusUnknown {
 		return fmt.Errorf("%w: cannot fail from %q", ErrInvalidTransition, p.status)
 	}
@@ -168,6 +174,7 @@ func (p *Payout) Fail(reason string) error {
 	now := time.Now().UTC()
 	p.status = StatusFailed
 	p.failureReason = reason
+	p.bankFailureDetail = detail
 	p.failedAt = &now
 	p.updatedAt = now
 
@@ -187,17 +194,22 @@ func (p *Payout) Fail(reason string) error {
 // (timeout, error de red, respuesta ambigua del banco). A diferencia de Fail,
 // NO emite payout.failed.v1: los fondos permanecen en payout_transit hasta que
 // la reconciliación resuelva el payout como Confirm o Fail (§10.3).
-func (p *Payout) MarkUnknown(reason string) error {
+//
+// detail es el error crudo de la transferencia (interno); el motivo público
+// es FailureUnconfirmedByBank.
+func (p *Payout) MarkUnknown(detail string) error {
 	if p.status != StatusProcessing {
 		return fmt.Errorf("%w: cannot mark unknown from %q", ErrInvalidTransition, p.status)
 	}
-	if reason == "" {
+	if detail == "" {
 		return ErrFailureReasonRequired
 	}
 
 	now := time.Now().UTC()
+	reason := FailureUnconfirmedByBank
 	p.status = StatusUnknown
 	p.failureReason = reason
+	p.bankFailureDetail = detail
 	p.updatedAt = now
 
 	p.record(PayoutUnknownEvent{
@@ -221,6 +233,7 @@ func (p *Payout) BankAccount() BankAccountInfo { return p.bankAccount }
 func (p *Payout) Status() PayoutStatus        { return p.status }
 func (p *Payout) BankReference() string       { return p.bankReference }
 func (p *Payout) FailureReason() string       { return p.failureReason }
+func (p *Payout) BankFailureDetail() string { return p.bankFailureDetail }
 func (p *Payout) LedgerEntryKey() string      { return p.ledgerEntryKey }
 func (p *Payout) IdempotencyKey() string      { return p.idempotencyKey }
 func (p *Payout) InitiatedAt() *time.Time     { return p.initiatedAt }

@@ -44,7 +44,7 @@ func TestPayoutRepository_ConcurrentResolution(t *testing.T) {
 	a, _ := repo.FindByID(ctx, p.ID())
 	b, _ := repo.FindByID(ctx, p.ID())
 	_ = a.Confirm("BANK-1")
-	_ = b.Fail("the bank has no record of the transfer")
+	_ = b.Fail("the bank has no record of the transfer", "")
 	results := make(chan error, 2)
 	var wg sync.WaitGroup
 	for _, x := range []*domain.Payout{a, b} {
@@ -105,5 +105,23 @@ func TestPayoutRepository_ListUnresolved_Integration(t *testing.T) {
 	if !seen[stuck.ID()] || !seen[unknown.ID()] || seen[fresh.ID()] || seen[initiated.ID()] {
 		t.Errorf("stuck=%v unknown=%v fresh=%v initiated=%v, want only stuck and unknown",
 			seen[stuck.ID()], seen[unknown.ID()], seen[fresh.ID()], seen[initiated.ID()])
+	}
+}
+
+// El detalle crudo del banco se persiste aparte del motivo público.
+func TestPayoutRepository_BankFailureDetail(t *testing.T) {
+	pool := requireDB(t)
+	ctx := context.Background()
+	repo := NewPayoutRepository(pool)
+	p := savedPayout(t)
+	_ = p.MarkProcessing()
+	_ = repo.Update(ctx, p, domain.StatusInitiated)
+	_ = p.Fail(domain.FailureRejectedByBank, "CBU 0170 closed by the bank")
+	if err := repo.Update(ctx, p, domain.StatusProcessing); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ := repo.FindByID(ctx, p.ID())
+	if got.FailureReason() != domain.FailureRejectedByBank || got.BankFailureDetail() != "CBU 0170 closed by the bank" {
+		t.Errorf("reason = %q detail = %q", got.FailureReason(), got.BankFailureDetail())
 	}
 }

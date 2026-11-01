@@ -351,8 +351,8 @@ func TestInitiatePayoutUseCase_Execute(t *testing.T) {
 		if saved.Status() != domain.StatusFailed {
 			t.Errorf("status = %q, want failed", saved.Status())
 		}
-		if !strings.Contains(saved.FailureReason(), "account closed") {
-			t.Errorf("failure reason = %q", saved.FailureReason())
+		if saved.FailureReason() != domain.FailureRejectedByBank || !strings.Contains(saved.BankFailureDetail(), "account closed") {
+			t.Errorf("failure reason = %q detail = %q", saved.FailureReason(), saved.BankFailureDetail())
 		}
 
 		wantUpdates := []domain.PayoutStatus{domain.StatusProcessing, domain.StatusFailed}

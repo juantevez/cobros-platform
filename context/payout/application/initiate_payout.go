@@ -222,7 +222,7 @@ func (uc *InitiatePayoutUseCase) Execute(ctx context.Context, cmd InitiatePayout
 
 		// Rechazo conocido del banco (cuenta inválida, titular distinto, etc.):
 		// fallo definitivo → el Ledger revierte el asiento.
-		if err := payout.Fail(transferErr.Error()); err != nil {
+		if err := payout.Fail(domain.FailureRejectedByBank, transferErr.Error()); err != nil {
 			return InitiatePayoutResult{}, err
 		}
 		if err := uc.persistFrom(ctx, payout, domain.StatusProcessing); err != nil {

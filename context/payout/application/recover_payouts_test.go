@@ -24,7 +24,7 @@ func unresolvedPayout(status domain.PayoutStatus, since time.Time) *domain.Payou
 		domain.NewPayoutID(), domain.TenantID(tenantA),
 		domain.ReconstituteMoney(5000, "ARS"), validBankAccount(),
 		status, "", "", "payout_initiated_x", "k1",
-		&since, nil, nil, since.Add(-time.Second), since,
+		&since, nil, nil, since.Add(-time.Second), since, "",
 	)
 }
 

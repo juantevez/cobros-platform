@@ -502,3 +502,19 @@ func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
 		}()
 	}
 }
+
+// La respuesta del desembolso salía en PascalCase (sin tags JSON), mientras
+// GET usa snake_case.
+func TestInitiateResponseUsesSnakeCase(t *testing.T) {
+	rec := postPayout(newHandler(newRepo(), defaultOpts()), uuid.NewString(), `{"amount":100}`)
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	for _, k := range []string{"payout_id", "amount", "currency", "status", "bank_reference", "replayed"} {
+		if _, ok := body[k]; !ok {
+			t.Errorf("response lacks %q: %s", k, rec.Body)
+		}
+	}
+	if strings.Contains(rec.Body.String(), "PayoutID") {
+		t.Errorf("PascalCase keys left: %s", rec.Body)
+	}
+}

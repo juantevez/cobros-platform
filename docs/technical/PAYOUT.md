@@ -1,7 +1,7 @@
 # Payout — Documentación técnico-funcional
 
 > **Bounded Context:** `context/payout`
-> **Migraciones:** [`000007_payout_init`](../../migrations/000007_payout_init.up.sql) · [`000015_payout_idempotency`](../../migrations/000015_payout_idempotency.up.sql) · [`000048_payout_rls`](../../migrations/000048_payout_rls.up.sql)
+> **Migraciones:** [`000007_payout_init`](../../migrations/000007_payout_init.up.sql) · [`000015_payout_idempotency`](../../migrations/000015_payout_idempotency.up.sql) · [`000048_payout_rls`](../../migrations/000048_payout_rls.up.sql) · [`000049_payout_bank_failure_detail`](../../migrations/000049_payout_bank_failure_detail.up.sql)
 > **Stream NATS:** `PAYOUT` (`payout.>`)
 
 ---
@@ -200,7 +200,7 @@ Archivo: [initiate_payout.go](../../context/payout/application/initiate_payout.g
 
 Solo un error tipado del adaptador (`ErrBankRejected`, [transfer_errors.go](../../context/payout/application/transfer_errors.go)) revierte fondos; cualquier otra cosa es *no sabemos*. Antes era al revés: se reconocía el timeout por tipo o mensaje y todo lo demás se trataba como rechazo, así que un 5xx o un error imprevisto revertían un desembolso que el banco pudo haber pagado.
 
-Resultado: `{payout_id, amount, currency, status, bank_reference, replayed}` (struct sin tags JSON → claves PascalCase, §10).
+Resultado: `{payout_id, amount, currency, status, bank_reference, replayed}` (snake_case, como `PayoutView`).
 
 ### 5.3 Recuperador de payouts (`PayoutRecoverer`)
 
@@ -259,7 +259,7 @@ Header **`Idempotency-Key: payout-2026-10-27-01`** (obligatorio; alternativa: ca
 
 ```json
 // 201
-{ "PayoutID": "…", "Amount": 125000, "Currency": "ARS", "Status": "confirmed", "BankReference": "MOCK-BANK-1a2b3c4d", "Replayed": false }
+{ "payout_id": "…", "amount": 125000, "currency": "ARS", "status": "confirmed", "bank_reference": "MOCK-BANK-1a2b3c4d", "replayed": false }
 ```
 
 | Caso | HTTP |
@@ -288,7 +288,7 @@ Header **`Idempotency-Key: payout-2026-10-27-01`** (obligatorio; alternativa: ca
 }
 ```
 
-⚠️ `failure_reason` expone el texto crudo del error del banco (§10).
+`failure_reason` es un motivo público: `rejected by the bank`, `the bank did not confirm the transfer` (unknown) o `the bank has no record of the transfer` (recuperador). El error crudo del banco, que puede traer datos de la cuenta, se guarda en `bank_failure_detail` y no se expone en la API, en los eventos ni, por ende, en el email ni el webhook.
 
 ---
 
@@ -301,7 +301,7 @@ Archivo: [domain/events.go](../../context/payout/domain/events.go). Se publican 
 | `payout.initiated.v1` | `payout_id`, `tenant_id`, `amount`, `currency`, `idempotency_key` (= `ledger_entry_key`) |
 | `payout.confirmed.v1` | `payout_id`, `tenant_id`, `amount`, `currency`, `bank_reference` |
 | `payout.failed.v1` | `payout_id`, `tenant_id`, `amount`, `currency`, `failure_reason` |
-| `payout.unknown.v1` | `payout_id`, `tenant_id`, `amount`, `currency`, `failure_reason` (motivo técnico) |
+| `payout.unknown.v1` | `payout_id`, `tenant_id`, `amount`, `currency`, `failure_reason` (`the bank did not confirm the transfer`) |
 
 ### 7.1 Consumidores
 
@@ -325,7 +325,8 @@ Tabla `payouts` ([000007](../../migrations/000007_payout_init.up.sql) + [000015]
 | Identidad | `id` PK, `tenant_id`, `idempotency_key` (agregada en 000015) |
 | Monto | `amount BIGINT CHECK (> 0)`, `currency CHAR(3)` |
 | Cuenta destino (snapshot) | `bank_acct_type`, `bank_acct_num` (en claro, ver §9), `bank_name`, `holder_name` |
-| Estado | `status` CHECK `('initiated','processing','confirmed','failed','unknown')`, `bank_reference`, `failure_reason`, `ledger_entry_key` |
+| Estado | `status` CHECK `('initiated','processing','confirmed','failed','unknown')`, `bank_reference`, `failure_reason` (público), `ledger_entry_key` |
+| Diagnóstico | `bank_failure_detail` (000049): error crudo del banco al rechazar o no confirmar; interno |
 | Tiempos | `initiated_at`, `confirmed_at`, `failed_at`, `created_at`, `updated_at` |
 
 - `UNIQUE (tenant_id, idempotency_key) WHERE idempotency_key <> ''` (índice parcial; permite legados sin clave).
@@ -353,11 +354,10 @@ Tabla `payouts` ([000007](../../migrations/000007_payout_init.up.sql) + [000015]
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Error crudo del banco y contrato JSON | `failure_reason` guarda el texto crudo del banco y lo expone en `PayoutView` (el comentario del dominio dice que no se expone), en `payout.failed.v1` y en `payout.unknown.v1`. `InitiatePayoutResult` no tiene tags JSON (PascalCase) mientras `PayoutView` usa snake_case. |
-| 2 | Baja | Sin notificación de `unknown` | Notification no tiene plantilla para `payout.unknown.v1`: el comercio no sabe que su retiro está en estado ambiguo. |
-| 3 | Baja | IDs mal formados y `limit` sin tope | `GET /payouts/abc` responde 500; `GET /payouts?limit=1000000` no tiene tope. |
-| 4 | Baja | Código muerto | `ConfirmPayoutCmd`, `FailPayoutCmd`, `ReconstitutePayout` (sin clave), `ErrPayoutAlreadyConfirmed`, `ErrPayoutAlreadyFailed`; `TransferResult.Status` se ignora. |
-| 5 | Producto | Alcance | `bank_acct_num` (CBU) en claro, sin cifrado ni retención. Sin comisión de desembolso. Una sola cuenta por tenant. Desembolsos por API key (hoy solo JWT). El mock de transferencia ignora la clave de idempotencia (un banco real debe honrarla). Los adaptadores reales tienen que envolver `ErrBankRejected` en sus rechazos definitivos. |
+| 1 | Baja | Sin notificación de `unknown` | Notification no tiene plantilla para `payout.unknown.v1`: el comercio no sabe que su retiro está en estado ambiguo. |
+| 2 | Baja | IDs mal formados y `limit` sin tope | `GET /payouts/abc` responde 500; `GET /payouts?limit=1000000` no tiene tope. |
+| 3 | Baja | Código muerto | `ConfirmPayoutCmd`, `FailPayoutCmd`, `ReconstitutePayout` (sin clave), `ErrPayoutAlreadyConfirmed`, `ErrPayoutAlreadyFailed`; `TransferResult.Status` se ignora. |
+| 4 | Producto | Alcance | `bank_acct_num` (CBU) en claro, sin cifrado ni retención. Sin comisión de desembolso. Una sola cuenta por tenant. Desembolsos por API key (hoy solo JWT). El mock de transferencia ignora la clave de idempotencia (un banco real debe honrarla). Los adaptadores reales tienen que envolver `ErrBankRejected` en sus rechazos definitivos. |
 
 ---
 

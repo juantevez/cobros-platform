@@ -41,15 +41,15 @@ func save(ctx context.Context, conn postgres.Conn, p *domain.Payout) error {
 			status, bank_reference, failure_reason, ledger_entry_key,
 			idempotency_key,
 			initiated_at, confirmed_at, failed_at,
-			created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+			created_at, updated_at, bank_failure_detail
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
 		p.ID().String(), p.TenantID().String(),
 		p.Amount().Amount(), p.Amount().Currency(),
 		ba.AccountType, ba.AccountNumber(), nullStr(ba.BankName), ba.HolderName,
 		p.Status().String(), nullStr(p.BankReference()), nullStr(p.FailureReason()),
 		p.LedgerEntryKey(), p.IdempotencyKey(),
 		p.InitiatedAt(), p.ConfirmedAt(), p.FailedAt(),
-		p.CreatedAt(), p.UpdatedAt(),
+		p.CreatedAt(), p.UpdatedAt(), nullStr(p.BankFailureDetail()),
 	)
 	if err != nil {
 		// Violación del UNIQUE (tenant_id, idempotency_key): otro request con la
@@ -75,12 +75,14 @@ func update(ctx context.Context, conn postgres.Conn, p *domain.Payout, from doma
 	tag, err := conn.Exec(ctx, `
 		UPDATE payouts SET
 			status=$2, bank_reference=$3, failure_reason=$4,
-			initiated_at=$5, confirmed_at=$6, failed_at=$7, updated_at=$8
+			initiated_at=$5, confirmed_at=$6, failed_at=$7, updated_at=$8,
+			bank_failure_detail=$10
 		WHERE id=$1 AND status=$9`,
 		p.ID().String(),
 		p.Status().String(), nullStr(p.BankReference()), nullStr(p.FailureReason()),
 		p.InitiatedAt(), p.ConfirmedAt(), p.FailedAt(), p.UpdatedAt(),
 		from.String(),
+		nullStr(p.BankFailureDetail()),
 	)
 	if err != nil {
 		return wrapErr("update", err)
@@ -183,7 +185,7 @@ const baseSelect = `
 	       status, COALESCE(bank_reference,''), COALESCE(failure_reason,''), ledger_entry_key,
 	       COALESCE(idempotency_key,''),
 	       initiated_at, confirmed_at, failed_at,
-	       created_at, updated_at
+	       created_at, updated_at, COALESCE(bank_failure_detail,'')
 	FROM payouts`
 
 func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
@@ -194,6 +196,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		amount                                              int64
 		initiatedAt, confirmedAt, failedAt                  *time.Time
 		createdAt, updatedAt                                time.Time
+		bankDetail                                          string
 	)
 
 	if err := row.Scan(
@@ -202,7 +205,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		&status, &bankRef, &failReason, &ledgerKey,
 		&idemKey,
 		&initiatedAt, &confirmedAt, &failedAt,
-		&createdAt, &updatedAt,
+		&createdAt, &updatedAt, &bankDetail,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrPayoutNotFound
@@ -218,7 +221,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		domain.PayoutStatus(status),
 		bankRef, failReason, ledgerKey, idemKey,
 		initiatedAt, confirmedAt, failedAt,
-		createdAt.UTC(), updatedAt.UTC(),
+		createdAt.UTC(), updatedAt.UTC(), bankDetail,
 	), nil
 }
 

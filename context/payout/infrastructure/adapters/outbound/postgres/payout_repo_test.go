@@ -22,7 +22,7 @@ var payoutCols = []string{
 	"status", "bank_reference", "failure_reason", "ledger_entry_key",
 	"idempotency_key",
 	"initiated_at", "confirmed_at", "failed_at",
-	"created_at", "updated_at",
+	"created_at", "updated_at", "bank_failure_detail",
 }
 
 var testTime = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -85,7 +85,7 @@ func confirmedRow(id, tenantID string) []any {
 		"confirmed", "BANK-1", "", "payout_initiated_" + id,
 		"idem-key-1",
 		&testTime, &confirmed, (*time.Time)(nil),
-		testTime, confirmed,
+		testTime, confirmed, "",
 	}
 }
 
@@ -102,7 +102,7 @@ func TestPayoutRepository_Save(t *testing.T) {
 			"initiated", (*string)(nil), (*string)(nil),
 			p.LedgerEntryKey(), p.IdempotencyKey(),
 			(*time.Time)(nil), (*time.Time)(nil), (*time.Time)(nil),
-			p.CreatedAt(), p.UpdatedAt(),
+			p.CreatedAt(), p.UpdatedAt(), (*string)(nil),
 		).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		if err := repo.Save(ctx, p); err != nil {
@@ -117,7 +117,7 @@ func TestPayoutRepository_Save(t *testing.T) {
 		mock, ctx := newTxMock(t)
 		repo := NewPayoutRepository(mock)
 
-		mock.ExpectExec("INSERT INTO payouts").WithArgs(anyArgs(18)...).WillReturnError(errBoom)
+		mock.ExpectExec("INSERT INTO payouts").WithArgs(anyArgs(19)...).WillReturnError(errBoom)
 
 		err := repo.Save(ctx, newPayout(t))
 		if !errors.Is(err, errBoom) {
@@ -141,7 +141,7 @@ func TestPayoutRepository_Update(t *testing.T) {
 			p.ID().String(),
 			"confirmed", strPtr("BANK-9"), (*string)(nil),
 			p.InitiatedAt(), p.ConfirmedAt(), (*time.Time)(nil), p.UpdatedAt(),
-			"processing",
+			"processing", (*string)(nil),
 		).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		if err := repo.Update(ctx, p, domain.StatusProcessing); err != nil {
@@ -156,7 +156,7 @@ func TestPayoutRepository_Update(t *testing.T) {
 		mock, ctx := newTxMock(t)
 		repo := NewPayoutRepository(mock)
 
-		mock.ExpectExec("UPDATE payouts SET").WithArgs(anyArgs(9)...).WillReturnError(errBoom)
+		mock.ExpectExec("UPDATE payouts SET").WithArgs(anyArgs(10)...).WillReturnError(errBoom)
 
 		err := repo.Update(ctx, newPayout(t), domain.StatusInitiated)
 		if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "payout repo: update") {
@@ -324,7 +324,7 @@ func TestNullStr(t *testing.T) {
 // UPDATE exige el estado de partida y el que llega tarde no escribe.
 func TestPayoutRepository_Update_Changed(t *testing.T) {
 	mock, ctx := newTxMock(t)
-	mock.ExpectExec(`UPDATE payouts SET[\s\S]*WHERE id=\$1 AND status=\$9`).WithArgs(anyArgs(9)...).
+	mock.ExpectExec(`UPDATE payouts SET[\s\S]*WHERE id=\$1 AND status=\$9`).WithArgs(anyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	if err := NewPayoutRepository(mock).Update(ctx, newPayout(t), domain.StatusProcessing); !errors.Is(err, domain.ErrPayoutChanged) {
 		t.Fatalf("expected ErrPayoutChanged, got %v", err)

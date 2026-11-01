@@ -101,9 +101,9 @@ func (r *PayoutRecoverer) recover(ctx context.Context, p *domain.Payout, now tim
 	case lookup.Found && lookup.Completed:
 		err = p.Confirm(lookup.BankReference)
 	case lookup.Found:
-		err = p.Fail("rejected by the bank")
+		err = p.Fail(domain.FailureRejectedByBank, "")
 	case now.Sub(p.UpdatedAt()) >= notFoundAfter:
-		err = p.Fail("the bank has no record of the transfer")
+		err = p.Fail("the bank has no record of the transfer", "")
 	default:
 		return nil // el banco todavía puede reflejarla: próximo ciclo
 	}
