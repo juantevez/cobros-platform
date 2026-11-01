@@ -311,7 +311,7 @@ Errores particulares:
 | Middleware | Qué hace |
 |---|---|
 | `JWTMiddleware` | Bearer JWT → claims (`sub`, `tid`, `role`, `env`) + tenant y actor en el contexto. Tenant suspendido → 403 (§3.2). |
-| `ApiKeyMiddleware` | `X-Api-Key` → claims de integración (`TenantID`, `Environment`, `ApiKeyID`, `Scopes`; sin `UserID` ni `Role`) + tenant y actor `apikey:<id>`. Sin header, deja pasar. Tenant suspendido → 403. |
+| `ApiKeyMiddleware` | `X-Api-Key` → claims de integración (el `<env>` del header debe coincidir con el guardado, si no → 401) (`TenantID`, `Environment`, `ApiKeyID`, `Scopes`; sin `UserID` ni `Role`) + tenant y actor `apikey:<id>`. Sin header, deja pasar. Tenant suspendido → 403. |
 | `JWTOrApiKeyMiddleware` | Si viene `X-Api-Key` autentica con la key (una key inválida da 401, sin caer al JWT). Si no, con el JWT. |
 | `RequireRole(roles…)` | El rol del JWT debe estar en la lista. |
 | `RequirePermission(acción, scopes…)` | JWT: `RoleHasPermission(rol, acción)`. API key: tener al menos uno de los scopes; sin scopes, la ruta es solo para usuarios. |
@@ -447,14 +447,13 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | El entorno de la API key no tiene efecto | `ApiKeyMiddleware` no compara el `<env>` del header con el guardado (la key se busca solo por `prefix`). Ningún BC usa el entorno: no hay sandbox, y una key `test` en un tenant `production` cobra igual que una `production`. Si el entorno tiene que separar dinero real de pruebas, es una decisión de producto. |
-| 2 | Media | Sin política de contraseñas | `RegisterTenant`, `RegisterUser` y `cmd/provision` solo exigen que no sea vacía. |
-| 3 | Media | Refresh sin atomicidad ni detección de reuso | Dos refresh concurrentes con el mismo token pasan ambos el chequeo de `revoked_at` y emiten dos pares: `Revoke` ignora el caso de 0 filas. `Save` del nuevo token y `Revoke` del anterior no son transaccionales. El reuso de un token ya rotado solo se rechaza, sin revocar la familia. El repo devuelve `ErrUserNotFound` como "token no encontrado". |
-| 4 | Media | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Si un operador activó el tenant en `test`, el consumer de onboarding (§7.2) falla 5 veces con `ErrTenantCannotTransition` y descarta el mensaje: el tenant queda en `test` con el KYC aprobado. |
-| 5 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
-| 6 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
-| 7 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
-| 8 | Producto | Alcance | Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
+| 1 | Media | Sin política de contraseñas | `RegisterTenant`, `RegisterUser` y `cmd/provision` solo exigen que no sea vacía. |
+| 2 | Media | Refresh sin atomicidad ni detección de reuso | Dos refresh concurrentes con el mismo token pasan ambos el chequeo de `revoked_at` y emiten dos pares: `Revoke` ignora el caso de 0 filas. `Save` del nuevo token y `Revoke` del anterior no son transaccionales. El reuso de un token ya rotado solo se rechaza, sin revocar la familia. El repo devuelve `ErrUserNotFound` como "token no encontrado". |
+| 3 | Media | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Si un operador activó el tenant en `test`, el consumer de onboarding (§7.2) falla 5 veces con `ErrTenantCannotTransition` y descarta el mensaje: el tenant queda en `test` con el KYC aprobado. |
+| 4 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
+| 5 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
+| 6 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
+| 7 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 

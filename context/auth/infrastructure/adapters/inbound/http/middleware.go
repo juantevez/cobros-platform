@@ -110,6 +110,15 @@ func ApiKeyMiddleware(
 			return
 		}
 
+		// El <env> del header tiene que ser el de la key: la búsqueda es solo
+		// por prefix, y sin esto una key test autenticaba como production_….
+		if parsed.Environment != apiKey.Environment().String() {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
+				Error: "invalid api key",
+			})
+			return
+		}
+
 		if apiKey.IsRevoked() {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
 				Error: "api key has been revoked",

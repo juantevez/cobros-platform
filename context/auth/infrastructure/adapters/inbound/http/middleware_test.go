@@ -145,6 +145,16 @@ func TestApiKeyMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("environment mismatch aborts 401", func(t *testing.T) {
+		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: true}, openTenants)
+		rec, reached := runMW(mw, func(r *http.Request) {
+			r.Header.Set("X-Api-Key", "test_"+key.Prefix()+"_s3cr3t") // la key es production
+		})
+		if rec.Code != http.StatusUnauthorized || *reached {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+	})
+
 	t.Run("valid key sets tenant and passes", func(t *testing.T) {
 		mw := ApiKeyMiddleware(repo, &fakeHasher{verifyResult: true}, openTenants)
 		rec, reached := runMW(mw, func(r *http.Request) {
