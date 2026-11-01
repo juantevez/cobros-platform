@@ -34,7 +34,8 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidEnvironment),
 		errors.Is(err, domain.ErrInvalidID),
 		errors.Is(err, domain.ErrEmptyLegalName),
-		errors.Is(err, domain.ErrEmptyPassword):
+		errors.Is(err, domain.ErrEmptyPassword),
+		errors.Is(err, domain.ErrWeakPassword):
 		respondError(c, http.StatusBadRequest, err.Error())
 
 	// 401 Unauthorized

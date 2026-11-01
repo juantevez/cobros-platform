@@ -57,8 +57,8 @@ func (uc *RegisterUserUseCase) Execute(ctx context.Context, cmd RegisterUserCmd)
 		return RegisterUserResult{}, err
 	}
 
-	if cmd.Password == "" {
-		return RegisterUserResult{}, domain.ErrEmptyPassword
+	if err := domain.ValidatePassword(cmd.Password); err != nil {
+		return RegisterUserResult{}, err
 	}
 
 	role, err := domain.ParseRole(cmd.Role)

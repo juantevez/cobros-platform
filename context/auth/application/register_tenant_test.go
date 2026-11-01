@@ -12,7 +12,7 @@ func validRegisterCmd() RegisterTenantCmd {
 	return RegisterTenantCmd{
 		LegalName: "Acme SA",
 		Email:     "admin@acme.com",
-		Password:  "Secure123!",
+		Password:  "correct-horse-battery",
 	}
 }
 
@@ -126,5 +126,13 @@ func TestRegisterTenant_PublisherErrorPropagates(t *testing.T) {
 	_, err := uc.Execute(context.Background(), validRegisterCmd())
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestRegisterTenant_WeakPasswordRejected(t *testing.T) {
+	uc := NewRegisterTenantUseCase(newFakeTenantRepo(), newFakeUserRepo(), newFakeMembershipRepo(), &fakeHasher{}, fakeTx{}, &fakePublisher{})
+	_, err := uc.Execute(context.Background(), RegisterTenantCmd{LegalName: "Acme", Email: "a@acme.com", Password: "short"})
+	if !errors.Is(err, domain.ErrWeakPassword) {
+		t.Fatalf("err = %v, want ErrWeakPassword", err)
 	}
 }

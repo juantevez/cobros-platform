@@ -170,7 +170,7 @@ Archivos: [domain/vo.go](../../context/auth/domain/vo.go), [domain/errors.go](..
 
 | Error | HTTP |
 |---|---|
-| `ErrInvalidEmail`, `ErrInvalidRole`, `ErrInvalidEnvironment`, `ErrInvalidID`, `ErrEmptyLegalName`, `ErrEmptyPassword` | 400 |
+| `ErrInvalidEmail`, `ErrInvalidRole`, `ErrInvalidEnvironment`, `ErrInvalidID`, `ErrEmptyLegalName`, `ErrEmptyPassword`, `ErrWeakPassword` | 400 |
 | `ErrInvalidCredentials`, `ErrApiKeyRevoked` | 401 |
 | `ErrTenantSuspended`, `ErrUserSuspended`, `ErrTenantNotActive`, `ErrRoleNotAssignable` | 403 |
 | `ErrTenantNotFound`, `ErrUserNotFound`, `ErrApiKeyNotFound`, `ErrMembershipNotFound` | 404 |
@@ -186,10 +186,10 @@ Directorio: [application/](../../context/auth/application/)
 
 | Caso de uso | Precondiciones | Efecto | Evento |
 |---|---|---|---|
-| `RegisterTenant` | `legal_name` no vacío; email válido; password no vacío | Tenant `pending` / `test` + usuario `admin` inicial con su Membership, en una tx | `auth.tenant.created.v1`, `auth.user.registered.v1` |
+| `RegisterTenant` | `legal_name` no vacío; email válido; password de 12 a 128 caracteres | Tenant `pending` / `test` + usuario `admin` inicial con su Membership, en una tx | `auth.tenant.created.v1`, `auth.user.registered.v1` |
 | `ActivateTenant` | Tenant `pending`; env válido | `active` + env | `auth.tenant.activated.v1` |
 | `SuspendTenant` | Motivo no vacío; tenant no suspendido | `suspended` | `auth.tenant.suspended.v1` |
-| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password no vacío; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
+| `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password de 12 a 128 caracteres; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
 | `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol asignable por el tenant (no `platform_support` ni `compliance_officer`) | Crea o actualiza la Membership | `auth.role.assigned.v1` |
 | `Authenticate` | Tenant no suspendido; usuario activo; password correcto; membership existente | Access + refresh token (el refresh token y el evento se guardan en la misma tx) | `auth.user.login.v1` |
 | `RefreshToken` | Token vigente y no revocado; usuario y tenant OK | Nuevo par; revoca el anterior (`replaced_by`) | — |
@@ -273,7 +273,7 @@ El refresh devuelve un par nuevo y revoca el token presentado (`replaced_by`). S
 { "email": "contador@elsol.com.ar", "password": "••••••", "role": "accountant" }
 ```
 
-No hay política de contraseñas (longitud ni complejidad): solo que no sea vacía. `role: "platform_support"` → `403 role cannot be assigned by a tenant`.
+Política de contraseñas (`domain.ValidatePassword`): entre 12 y 128 caracteres (runas), sin reglas de composición, como recomienda NIST SP 800-63B. Si no se cumple → `400`. Aplica al alta de tenant, al de usuario y a `cmd/provision`, pero no al login: los usuarios anteriores a la política siguen entrando con la contraseña que tienen. `role: "platform_support"` → `403 role cannot be assigned by a tenant`.
 
 ### 6.4 Asignar rol — `PUT /api/v1/tenants/:tenantID/members/:userID/role`
 
@@ -447,13 +447,12 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Sin política de contraseñas | `RegisterTenant`, `RegisterUser` y `cmd/provision` solo exigen que no sea vacía. |
-| 2 | Media | Refresh sin atomicidad ni detección de reuso | Dos refresh concurrentes con el mismo token pasan ambos el chequeo de `revoked_at` y emiten dos pares: `Revoke` ignora el caso de 0 filas. `Save` del nuevo token y `Revoke` del anterior no son transaccionales. El reuso de un token ya rotado solo se rechaza, sin revocar la familia. El repo devuelve `ErrUserNotFound` como "token no encontrado". |
-| 3 | Media | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Si un operador activó el tenant en `test`, el consumer de onboarding (§7.2) falla 5 veces con `ErrTenantCannotTransition` y descarta el mensaje: el tenant queda en `test` con el KYC aprobado. |
-| 4 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
-| 5 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
-| 6 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
-| 7 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
+| 1 | Media | Refresh sin atomicidad ni detección de reuso | Dos refresh concurrentes con el mismo token pasan ambos el chequeo de `revoked_at` y emiten dos pares: `Revoke` ignora el caso de 0 filas. `Save` del nuevo token y `Revoke` del anterior no son transaccionales. El reuso de un token ya rotado solo se rechaza, sin revocar la familia. El repo devuelve `ErrUserNotFound` como "token no encontrado". |
+| 2 | Media | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Si un operador activó el tenant en `test`, el consumer de onboarding (§7.2) falla 5 veces con `ErrTenantCannotTransition` y descarta el mensaje: el tenant queda en `test` con el KYC aprobado. |
+| 3 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
+| 4 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
+| 5 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
+| 6 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 

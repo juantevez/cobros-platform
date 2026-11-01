@@ -19,7 +19,7 @@ func TestRegisterUser_Success(t *testing.T) {
 	res, err := uc.Execute(context.Background(), RegisterUserCmd{
 		TenantID: tenant.ID().String(),
 		Email:    "New.User@Example.com",
-		Password: "s3cret",
+		Password: "correct-horse-battery",
 		Role:     "admin",
 	})
 	if err != nil {
@@ -37,8 +37,8 @@ func TestRegisterUser_Success(t *testing.T) {
 	if saved.Email().String() != "new.user@example.com" {
 		t.Errorf("email = %q, want normalized", saved.Email())
 	}
-	if saved.PasswordHash() != "hash:s3cret" {
-		t.Errorf("password hash = %q, want hash:s3cret", saved.PasswordHash())
+	if saved.PasswordHash() != "hash:correct-horse-battery" {
+		t.Errorf("password hash = %q, want hash:correct-horse-battery", saved.PasswordHash())
 	}
 	// La membership se crea con el rol pedido.
 	if memberRepo.saved == nil || memberRepo.saved.Role() != domain.RoleAdmin {
@@ -58,7 +58,7 @@ func TestRegisterUser_ValidationErrors(t *testing.T) {
 	newUC := func() *RegisterUserUseCase {
 		return NewRegisterUserUseCase(newFakeTenantRepo(tenant), newFakeUserRepo(), newFakeMembershipRepo(), &fakeHasher{}, fakeTx{}, &fakePublisher{})
 	}
-	valid := RegisterUserCmd{TenantID: tenant.ID().String(), Email: "u@example.com", Password: "pw", Role: "operator"}
+	valid := RegisterUserCmd{TenantID: tenant.ID().String(), Email: "u@example.com", Password: "correct-horse-battery", Role: "operator"}
 
 	t.Run("invalid tenant id", func(t *testing.T) {
 		cmd := valid
@@ -97,7 +97,7 @@ func TestRegisterUser_TenantSuspended(t *testing.T) {
 
 	uc := NewRegisterUserUseCase(newFakeTenantRepo(tenant), newFakeUserRepo(), newFakeMembershipRepo(), &fakeHasher{}, fakeTx{}, &fakePublisher{})
 	_, err := uc.Execute(context.Background(), RegisterUserCmd{
-		TenantID: tenant.ID().String(), Email: "u@example.com", Password: "pw", Role: "operator",
+		TenantID: tenant.ID().String(), Email: "u@example.com", Password: "correct-horse-battery", Role: "operator",
 	})
 	if !errors.Is(err, domain.ErrTenantSuspended) {
 		t.Fatalf("expected ErrTenantSuspended, got %v", err)
@@ -110,7 +110,7 @@ func TestRegisterUser_HashErrorPropagates(t *testing.T) {
 	uc := NewRegisterUserUseCase(newFakeTenantRepo(tenant), newFakeUserRepo(), newFakeMembershipRepo(), hasher, fakeTx{}, &fakePublisher{})
 
 	_, err := uc.Execute(context.Background(), RegisterUserCmd{
-		TenantID: tenant.ID().String(), Email: "u@example.com", Password: "pw", Role: "operator",
+		TenantID: tenant.ID().String(), Email: "u@example.com", Password: "correct-horse-battery", Role: "operator",
 	})
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("expected wrapped errBoom, got %v", err)
@@ -124,7 +124,7 @@ func TestRegisterUser_DuplicateEmail(t *testing.T) {
 	uc := NewRegisterUserUseCase(newFakeTenantRepo(tenant), userRepo, newFakeMembershipRepo(), &fakeHasher{}, fakeTx{}, &fakePublisher{})
 
 	_, err := uc.Execute(context.Background(), RegisterUserCmd{
-		TenantID: tenant.ID().String(), Email: "u@example.com", Password: "pw", Role: "operator",
+		TenantID: tenant.ID().String(), Email: "u@example.com", Password: "correct-horse-battery", Role: "operator",
 	})
 	if !errors.Is(err, domain.ErrEmailAlreadyExists) {
 		t.Fatalf("expected ErrEmailAlreadyExists, got %v", err)
@@ -143,7 +143,7 @@ func TestRegisterUser_RejectsPlatformSupportRole(t *testing.T) {
 	_, err := uc.Execute(context.Background(), RegisterUserCmd{
 		TenantID: tenant.ID().String(),
 		Email:    "staff@example.com",
-		Password: "s3cret",
+		Password: "correct-horse-battery",
 		Role:     "platform_support",
 	})
 	if !errors.Is(err, domain.ErrRoleNotAssignable) {

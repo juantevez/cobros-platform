@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -150,9 +151,9 @@ func ParseEnvironment(s string) (Environment, error) {
 	return "", fmt.Errorf("%w: %q", ErrInvalidEnvironment, s)
 }
 
-func (e Environment) String() string  { return string(e) }
-func (e Environment) IsTest() bool    { return e == EnvironmentTest }
-func (e Environment) IsProd() bool    { return e == EnvironmentProduction }
+func (e Environment) String() string { return string(e) }
+func (e Environment) IsTest() bool   { return e == EnvironmentTest }
+func (e Environment) IsProd() bool   { return e == EnvironmentProduction }
 
 // ── Scope ─────────────────────────────────────────────────────────────────────
 
@@ -187,3 +188,25 @@ func ParseScope(s string) (Scope, error) {
 }
 
 func (s Scope) String() string { return string(s) }
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+// Política de contraseñas: solo longitud, sin reglas de composición (NIST
+// SP 800-63B). El tope evita hashear entradas arbitrariamente largas.
+const (
+	MinPasswordLength = 12
+	MaxPasswordLength = 128
+)
+
+// ValidatePassword aplica la política a una contraseña nueva (alta de tenant o
+// de usuario). No se aplica al login: los usuarios previos a la política
+// siguen entrando con la que tienen.
+func ValidatePassword(raw string) error {
+	if raw == "" {
+		return ErrEmptyPassword
+	}
+	if n := utf8.RuneCountInString(raw); n < MinPasswordLength || n > MaxPasswordLength {
+		return ErrWeakPassword
+	}
+	return nil
+}

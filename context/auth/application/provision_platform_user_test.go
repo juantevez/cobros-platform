@@ -19,7 +19,7 @@ func TestProvisionPlatformUser(t *testing.T) {
 			tenant := newActiveTenant(t, domain.EnvironmentProduction)
 			members := newFakeMembershipRepo()
 			res, err := newUC(tenant, members).Execute(context.Background(), RegisterUserCmd{
-				TenantID: tenant.ID().String(), Email: "ana@plataforma.com", Password: "s3cret", Role: role.String(),
+				TenantID: tenant.ID().String(), Email: "ana@plataforma.com", Password: "correct-horse-battery", Role: role.String(),
 			})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -33,7 +33,7 @@ func TestProvisionPlatformUser(t *testing.T) {
 	t.Run("tenant roles are rejected (they go through the tenant API)", func(t *testing.T) {
 		tenant := newActiveTenant(t, domain.EnvironmentProduction)
 		_, err := newUC(tenant, newFakeMembershipRepo()).Execute(context.Background(), RegisterUserCmd{
-			TenantID: tenant.ID().String(), Email: "x@y.com", Password: "p", Role: "admin",
+			TenantID: tenant.ID().String(), Email: "x@y.com", Password: "correct-horse-battery", Role: "admin",
 		})
 		if !errors.Is(err, domain.ErrNotPlatformRole) {
 			t.Fatalf("expected ErrNotPlatformRole, got %v", err)
@@ -47,7 +47,7 @@ func TestRegisterUser_RejectsPlatformRoles(t *testing.T) {
 		&fakeHasher{}, fakeTx{}, &fakePublisher{})
 	for _, role := range []string{"platform_support", "compliance_officer"} {
 		_, err := uc.Execute(context.Background(), RegisterUserCmd{
-			TenantID: tenant.ID().String(), Email: "x@y.com", Password: "p", Role: role,
+			TenantID: tenant.ID().String(), Email: "x@y.com", Password: "correct-horse-battery", Role: role,
 		})
 		if !errors.Is(err, domain.ErrRoleNotAssignable) {
 			t.Errorf("%s: expected ErrRoleNotAssignable, got %v", role, err)

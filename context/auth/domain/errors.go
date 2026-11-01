@@ -54,6 +54,10 @@ var (
 	// ErrEmptyPassword se retorna cuando se intenta establecer una contraseña vacía.
 	ErrEmptyPassword = errors.New("password cannot be empty")
 
+	// ErrWeakPassword se retorna cuando la contraseña nueva no cumple la
+	// política de longitud (ValidatePassword).
+	ErrWeakPassword = errors.New("password must be between 12 and 128 characters")
+
 	// ── ApiKey ───────────────────────────────────────────────────────────────
 
 	// ErrApiKeyNotFound se retorna cuando la API key no existe o el prefix no coincide.

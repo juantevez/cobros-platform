@@ -10,7 +10,7 @@ import (
 
 func TestRegisterTenant_Success(t *testing.T) {
 	env := newTestEnv(newFakeTenantRepo(), newFakeUserRepo(), newFakeMembershipRepo(), newFakeApiKeyRepo(), &fakeHasher{}, &fakeTokenIssuer{})
-	rec := env.do(http.MethodPost, "/api/v1/tenants", "", map[string]string{"legal_name": "Acme SA", "email": "admin@acme.com", "password": "Secure123!"})
+	rec := env.do(http.MethodPost, "/api/v1/tenants", "", map[string]string{"legal_name": "Acme SA", "email": "admin@acme.com", "password": "correct-horse-battery"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}

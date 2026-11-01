@@ -60,8 +60,8 @@ func (uc *RegisterTenantUseCase) Execute(ctx context.Context, cmd RegisterTenant
 		return RegisterTenantResult{}, err // ErrInvalidEmail
 	}
 
-	if cmd.Password == "" {
-		return RegisterTenantResult{}, domain.ErrEmptyPassword
+	if err := domain.ValidatePassword(cmd.Password); err != nil {
+		return RegisterTenantResult{}, err
 	}
 
 	// ── 2. Hashear el password fuera de la tx (bcrypt es lento) ────────────────

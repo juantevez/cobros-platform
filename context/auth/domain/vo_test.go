@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -165,5 +166,26 @@ func TestParseScopeAndAllScopes(t *testing.T) {
 	}
 	if _, err := ParseScope("admin:all"); err == nil {
 		t.Fatal("expected error for invalid scope")
+	}
+}
+
+// Antes bastaba con que no fuera vacía ("a" era una contraseña válida).
+func TestValidatePassword(t *testing.T) {
+	cases := []struct {
+		pw   string
+		want error
+	}{
+		{"", ErrEmptyPassword},
+		{"a", ErrWeakPassword},
+		{"elevenchars", ErrWeakPassword},
+		{"twelve-chars", nil},
+		{"ñandú-ñandú-", nil}, // 12 runas, más de 12 bytes
+		{strings.Repeat("x", 128), nil},
+		{strings.Repeat("x", 129), ErrWeakPassword},
+	}
+	for _, tc := range cases {
+		if err := ValidatePassword(tc.pw); !errors.Is(err, tc.want) && !(err == nil && tc.want == nil) {
+			t.Errorf("ValidatePassword(%q) = %v, want %v", tc.pw, err, tc.want)
+		}
 	}
 }
