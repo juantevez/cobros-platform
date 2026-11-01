@@ -268,16 +268,17 @@ func TestReconstitutePayout(t *testing.T) {
 	p := ReconstitutePayout(
 		id, testTenant, money, testBankAccount(),
 		StatusFailed,
-		"REF", "rejected", "ledger-key",
+		"REF", "rejected", "ledger-key", "idem-1",
 		&initiated, nil, &failed,
-		created, failed,
+		created, failed, "bank said no",
 	)
 
 	if p.ID() != id || p.TenantID() != testTenant || p.Amount() != money || p.BankAccount() != testBankAccount() {
 		t.Errorf("identity/amount not restored: %+v", p)
 	}
 	if p.Status() != StatusFailed || p.BankReference() != "REF" ||
-		p.FailureReason() != "rejected" || p.LedgerEntryKey() != "ledger-key" {
+		p.FailureReason() != "rejected" || p.LedgerEntryKey() != "ledger-key" ||
+		p.IdempotencyKey() != "idem-1" || p.BankFailureDetail() != "bank said no" {
 		t.Errorf("state not restored: %+v", p)
 	}
 	if p.InitiatedAt() != &initiated || p.ConfirmedAt() != nil || p.FailedAt() != &failed {
@@ -295,9 +296,9 @@ func reconstituteWithStatus(st PayoutStatus) *Payout {
 	now := time.Now().UTC()
 	return ReconstitutePayout(
 		NewPayoutID(), testTenant, ReconstituteMoney(5000, "ARS"), testBankAccount(),
-		st, "", "", "key",
+		st, "", "", "key", "",
 		nil, nil, nil,
-		now, now,
+		now, now, "",
 	)
 }
 

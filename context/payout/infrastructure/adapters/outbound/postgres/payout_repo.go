@@ -213,7 +213,7 @@ func scanPayout(row interface{ Scan(...any) error }) (*domain.Payout, error) {
 		return nil, fmt.Errorf("payout repo: scan: %w", err)
 	}
 
-	return domain.ReconstitutePayoutWithIdempotency(
+	return domain.ReconstitutePayout(
 		domain.PayoutID(idStr),
 		domain.TenantID(tenantIDStr),
 		domain.ReconstituteMoney(amount, currency),

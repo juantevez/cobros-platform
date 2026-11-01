@@ -83,23 +83,6 @@ func ReconstitutePayout(
 	id PayoutID, tenantID TenantID,
 	amount Money, bankAccount BankAccountInfo,
 	status PayoutStatus,
-	bankReference, failureReason, ledgerEntryKey string,
-	initiatedAt, confirmedAt, failedAt *time.Time,
-	createdAt, updatedAt time.Time,
-) *Payout {
-	return ReconstitutePayoutWithIdempotency(
-		id, tenantID, amount, bankAccount, status,
-		bankReference, failureReason, ledgerEntryKey, "",
-		initiatedAt, confirmedAt, failedAt, createdAt, updatedAt, "",
-	)
-}
-
-// ReconstitutePayoutWithIdempotency reconstruye el agregado incluyendo la
-// clave de idempotencia persistida.
-func ReconstitutePayoutWithIdempotency(
-	id PayoutID, tenantID TenantID,
-	amount Money, bankAccount BankAccountInfo,
-	status PayoutStatus,
 	bankReference, failureReason, ledgerEntryKey, idempotencyKey string,
 	initiatedAt, confirmedAt, failedAt *time.Time,
 	createdAt, updatedAt time.Time,

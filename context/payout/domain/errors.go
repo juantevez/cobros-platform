@@ -18,8 +18,6 @@ var (
 	ErrInvalidCurrency        = errors.New("invalid currency code")
 	ErrInvalidTransition      = errors.New("invalid payout status transition")
 	ErrNoBankAccount          = errors.New("tenant has no verified bank account for payouts")
-	ErrPayoutAlreadyConfirmed = errors.New("payout is already confirmed")
-	ErrPayoutAlreadyFailed    = errors.New("payout already failed")
 	ErrFailureReasonRequired  = errors.New("failure reason is required")
 
 	// ErrPayoutAlreadyExists indica que ya existe un payout del tenant con la

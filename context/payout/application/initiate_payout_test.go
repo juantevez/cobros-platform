@@ -27,7 +27,7 @@ func newInitiateDeps() *initiateDeps {
 		repo:     &fakeRepo{},
 		balance:  &fakeBalanceChecker{balance: 10_000},
 		bank:     &fakeBankProvider{account: validBankAccount()},
-		transfer: &fakeTransfer{result: TransferResult{BankReference: "BANK-REF-1", Status: "confirmed"}},
+		transfer: &fakeTransfer{result: TransferResult{BankReference: "BANK-REF-1"}},
 		tx:       &fakeTx{},
 		pub:      &fakePublisher{},
 	}

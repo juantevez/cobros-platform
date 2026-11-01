@@ -89,7 +89,7 @@ func (f fakeTransfer) Transfer(ctx context.Context, req application.TransferRequ
 	if f.err != nil {
 		return application.TransferResult{}, f.err
 	}
-	return application.TransferResult{BankReference: "BANK-1", Status: "confirmed"}, nil
+	return application.TransferResult{BankReference: "BANK-1"}, nil
 }
 func (fakeTransfer) GetTransfer(context.Context, application.TransferLookupRequest) (application.TransferLookup, error) {
 	return application.TransferLookup{}, nil

@@ -21,20 +21,6 @@ type InitiatePayoutResult struct {
 	Replayed      bool   `json:"replayed"` // true si se retornó un payout existente (retry idempotente)
 }
 
-// ConfirmPayoutCmd registra la confirmación del banco.
-type ConfirmPayoutCmd struct {
-	TenantID      string
-	PayoutID      string
-	BankReference string
-}
-
-// FailPayoutCmd registra el fallo de una transferencia.
-type FailPayoutCmd struct {
-	TenantID      string
-	PayoutID      string
-	FailureReason string
-}
-
 // GetPayoutQuery consulta el estado de un payout.
 type GetPayoutQuery struct {
 	TenantID string

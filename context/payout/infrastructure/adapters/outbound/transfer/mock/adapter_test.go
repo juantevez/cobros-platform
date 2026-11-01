@@ -26,9 +26,6 @@ func TestAdapter_Transfer(t *testing.T) {
 		}
 		r2, _ := a.Transfer(context.Background(), req)
 
-		if r1.Status != "confirmed" {
-			t.Errorf("status = %q, want confirmed", r1.Status)
-		}
 		if !strings.HasPrefix(r1.BankReference, "MOCK-BANK-") || len(r1.BankReference) != len("MOCK-BANK-")+8 {
 			t.Errorf("unexpected reference %q", r1.BankReference)
 		}
