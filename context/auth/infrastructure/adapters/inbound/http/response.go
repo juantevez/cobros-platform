@@ -35,6 +35,10 @@ func respondDomainError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrInvalidID),
 		errors.Is(err, domain.ErrEmptyLegalName),
 		errors.Is(err, domain.ErrEmptyPassword),
+		errors.Is(err, domain.ErrInvalidScope),
+		errors.Is(err, domain.ErrApiKeyNameRequired),
+		errors.Is(err, domain.ErrApiKeyScopesRequired),
+		errors.Is(err, domain.ErrSuspensionReasonRequired),
 		errors.Is(err, domain.ErrWeakPassword):
 		respondError(c, http.StatusBadRequest, err.Error())
 
@@ -47,6 +51,7 @@ func respondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrTenantSuspended),
 		errors.Is(err, domain.ErrUserSuspended),
 		errors.Is(err, domain.ErrTenantNotActive),
+		errors.Is(err, domain.ErrTenantNotInProduction),
 		errors.Is(err, domain.ErrRoleNotAssignable),
 		errors.Is(err, domain.ErrReactivationNotAllowed):
 		respondError(c, http.StatusForbidden, err.Error())

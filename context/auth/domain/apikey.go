@@ -54,7 +54,7 @@ func NewApiKey(
 	scopes []Scope,
 ) (*ApiKey, error) {
 	if name == "" {
-		return nil, fmt.Errorf("api key name cannot be empty")
+		return nil, ErrApiKeyNameRequired
 	}
 	if prefix == "" {
 		return nil, fmt.Errorf("api key prefix cannot be empty")
@@ -63,7 +63,7 @@ func NewApiKey(
 		return nil, fmt.Errorf("api key hash cannot be empty")
 	}
 	if len(scopes) == 0 {
-		return nil, fmt.Errorf("api key must have at least one scope")
+		return nil, ErrApiKeyScopesRequired
 	}
 
 	k := &ApiKey{

@@ -2,6 +2,7 @@ package http
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -19,11 +20,19 @@ func TestRespondDomainError(t *testing.T) {
 		{"invalid id", domain.ErrInvalidID, http.StatusBadRequest},
 		{"empty legal name", domain.ErrEmptyLegalName, http.StatusBadRequest},
 		{"empty password", domain.ErrEmptyPassword, http.StatusBadRequest},
+		{"weak password", domain.ErrWeakPassword, http.StatusBadRequest},
+		// Antes estos cuatro eran fmt.Errorf sin tipo y respondían 500.
+		{"invalid scope", fmt.Errorf("%w: %q", domain.ErrInvalidScope, "x"), http.StatusBadRequest},
+		{"api key name required", domain.ErrApiKeyNameRequired, http.StatusBadRequest},
+		{"api key scopes required", domain.ErrApiKeyScopesRequired, http.StatusBadRequest},
+		{"suspension reason required", domain.ErrSuspensionReasonRequired, http.StatusBadRequest},
+		{"reactivation not allowed", domain.ErrReactivationNotAllowed, http.StatusForbidden},
 		{"invalid credentials", domain.ErrInvalidCredentials, http.StatusUnauthorized},
 		{"api key revoked", domain.ErrApiKeyRevoked, http.StatusUnauthorized},
 		{"tenant suspended", domain.ErrTenantSuspended, http.StatusForbidden},
 		{"user suspended", domain.ErrUserSuspended, http.StatusForbidden},
 		{"tenant not active", domain.ErrTenantNotActive, http.StatusForbidden},
+		{"tenant not in production", domain.ErrTenantNotInProduction, http.StatusForbidden},
 		{"role not assignable", domain.ErrRoleNotAssignable, http.StatusForbidden},
 		{"tenant not found", domain.ErrTenantNotFound, http.StatusNotFound},
 		{"user not found", domain.ErrUserNotFound, http.StatusNotFound},

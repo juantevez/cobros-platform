@@ -184,7 +184,7 @@ func ParseScope(s string) (Scope, error) {
 			return sc, nil
 		}
 	}
-	return "", fmt.Errorf("invalid scope: %q", s)
+	return "", fmt.Errorf("%w: %q", ErrInvalidScope, s)
 }
 
 func (s Scope) String() string { return string(s) }

@@ -76,8 +76,8 @@ func TestIssueApiKey_ProductionKeyOnTestTenant(t *testing.T) {
 		TenantID: tenant.ID().String(), Name: "k", Environment: "production",
 		Scopes: []string{"payments:read"},
 	})
-	if err == nil {
-		t.Fatal("expected error issuing production key on a test tenant")
+	if !errors.Is(err, domain.ErrTenantNotInProduction) {
+		t.Fatalf("expected ErrTenantNotInProduction, got %v", err)
 	}
 }
 
@@ -100,8 +100,8 @@ func TestIssueApiKey_ValidationErrors(t *testing.T) {
 		_, err := newUC().Execute(context.Background(), IssueApiKeyCmd{
 			TenantID: tenant.ID().String(), Name: "", Environment: "production", Scopes: []string{"payments:read"},
 		})
-		if err == nil {
-			t.Fatal("expected error for empty name")
+		if !errors.Is(err, domain.ErrApiKeyNameRequired) {
+			t.Fatalf("expected ErrApiKeyNameRequired, got %v", err)
 		}
 	})
 
@@ -109,8 +109,8 @@ func TestIssueApiKey_ValidationErrors(t *testing.T) {
 		_, err := newUC().Execute(context.Background(), IssueApiKeyCmd{
 			TenantID: tenant.ID().String(), Name: "k", Environment: "production", Scopes: []string{"admin:all"},
 		})
-		if err == nil {
-			t.Fatal("expected error for invalid scope")
+		if !errors.Is(err, domain.ErrInvalidScope) {
+			t.Fatalf("expected ErrInvalidScope, got %v", err)
 		}
 	})
 
@@ -118,8 +118,8 @@ func TestIssueApiKey_ValidationErrors(t *testing.T) {
 		_, err := newUC().Execute(context.Background(), IssueApiKeyCmd{
 			TenantID: tenant.ID().String(), Name: "k", Environment: "production", Scopes: nil,
 		})
-		if err == nil {
-			t.Fatal("expected error for no scopes")
+		if !errors.Is(err, domain.ErrApiKeyScopesRequired) {
+			t.Fatalf("expected ErrApiKeyScopesRequired, got %v", err)
 		}
 	})
 

@@ -30,7 +30,7 @@ func NewSuspendTenantUseCase(
 
 func (uc *SuspendTenantUseCase) Execute(ctx context.Context, cmd SuspendTenantCmd) error {
 	if cmd.Reason == "" {
-		return fmt.Errorf("suspension reason is required")
+		return domain.ErrSuspensionReasonRequired
 	}
 
 	tenantID, err := domain.ParseTenantID(cmd.TenantID)

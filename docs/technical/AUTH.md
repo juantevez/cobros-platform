@@ -173,13 +173,13 @@ Archivos: [domain/vo.go](../../context/auth/domain/vo.go), [domain/errors.go](..
 
 | Error | HTTP |
 |---|---|
-| `ErrInvalidEmail`, `ErrInvalidRole`, `ErrInvalidEnvironment`, `ErrInvalidID`, `ErrEmptyLegalName`, `ErrEmptyPassword`, `ErrWeakPassword` | 400 |
+| `ErrInvalidEmail`, `ErrInvalidRole`, `ErrInvalidEnvironment`, `ErrInvalidID`, `ErrEmptyLegalName`, `ErrEmptyPassword`, `ErrWeakPassword`, `ErrInvalidScope`, `ErrApiKeyNameRequired`, `ErrApiKeyScopesRequired`, `ErrSuspensionReasonRequired` | 400 |
 | `ErrInvalidCredentials`, `ErrApiKeyRevoked` | 401 |
-| `ErrTenantSuspended`, `ErrUserSuspended`, `ErrTenantNotActive`, `ErrRoleNotAssignable` | 403 |
+| `ErrTenantSuspended`, `ErrUserSuspended`, `ErrTenantNotActive`, `ErrTenantNotInProduction`, `ErrRoleNotAssignable`, `ErrReactivationNotAllowed` | 403 |
 | `ErrTenantNotFound`, `ErrUserNotFound`, `ErrApiKeyNotFound`, `ErrMembershipNotFound` | 404 |
 | `ErrEmailAlreadyExists`, `ErrApiKeyAlreadyRevoked` | 409 |
 | `ErrTenantCannotTransition` | 422 |
-| Cualquier otro (incluye errores con `fmt.Errorf` sin tipar) | 500 |
+| Cualquier otro (infraestructura) | 500, sin detalle |
 
 ---
 
@@ -300,9 +300,8 @@ Requiere el tenant `active`. Tampoco acepta `platform_support` (→ `403`).
 
 Errores particulares:
 
-- Tenant no activo → `403`.
-- Key de `production` en un tenant `test` → **500**: el error es un `fmt.Errorf` no tipado.
-- Scope inválido → **500**, por el mismo motivo.
+- Tenant no activo, o key de `production` en un tenant `test` → `403`.
+- Scope inválido → `400 invalid scope: "<scope>"`.
 
 ### 6.6 Activar / suspender / reactivar — `POST /api/v1/tenants/:tenantID/activate | /suspend | /reactivate`
 
@@ -456,10 +455,9 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
-| 2 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
-| 3 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
-| 4 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
+| 1 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
+| 2 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
+| 3 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 

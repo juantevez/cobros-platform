@@ -58,7 +58,7 @@ func (uc *IssueApiKeyUseCase) Execute(ctx context.Context, cmd IssueApiKeyCmd) (
 	}
 
 	if cmd.Name == "" {
-		return IssueApiKeyResult{}, fmt.Errorf("api key name is required")
+		return IssueApiKeyResult{}, domain.ErrApiKeyNameRequired
 	}
 
 	scopes := make([]domain.Scope, 0, len(cmd.Scopes))
@@ -70,7 +70,7 @@ func (uc *IssueApiKeyUseCase) Execute(ctx context.Context, cmd IssueApiKeyCmd) (
 		scopes = append(scopes, sc)
 	}
 	if len(scopes) == 0 {
-		return IssueApiKeyResult{}, fmt.Errorf("at least one scope is required")
+		return IssueApiKeyResult{}, domain.ErrApiKeyScopesRequired
 	}
 
 	// ── 2. Verificar tenant ──────────────────────────────────────────────────
@@ -84,7 +84,7 @@ func (uc *IssueApiKeyUseCase) Execute(ctx context.Context, cmd IssueApiKeyCmd) (
 	}
 	// Una key de producción solo puede crearse en un tenant de producción.
 	if env == domain.EnvironmentProduction && !tenant.CanProcessRealPayments() {
-		return IssueApiKeyResult{}, fmt.Errorf("tenant is not approved for production")
+		return IssueApiKeyResult{}, domain.ErrTenantNotInProduction
 	}
 
 	// ── 3. Generar secreto y prefix ──────────────────────────────────────────
