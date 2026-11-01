@@ -155,7 +155,7 @@ func main() {
 	suspendTenant := application.NewSuspendTenantUseCase(tenantRepo, txManager, authPub)
 	registerUser := application.NewRegisterUserUseCase(tenantRepo, userRepo, membershipRepo, hasher, txManager, authPub)
 	authenticate := application.NewAuthenticateUseCase(tenantRepo, userRepo, membershipRepo, refreshRepo, hasher, jwtIssuer, clock, txManager, authPub)
-	refreshTokenUC := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock)
+	refreshTokenUC := application.NewRefreshTokenUseCase(userRepo, membershipRepo, tenantRepo, refreshRepo, jwtIssuer, clock, txManager)
 	logoutUC := application.NewLogoutUseCase(refreshRepo, txManager, authPub)
 	issueApiKey := application.NewIssueApiKeyUseCase(tenantRepo, apiKeyRepo, hasher, txManager, authPub)
 	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)

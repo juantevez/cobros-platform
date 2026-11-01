@@ -194,9 +194,12 @@ func (r *fakeRefreshRepo) FindByHash(ctx context.Context, h string) (*applicatio
 	if r.saved != nil && r.saved.TokenHash == h {
 		return r.saved, nil
 	}
-	return nil, domain.ErrUserNotFound
+	return nil, application.ErrRefreshTokenNotFound
 }
-func (r *fakeRefreshRepo) Revoke(ctx context.Context, id, replacedBy string) error { return nil }
+func (r *fakeRefreshRepo) Revoke(ctx context.Context, id, replacedBy string) (bool, error) {
+	return true, nil
+}
+func (r *fakeRefreshRepo) RevokeAllForUser(context.Context, domain.UserID) error { return nil }
 
 type fakeHasher struct {
 	verifyResult bool
@@ -327,7 +330,7 @@ func newTestEnv(
 	suspendTenant := application.NewSuspendTenantUseCase(tenants, tx, pub)
 	registerUser := application.NewRegisterUserUseCase(tenants, users, members, hasher, tx, pub)
 	authenticate := application.NewAuthenticateUseCase(tenants, users, members, refresh, hasher, issuer, clock, tx, pub)
-	refreshUC := application.NewRefreshTokenUseCase(users, members, tenants, refresh, issuer, clock)
+	refreshUC := application.NewRefreshTokenUseCase(users, members, tenants, refresh, issuer, clock, tx)
 	logoutUC := application.NewLogoutUseCase(refresh, tx, pub)
 	issueApiKey := application.NewIssueApiKeyUseCase(tenants, apiKeys, hasher, tx, pub)
 	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeys, tx, pub)

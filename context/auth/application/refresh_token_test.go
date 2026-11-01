@@ -43,7 +43,7 @@ func newRefreshUC(
 	}
 	return NewRefreshTokenUseCase(
 		userRepo, newFakeMembershipRepo(memberships...), tenantRepo,
-		refreshRepo, issuer, fakeClock{now: refreshNow},
+		refreshRepo, issuer, fakeClock{now: refreshNow}, fakeTx{},
 	)
 }
 
@@ -98,7 +98,7 @@ func TestRefreshToken_ReadsUserInTokenTenant(t *testing.T) {
 	tenantRepo := newFakeTenantRepo()
 	tenantRepo.tenants[tenant.ID()] = tenant
 	uc := NewRefreshTokenUseCase(userRepo, newFakeMembershipRepo(membership), tenantRepo,
-		&fakeRefreshRepo{byHash: byHash}, &fakeTokenIssuer{access: "a", refresh: "r"}, fakeClock{now: refreshNow})
+		&fakeRefreshRepo{byHash: byHash}, &fakeTokenIssuer{access: "a", refresh: "r"}, fakeClock{now: refreshNow}, fakeTx{})
 
 	if _, err := uc.Execute(context.Background(), RefreshTokenCmd{RawRefreshToken: "raw-refresh"}); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -236,4 +236,60 @@ func TestLogout_Idempotent(t *testing.T) {
 			t.Error("revoke should not be called for already-revoked token")
 		}
 	})
+}
+
+// Un token ya rotado que vuelve a presentarse es un posible robo: se revocan
+// todas las sesiones del usuario (antes solo se rechazaba).
+func TestRefreshToken_ReuseOfRotatedTokenRevokesAllSessions(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	user := newActiveUser(t, tenant.ID(), "user@example.com")
+	stored, byHash := storedToken("old-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), true)
+	successor := "new-id"
+	stored.ReplacedBy = &successor
+	refreshRepo := &fakeRefreshRepo{byHash: byHash}
+	uc := newRefreshUC(user, tenant, nil, refreshRepo, &fakeTokenIssuer{access: "a", refresh: "r"})
+
+	_, err := uc.Execute(context.Background(), RefreshTokenCmd{RawRefreshToken: "raw-refresh"})
+	if !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
+	}
+	if refreshRepo.revokedAllFor != user.ID() {
+		t.Errorf("sessions of %q not revoked", user.ID())
+	}
+}
+
+// Dos refresh a la vez con el mismo token: el que pierde el UPDATE
+// condicional no emite un segundo par válido.
+func TestRefreshToken_ConcurrentRotationLoses(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	user := newActiveUser(t, tenant.ID(), "user@example.com")
+	membership := domain.NewMembership(user.ID(), tenant.ID(), domain.RoleAdmin, domain.NewUserID())
+	_, byHash := storedToken("old-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), false)
+	refreshRepo := &fakeRefreshRepo{byHash: byHash, alreadyRevoked: true}
+	uc := newRefreshUC(user, tenant, []domain.Membership{membership}, refreshRepo, &fakeTokenIssuer{access: "a", refresh: "r"})
+
+	pair, err := uc.Execute(context.Background(), RefreshTokenCmd{RawRefreshToken: "raw-refresh"})
+	if !errors.Is(err, domain.ErrInvalidCredentials) || pair.RefreshToken != "" {
+		t.Fatalf("pair = %+v, err = %v; want no tokens and ErrInvalidCredentials", pair, err)
+	}
+	if refreshRepo.revokedAllFor != user.ID() {
+		t.Error("sessions not revoked after losing the rotation")
+	}
+}
+
+// Un token revocado por logout no es señal de robo: se rechaza sin tocar las
+// demás sesiones.
+func TestRefreshToken_LoggedOutTokenDoesNotRevokeOthers(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	user := newActiveUser(t, tenant.ID(), "user@example.com")
+	_, byHash := storedToken("old-id", "raw-refresh", user, tenant, refreshNow.Add(time.Hour), true)
+	refreshRepo := &fakeRefreshRepo{byHash: byHash}
+	uc := newRefreshUC(user, tenant, nil, refreshRepo, &fakeTokenIssuer{})
+
+	if _, err := uc.Execute(context.Background(), RefreshTokenCmd{RawRefreshToken: "raw-refresh"}); !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Fatalf("err = %v", err)
+	}
+	if refreshRepo.revokedAllFor != "" {
+		t.Error("logout-revoked token must not revoke other sessions")
+	}
 }

@@ -221,6 +221,10 @@ type fakeRefreshRepo struct {
 	revokedByID   string
 	revokeCalled  bool
 	revokeErr     error
+	// alreadyRevoked simula que otro request rotó el token entre la lectura
+	// y el UPDATE condicional.
+	alreadyRevoked bool
+	revokedAllFor  domain.UserID
 }
 
 func (r *fakeRefreshRepo) Save(ctx context.Context, token RefreshToken) error {
@@ -241,16 +245,21 @@ func (r *fakeRefreshRepo) FindByHash(ctx context.Context, tokenHash string) (*Re
 	if r.saved != nil && r.saved.TokenHash == tokenHash {
 		return r.saved, nil
 	}
-	return nil, domain.ErrUserNotFound
+	return nil, ErrRefreshTokenNotFound
 }
 
-func (r *fakeRefreshRepo) Revoke(ctx context.Context, tokenID, replacedBy string) error {
+func (r *fakeRefreshRepo) Revoke(ctx context.Context, tokenID, replacedBy string) (bool, error) {
 	if r.revokeErr != nil {
-		return r.revokeErr
+		return false, r.revokeErr
 	}
 	r.revokeCalled = true
 	r.revokedID = tokenID
 	r.revokedByID = replacedBy
+	return !r.alreadyRevoked, nil
+}
+
+func (r *fakeRefreshRepo) RevokeAllForUser(ctx context.Context, userID domain.UserID) error {
+	r.revokedAllFor = userID
 	return nil
 }
 

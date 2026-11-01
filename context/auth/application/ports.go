@@ -76,8 +76,12 @@ type RefreshTokenRepository interface {
 	Save(ctx context.Context, token RefreshToken) error
 	// FindByHash busca un token por el hash del secreto que presentó el cliente.
 	FindByHash(ctx context.Context, tokenHash string) (*RefreshToken, error)
-	// Revoke marca un token como revocado y registra su reemplazo.
-	Revoke(ctx context.Context, tokenID string, replacedBy string) error
+	// Revoke marca un token como revocado y registra su reemplazo. Devuelve
+	// false si ya estaba revocado (otro request lo rotó antes).
+	Revoke(ctx context.Context, tokenID string, replacedBy string) (bool, error)
+	// RevokeAllForUser revoca todos los tokens vigentes del usuario: es la
+	// respuesta al reuso de un token ya rotado.
+	RevokeAllForUser(ctx context.Context, userID domain.UserID) error
 }
 
 // ── Servicios de soporte ──────────────────────────────────────────────────────
