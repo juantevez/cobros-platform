@@ -188,3 +188,65 @@ func TestAuthenticate_PublishErrorFailsLogin(t *testing.T) {
 		t.Fatal("login must fail if the audit event cannot be recorded (same tx as the refresh token)")
 	}
 }
+
+// Anti-enumeración: sin la contraseña no se distingue un tenant suspendido,
+// un usuario suspendido ni uno sin rol de un login fallido cualquiera.
+func TestAuthenticate_StatusOnlyRevealedWithValidPassword(t *testing.T) {
+	cmd := func(tenant *domain.Tenant) AuthenticateCmd {
+		return AuthenticateCmd{TenantID: tenant.ID().String(), Email: "user@example.com", Password: "wrong"}
+	}
+
+	t.Run("suspended tenant + wrong password", func(t *testing.T) {
+		tenant := newActiveTenant(t, domain.EnvironmentProduction)
+		_ = tenant.Suspend("fraud")
+		user := newActiveUser(t, tenant.ID(), "user@example.com")
+		uc := newAuthUC(tenant, user, nil, &fakeHasher{verifyResult: false}, &fakeTokenIssuer{}, &fakeRefreshRepo{})
+		if _, err := uc.Execute(context.Background(), cmd(tenant)); !errors.Is(err, domain.ErrInvalidCredentials) {
+			t.Fatalf("err = %v, want ErrInvalidCredentials", err)
+		}
+	})
+
+	t.Run("suspended user + wrong password", func(t *testing.T) {
+		tenant := newActiveTenant(t, domain.EnvironmentProduction)
+		user := newActiveUser(t, tenant.ID(), "user@example.com")
+		_ = user.Suspend()
+		uc := newAuthUC(tenant, user, nil, &fakeHasher{verifyResult: false}, &fakeTokenIssuer{}, &fakeRefreshRepo{})
+		if _, err := uc.Execute(context.Background(), cmd(tenant)); !errors.Is(err, domain.ErrInvalidCredentials) {
+			t.Fatalf("err = %v, want ErrInvalidCredentials", err)
+		}
+	})
+
+	t.Run("no membership + right password", func(t *testing.T) {
+		tenant := newActiveTenant(t, domain.EnvironmentProduction)
+		user := newActiveUser(t, tenant.ID(), "user@example.com")
+		uc := newAuthUC(tenant, user, nil, &fakeHasher{verifyResult: true}, &fakeTokenIssuer{}, &fakeRefreshRepo{})
+		if _, err := uc.Execute(context.Background(), cmd(tenant)); !errors.Is(err, domain.ErrInvalidCredentials) {
+			t.Fatalf("err = %v, want ErrInvalidCredentials (was 404 membership not found)", err)
+		}
+	})
+}
+
+// Un email inexistente también paga la verificación (contra el hash señuelo):
+// antes respondía más rápido y delataba qué emails existen.
+func TestAuthenticate_UnknownUserStillVerifiesPassword(t *testing.T) {
+	for name, email := range map[string]string{"unknown email": "ghost@example.com", "malformed email": "nope"} {
+		t.Run(name, func(t *testing.T) {
+			tenant := newActiveTenant(t, domain.EnvironmentProduction)
+			hasher := &fakeHasher{verifyResult: true} // ni un señuelo que "coincida" deja entrar
+			uc := newAuthUC(tenant, nil, nil, hasher, &fakeTokenIssuer{}, &fakeRefreshRepo{})
+			_, err := uc.Execute(context.Background(), AuthenticateCmd{TenantID: tenant.ID().String(), Email: email, Password: "x"})
+			if !errors.Is(err, domain.ErrInvalidCredentials) || hasher.verifyCalls != 1 {
+				t.Fatalf("err=%v verifyCalls=%d, want ErrInvalidCredentials and 1 verification", err, hasher.verifyCalls)
+			}
+		})
+	}
+
+	t.Run("unknown tenant", func(t *testing.T) {
+		hasher := &fakeHasher{}
+		uc := newAuthUC(nil, nil, nil, hasher, &fakeTokenIssuer{}, &fakeRefreshRepo{})
+		_, _ = uc.Execute(context.Background(), AuthenticateCmd{TenantID: domain.NewTenantID().String(), Email: "a@b.com", Password: "x"})
+		if hasher.verifyCalls != 1 {
+			t.Errorf("verifyCalls = %d, want 1", hasher.verifyCalls)
+		}
+	})
+}

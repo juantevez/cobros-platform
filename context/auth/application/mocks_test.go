@@ -269,6 +269,7 @@ type fakeHasher struct {
 	verifyResult bool
 	verifyErr    error
 	hashErr      error
+	verifyCalls  int
 }
 
 func (h *fakeHasher) Hash(plaintext string) (string, error) {
@@ -279,6 +280,7 @@ func (h *fakeHasher) Hash(plaintext string) (string, error) {
 }
 
 func (h *fakeHasher) Verify(plaintext, hash string) (bool, error) {
+	h.verifyCalls++
 	if h.verifyErr != nil {
 		return false, h.verifyErr
 	}

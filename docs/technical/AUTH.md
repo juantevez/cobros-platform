@@ -195,7 +195,7 @@ Directorio: [application/](../../context/auth/application/)
 | `SuspendTenant` | Motivo no vacío; tenant no suspendido | `suspended` | `auth.tenant.suspended.v1` |
 | `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password de 12 a 128 caracteres; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
 | `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol asignable por el tenant (no `platform_support` ni `compliance_officer`) | Crea o actualiza la Membership | `auth.role.assigned.v1` |
-| `Authenticate` | Tenant no suspendido; usuario activo; password correcto; membership existente | Access + refresh token (el refresh token y el evento se guardan en la misma tx) | `auth.user.login.v1` |
+| `Authenticate` | Password correcto; después, tenant no suspendido, usuario activo y membership existente | Access + refresh token (el refresh token y el evento se guardan en la misma tx) | `auth.user.login.v1` |
 | `RefreshToken` | Token vigente y no revocado; usuario y tenant OK | Nuevo par; revoca el anterior (`replaced_by`) en la misma tx, condicionado a que siga vigente. Reuso de un token rotado, o carrera perdida: revoca todas las sesiones del usuario | — |
 | `Logout` | — (idempotente) | Revoca el refresh token (en tx con el evento) | `auth.user.logout.v1` |
 | `IssueApiKey` | Tenant **activo**; para `production`, el tenant debe estar en `production`; ≥1 scope válido | API key nueva | `auth.apikey.issued.v1` |
@@ -209,7 +209,7 @@ Detalles relevantes:
 
 - **Transacciones:** los comandos que mutan agregados usan `RunInTx { repo.Save/Update; publisher.Publish }` (Outbox). `Authenticate` y `Logout` guardan/revocan el refresh token y publican el evento de sesión (auditoría) en la misma tx. `RefreshToken` guarda el token nuevo y revoca el anterior en una tx.
 - **Hash fuera de la tx:** `RegisterUser` e `IssueApiKey` calculan Argon2 (~80 ms) antes de abrir la transacción.
-- **Anti-enumeración en login:** email inexistente o tenant inexistente → `ErrInvalidCredentials`. Pero un tenant suspendido (403) o un usuario suspendido (403) se informan **antes** de verificar la contraseña.
+- **Anti-enumeración en login:** tenant o email inexistente, email mal formado, contraseña incorrecta o usuario sin membership → `401 invalid credentials`. La contraseña se verifica siempre, también sin usuario (contra un hash señuelo calculado una vez), para que el tiempo de respuesta no delate si el email existe. Tenant o usuario suspendido (403) se informa **solo después** de validar la contraseña.
 - **`RegisterTenant` y `RegisterUser` no publican `RoleAssigned`:** el rol inicial queda registrado solo en `user.registered.v1`, que no incluye el rol.
 
 ---
@@ -455,9 +455,8 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
-| 2 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
-| 3 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
+| 1 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
+| 2 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 

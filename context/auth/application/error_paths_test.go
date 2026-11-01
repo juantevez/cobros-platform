@@ -73,20 +73,6 @@ func TestAuthenticate_VerifyErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestAuthenticate_MissingMembershipPropagates(t *testing.T) {
-	tenant := newActiveTenant(t, domain.EnvironmentProduction)
-	user := newActiveUser(t, tenant.ID(), "user@example.com")
-	// Sin membership → FindByUserAndTenant devuelve ErrMembershipNotFound.
-	uc := newAuthUC(tenant, user, nil, &fakeHasher{verifyResult: true}, &fakeTokenIssuer{access: "a", refresh: "r"}, &fakeRefreshRepo{})
-
-	_, err := uc.Execute(context.Background(), AuthenticateCmd{
-		TenantID: tenant.ID().String(), Email: "user@example.com", Password: "secret",
-	})
-	if !errors.Is(err, domain.ErrMembershipNotFound) {
-		t.Fatalf("expected ErrMembershipNotFound, got %v", err)
-	}
-}
-
 func TestAuthenticate_RefreshTokenSaveErrorPropagates(t *testing.T) {
 	tenant := newActiveTenant(t, domain.EnvironmentProduction)
 	user := newActiveUser(t, tenant.ID(), "user@example.com")
