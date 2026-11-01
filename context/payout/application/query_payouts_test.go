@@ -74,14 +74,14 @@ func TestGetPayoutUseCase_Execute(t *testing.T) {
 
 	t.Run("invalid tenant id", func(t *testing.T) {
 		_, err := NewGetPayoutUseCase(&fakeRepo{}).Execute(ctx, GetPayoutQuery{TenantID: "x", PayoutID: domain.NewPayoutID().String()})
-		if err == nil || !strings.Contains(err.Error(), "invalid tenant id") {
+		if !errors.Is(err, domain.ErrInvalidID) || !strings.Contains(err.Error(), "invalid tenant id") {
 			t.Fatalf("expected invalid tenant id error, got %v", err)
 		}
 	})
 
 	t.Run("invalid payout id", func(t *testing.T) {
 		_, err := NewGetPayoutUseCase(&fakeRepo{}).Execute(ctx, GetPayoutQuery{TenantID: tenantA, PayoutID: "x"})
-		if err == nil || !strings.Contains(err.Error(), "invalid payout id") {
+		if !errors.Is(err, domain.ErrInvalidID) || !strings.Contains(err.Error(), "invalid payout id") {
 			t.Fatalf("expected invalid payout id error, got %v", err)
 		}
 	})
@@ -134,6 +134,17 @@ func TestListPayoutsUseCase_Execute(t *testing.T) {
 			}
 		})
 	}
+
+	// Sin tope, ?limit=1000000 traía la tabla entera del tenant.
+	t.Run("limit above max is capped", func(t *testing.T) {
+		repo := &fakeRepo{}
+		if _, err := NewListPayoutsUseCase(repo).Execute(ctx, ListPayoutsQuery{TenantID: tenantA, Limit: 1000000}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if repo.lastLimit != maxPayoutLimit {
+			t.Errorf("limit = %d, want %d", repo.lastLimit, maxPayoutLimit)
+		}
+	})
 
 	t.Run("repo error is wrapped", func(t *testing.T) {
 		repo := &fakeRepo{listErr: errBoom}

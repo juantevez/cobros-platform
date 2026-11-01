@@ -234,8 +234,8 @@ func buildConfirmedPayout(tenantID string, ref string, at time.Time) *domain.Pay
 		domain.NewPayoutID(), domain.TenantID(tenantID),
 		domain.ReconstituteMoney(5000, "ARS"), validBankAccount(),
 		domain.StatusConfirmed,
-		ref, "", "payout_initiated_x",
+		ref, "", "payout_initiated_x", "",
 		&at, &at, nil,
-		at, at,
+		at, at, "",
 	)
 }

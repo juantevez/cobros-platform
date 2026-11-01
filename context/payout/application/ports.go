@@ -104,10 +104,11 @@ type TransferRequest struct {
 	Description    string
 }
 
-// TransferResult es la respuesta del adaptador de transferencia.
+// TransferResult es la respuesta del adaptador de transferencia. Un Transfer
+// sin error es una transferencia acreditada; el rechazo y el resultado
+// desconocido llegan como error (ErrBankRejected o cualquier otro).
 type TransferResult struct {
 	BankReference string // referencia asignada por el banco
-	Status        string // "confirmed" | "pending" | "failed"
 }
 
 // EventPublisher publica eventos de dominio hacia el Outbox.

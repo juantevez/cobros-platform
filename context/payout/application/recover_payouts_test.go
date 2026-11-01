@@ -20,11 +20,11 @@ var recoverNow = time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 
 // unresolvedPayout es un payout en status, sin cambios desde since.
 func unresolvedPayout(status domain.PayoutStatus, since time.Time) *domain.Payout {
-	return domain.ReconstitutePayoutWithIdempotency(
+	return domain.ReconstitutePayout(
 		domain.NewPayoutID(), domain.TenantID(tenantA),
 		domain.ReconstituteMoney(5000, "ARS"), validBankAccount(),
 		status, "", "", "payout_initiated_x", "k1",
-		&since, nil, nil, since.Add(-time.Second), since,
+		&since, nil, nil, since.Add(-time.Second), since, "",
 	)
 }
 

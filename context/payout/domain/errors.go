@@ -2,15 +2,22 @@ package domain
 
 import "errors"
 
+// Motivos públicos de un payout fallido o ambiguo: el error crudo del banco
+// puede traer datos de la cuenta o del banco y va a bank_failure_detail.
+const (
+	FailureRejectedByBank    = "rejected by the bank"
+	FailureUnconfirmedByBank = "the bank did not confirm the transfer"
+)
+
 var (
 	ErrPayoutNotFound         = errors.New("payout not found")
+	// ErrInvalidID: un ID (payout, tenant) que no es un UUID.
+	ErrInvalidID = errors.New("invalid id: must be a UUID")
 	ErrInsufficientBalance    = errors.New("insufficient available balance for payout")
 	ErrInvalidAmount          = errors.New("payout amount must be greater than zero")
 	ErrInvalidCurrency        = errors.New("invalid currency code")
 	ErrInvalidTransition      = errors.New("invalid payout status transition")
 	ErrNoBankAccount          = errors.New("tenant has no verified bank account for payouts")
-	ErrPayoutAlreadyConfirmed = errors.New("payout is already confirmed")
-	ErrPayoutAlreadyFailed    = errors.New("payout already failed")
 	ErrFailureReasonRequired  = errors.New("failure reason is required")
 
 	// ErrPayoutAlreadyExists indica que ya existe un payout del tenant con la

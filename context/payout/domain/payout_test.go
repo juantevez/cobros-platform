@@ -195,14 +195,16 @@ func TestPayout_Fail(t *testing.T) {
 	t.Run("from processing", func(t *testing.T) {
 		p := newProcessingPayout(t)
 
-		if err := p.Fail("account closed"); err != nil {
+		if err := p.Fail(FailureRejectedByBank, "CBU 0011 account closed"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if p.Status() != StatusFailed {
 			t.Errorf("status = %q, want failed", p.Status())
 		}
-		if p.FailureReason() != "account closed" {
-			t.Errorf("failure reason = %q", p.FailureReason())
+		// El motivo público es genérico; el error crudo del banco queda
+		// solo para diagnóstico.
+		if p.FailureReason() != FailureRejectedByBank || p.BankFailureDetail() != "CBU 0011 account closed" {
+			t.Errorf("failure reason = %q detail = %q", p.FailureReason(), p.BankFailureDetail())
 		}
 		if p.FailedAt() == nil || !p.UpdatedAt().Equal(*p.FailedAt()) {
 			t.Errorf("failedAt=%v updatedAt=%v", p.FailedAt(), p.UpdatedAt())
@@ -220,7 +222,7 @@ func TestPayout_Fail(t *testing.T) {
 			t.Fatalf("expected PayoutFailedEvent, got %T", evs[0])
 		}
 		if ev.PayoutID != p.ID().String() || ev.TenantID != testTenant.String() ||
-			ev.Amount != 5000 || ev.Currency != "ARS" || ev.FailureReason != "account closed" {
+			ev.Amount != 5000 || ev.Currency != "ARS" || ev.FailureReason != FailureRejectedByBank {
 			t.Errorf("event fields not set: %+v", ev)
 		}
 	})
@@ -228,7 +230,7 @@ func TestPayout_Fail(t *testing.T) {
 	t.Run("empty reason rejected without changing state", func(t *testing.T) {
 		p := newProcessingPayout(t)
 
-		if err := p.Fail(""); !errors.Is(err, ErrFailureReasonRequired) {
+		if err := p.Fail("", ""); !errors.Is(err, ErrFailureReasonRequired) {
 			t.Fatalf("expected ErrFailureReasonRequired, got %v", err)
 		}
 		if p.Status() != StatusProcessing || p.FailedAt() != nil || len(p.PullEvents()) != 0 {
@@ -238,7 +240,7 @@ func TestPayout_Fail(t *testing.T) {
 
 	t.Run("transition checked before reason", func(t *testing.T) {
 		p := newTestPayout(t)
-		if err := p.Fail(""); !errors.Is(err, ErrInvalidTransition) {
+		if err := p.Fail("", ""); !errors.Is(err, ErrInvalidTransition) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
 	})
@@ -246,7 +248,7 @@ func TestPayout_Fail(t *testing.T) {
 	for _, st := range []PayoutStatus{StatusInitiated, StatusConfirmed, StatusFailed} {
 		t.Run("rejected from "+st.String(), func(t *testing.T) {
 			p := reconstituteWithStatus(st)
-			if err := p.Fail("reason"); !errors.Is(err, ErrInvalidTransition) {
+			if err := p.Fail("reason", ""); !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("expected ErrInvalidTransition, got %v", err)
 			}
 			if p.Status() != st || len(p.PullEvents()) != 0 {
@@ -266,16 +268,17 @@ func TestReconstitutePayout(t *testing.T) {
 	p := ReconstitutePayout(
 		id, testTenant, money, testBankAccount(),
 		StatusFailed,
-		"REF", "rejected", "ledger-key",
+		"REF", "rejected", "ledger-key", "idem-1",
 		&initiated, nil, &failed,
-		created, failed,
+		created, failed, "bank said no",
 	)
 
 	if p.ID() != id || p.TenantID() != testTenant || p.Amount() != money || p.BankAccount() != testBankAccount() {
 		t.Errorf("identity/amount not restored: %+v", p)
 	}
 	if p.Status() != StatusFailed || p.BankReference() != "REF" ||
-		p.FailureReason() != "rejected" || p.LedgerEntryKey() != "ledger-key" {
+		p.FailureReason() != "rejected" || p.LedgerEntryKey() != "ledger-key" ||
+		p.IdempotencyKey() != "idem-1" || p.BankFailureDetail() != "bank said no" {
 		t.Errorf("state not restored: %+v", p)
 	}
 	if p.InitiatedAt() != &initiated || p.ConfirmedAt() != nil || p.FailedAt() != &failed {
@@ -293,8 +296,23 @@ func reconstituteWithStatus(st PayoutStatus) *Payout {
 	now := time.Now().UTC()
 	return ReconstitutePayout(
 		NewPayoutID(), testTenant, ReconstituteMoney(5000, "ARS"), testBankAccount(),
-		st, "", "", "key",
+		st, "", "", "key", "",
 		nil, nil, nil,
-		now, now,
+		now, now, "",
 	)
+}
+
+// MarkUnknown expone un motivo genérico: el error crudo de la transferencia
+// (que puede traer IPs o datos del banco) va solo a bank_failure_detail.
+func TestPayout_MarkUnknown_PublicReason(t *testing.T) {
+	p := newProcessingPayout(t)
+	if err := p.MarkUnknown("dial tcp 10.0.0.9:443: i/o timeout"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.FailureReason() != FailureUnconfirmedByBank || p.BankFailureDetail() != "dial tcp 10.0.0.9:443: i/o timeout" {
+		t.Errorf("reason = %q detail = %q", p.FailureReason(), p.BankFailureDetail())
+	}
+	if ev := p.PullEvents()[0].(PayoutUnknownEvent); ev.FailureReason != FailureUnconfirmedByBank {
+		t.Errorf("event reason = %q", ev.FailureReason)
+	}
 }

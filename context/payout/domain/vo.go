@@ -14,14 +14,14 @@ func NewPayoutID() PayoutID { return PayoutID(uuid.NewString()) }
 
 func ParsePayoutID(s string) (PayoutID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid payout id: %w", err)
+		return "", fmt.Errorf("%w: invalid payout id: %v", ErrInvalidID, err)
 	}
 	return PayoutID(s), nil
 }
 
 func ParseTenantID(s string) (TenantID, error) {
 	if _, err := uuid.Parse(s); err != nil {
-		return "", fmt.Errorf("invalid tenant id: %w", err)
+		return "", fmt.Errorf("%w: invalid tenant id: %v", ErrInvalidID, err)
 	}
 	return TenantID(s), nil
 }

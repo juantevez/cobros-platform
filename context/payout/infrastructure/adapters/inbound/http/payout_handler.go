@@ -110,7 +110,7 @@ func (h *PayoutHandler) Get(c *gin.Context) {
 
 // List lista los payouts del tenant autenticado.
 //
-//	GET /api/v1/payouts?limit=20
+//	GET /api/v1/payouts?limit=20 (máximo 100)
 func (h *PayoutHandler) List(c *gin.Context) {
 	tenantID, _ := postgres.TenantIDFromContext(c.Request.Context())
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
@@ -138,7 +138,8 @@ func respondDomainError(c *gin.Context, err error) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrInvalidAmount),
 		errors.Is(err, domain.ErrInvalidCurrency),
-		errors.Is(err, domain.ErrIdempotencyKeyRequired):
+		errors.Is(err, domain.ErrIdempotencyKeyRequired),
+		errors.Is(err, domain.ErrInvalidID):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrPayoutsNotAllowed):
 		c.JSON(http.StatusForbidden, gin.H{"error": domain.ErrPayoutsNotAllowed.Error()})

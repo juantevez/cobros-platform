@@ -29,7 +29,6 @@ func (a *Adapter) Transfer(_ context.Context, req application.TransferRequest) (
 
 	return application.TransferResult{
 		BankReference: fmt.Sprintf("MOCK-BANK-%s", uuid.NewString()[:8]),
-		Status:        "confirmed",
 	}, nil
 }
 

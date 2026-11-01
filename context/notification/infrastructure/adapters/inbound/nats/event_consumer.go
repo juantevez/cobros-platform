@@ -129,7 +129,7 @@ func (c *EventConsumer) handle(ctx context.Context, msg *eventbus.Message) error
 // del catálogo.
 var handledSubjects = []string{
 	"payment.captured.v1", "payment.failed.v1", "payment.refunded.v1",
-	"payout.confirmed.v1", "payout.failed.v1",
+	"payout.confirmed.v1", "payout.failed.v1", "payout.unknown.v1",
 	"onboarding.application.approved.v1", "onboarding.application.rejected.v1",
 	"auth.tenant.suspended.v1",
 	"dispute.opened.v1", "dispute.resolved.v1",
@@ -180,6 +180,13 @@ func buildTemplateData(subject string, p eventPayload) map[string]string {
 			"amount":         amountStr,
 			"currency":       p.Currency,
 			"bank_reference": p.BankReference,
+		}
+	case "payout.unknown.v1":
+		// El banco no confirmó la transferencia: el comercio tiene que saber
+		// que su retiro está en verificación (no exponemos el motivo técnico).
+		return map[string]string{
+			"amount":   amountStr,
+			"currency": p.Currency,
 		}
 	case "payout.failed.v1":
 		return map[string]string{
