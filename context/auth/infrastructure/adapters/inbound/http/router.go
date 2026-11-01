@@ -75,6 +75,11 @@ func NewRouter(
 			platform.POST("/activate", tenantHandler.Activate)
 			platform.POST("/suspend", tenantHandler.Suspend)
 		}
+
+		// Levantar una suspensión: el operador las suyas, cumplimiento las de
+		// cumplimiento (lo decide el caso de uso según el rol).
+		protected.POST("/tenants/:tenantID/reactivate",
+			RequireRole(domain.RolePlatformSupport, domain.RoleComplianceOfficer), tenantHandler.Reactivate)
 	}
 
 	// ── Rutas para integraciones server-to-server (ApiKey) ───────────────────

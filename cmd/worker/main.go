@@ -137,9 +137,7 @@ func main() {
 		eventbus.NewConsumer(natsClient, logger.With("component", "auth_compliance")),
 		authapp.NewPlaceComplianceHoldUseCase(complianceHolds, realClock{}),
 		authapp.NewReleaseComplianceHoldUseCase(complianceHolds, realClock{}),
-		authapp.NewSuspendForComplianceUseCase(
-			authapp.NewSuspendTenantUseCase(tenantRepo, postgres.NewTxManager(pool), authPub),
-		),
+		authapp.NewSuspendForComplianceUseCase(tenantRepo, postgres.NewTxManager(pool), authPub),
 		logger.With("component", "auth_compliance"),
 	)
 

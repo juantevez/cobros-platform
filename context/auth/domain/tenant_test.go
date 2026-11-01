@@ -73,11 +73,36 @@ func TestTenantActivate(t *testing.T) {
 		}
 	})
 
-	t.Run("cannot activate twice", func(t *testing.T) {
+	t.Run("activating again in the same environment is a no-op", func(t *testing.T) {
 		tenant, _ := NewTenant(NewTenantID(), "Acme")
 		_ = tenant.Activate(EnvironmentProduction)
-		if err := tenant.Activate(EnvironmentProduction); !errors.Is(err, ErrTenantCannotTransition) {
-			t.Fatalf("expected ErrTenantCannotTransition, got %v", err)
+		tenant.PullEvents()
+		if err := tenant.Activate(EnvironmentProduction); err != nil || len(tenant.PullEvents()) != 0 {
+			t.Fatalf("expected silent no-op, got %v", err)
+		}
+	})
+
+	t.Run("test to production", func(t *testing.T) {
+		tenant, _ := NewTenant(NewTenantID(), "Acme")
+		_ = tenant.Activate(EnvironmentTest)
+		tenant.PullEvents()
+		if err := tenant.Activate(EnvironmentProduction); err != nil || !tenant.CanProcessRealPayments() {
+			t.Fatalf("err=%v real=%v", err, tenant.CanProcessRealPayments())
+		}
+		if len(tenant.PullEvents()) != 1 {
+			t.Error("expected TenantActivatedEvent")
+		}
+	})
+
+	t.Run("production back to test and suspended are rejected", func(t *testing.T) {
+		prod, _ := NewTenant(NewTenantID(), "Acme")
+		_ = prod.Activate(EnvironmentProduction)
+		if err := prod.Activate(EnvironmentTest); !errors.Is(err, ErrTenantCannotTransition) {
+			t.Errorf("production→test = %v", err)
+		}
+		_ = prod.Suspend("x")
+		if err := prod.Activate(EnvironmentProduction); !errors.Is(err, ErrTenantCannotTransition) {
+			t.Errorf("suspended→active via Activate = %v (must use Reactivate)", err)
 		}
 	})
 }
@@ -131,7 +156,7 @@ func TestReconstituteTenant(t *testing.T) {
 	created := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 	updated := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
 
-	tenant := ReconstituteTenant(id, "Acme SA", TenantStatusActive, EnvironmentProduction, created, updated)
+	tenant := ReconstituteTenant(id, "Acme SA", TenantStatusActive, EnvironmentProduction, false, created, updated)
 
 	if tenant.ID() != id || tenant.LegalName() != "Acme SA" {
 		t.Error("identity fields not restored")

@@ -79,6 +79,16 @@ type TenantSuspendedEvent struct {
 
 func (e TenantSuspendedEvent) EventType() string { return "auth.tenant.suspended.v1" }
 
+// TenantReactivatedEvent se emite cuando se levanta la suspensión de un
+// comercio. No dice por qué estaba suspendido (anti tipping-off).
+type TenantReactivatedEvent struct {
+	baseEvent
+	TenantID    string `json:"tenant_id"`
+	Environment string `json:"environment"`
+}
+
+func (e TenantReactivatedEvent) EventType() string { return "auth.tenant.reactivated.v1" }
+
 // ── User events ───────────────────────────────────────────────────────────────
 
 // UserRegisteredEvent se emite cuando un usuario se registra en un tenant.

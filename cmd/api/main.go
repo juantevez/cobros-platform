@@ -161,7 +161,8 @@ func main() {
 	revokeApiKey := application.NewRevokeApiKeyUseCase(apiKeyRepo, txManager, authPub)
 	assignRole := application.NewAssignRoleUseCase(tenantRepo, userRepo, membershipRepo, txManager, authPub)
 
-	tenantHandler := authttp.NewTenantHandler(registerTenant, activateTenant, suspendTenant)
+	reactivateTenant := application.NewReactivateTenantUseCase(tenantRepo, txManager, authPub)
+	tenantHandler := authttp.NewTenantHandler(registerTenant, activateTenant, suspendTenant, reactivateTenant)
 	authHandler := authttp.NewAuthHandler(authenticate, refreshTokenUC, logoutUC)
 	userHandler := authttp.NewUserHandler(registerUser, assignRole)
 	apiKeyHandler := authttp.NewApiKeyHandler(issueApiKey, revokeApiKey)

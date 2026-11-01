@@ -11,14 +11,15 @@ type Action string
 
 const (
 	// Auth
-	ActionTenantCreated   Action = "auth.tenant.created"
-	ActionTenantActivated Action = "auth.tenant.activated"
-	ActionTenantSuspended Action = "auth.tenant.suspended"
-	ActionUserRegistered  Action = "auth.user.registered"
-	ActionUserSuspended   Action = "auth.user.suspended"
-	ActionApiKeyIssued    Action = "auth.apikey.issued"
-	ActionApiKeyRevoked   Action = "auth.apikey.revoked"
-	ActionRoleAssigned    Action = "auth.role.assigned"
+	ActionTenantCreated     Action = "auth.tenant.created"
+	ActionTenantActivated   Action = "auth.tenant.activated"
+	ActionTenantSuspended   Action = "auth.tenant.suspended"
+	ActionTenantReactivated Action = "auth.tenant.reactivated"
+	ActionUserRegistered    Action = "auth.user.registered"
+	ActionUserSuspended     Action = "auth.user.suspended"
+	ActionApiKeyIssued      Action = "auth.apikey.issued"
+	ActionApiKeyRevoked     Action = "auth.apikey.revoked"
+	ActionRoleAssigned      Action = "auth.role.assigned"
 
 	// Ledger
 	ActionAccountCreated Action = "ledger.account.created"

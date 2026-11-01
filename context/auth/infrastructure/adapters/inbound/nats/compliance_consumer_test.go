@@ -48,7 +48,7 @@ func newComplianceConsumer(holds *fakeHoldRepo, repo *fakeTenantRepo) (*Complian
 	return NewComplianceConsumer(fc,
 		application.NewPlaceComplianceHoldUseCase(holds, fixedClock{}),
 		application.NewReleaseComplianceHoldUseCase(holds, fixedClock{}),
-		application.NewSuspendForComplianceUseCase(application.NewSuspendTenantUseCase(repo, fakeTx{}, pub)),
+		application.NewSuspendForComplianceUseCase(repo, fakeTx{}, pub),
 		discardLogger(),
 	), fc, pub
 }

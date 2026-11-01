@@ -153,19 +153,33 @@ func TestHandle_TenantNotFoundPropagates(t *testing.T) {
 	}
 }
 
-func TestHandle_AlreadyActiveIsError(t *testing.T) {
+// Re-entrega de la aprobación: ya está en producción, se hace ack sin evento.
+func TestHandle_AlreadyInProductionIsNoop(t *testing.T) {
 	tenant := newPendingTenant(t)
 	_ = tenant.Activate(domain.EnvironmentProduction)
 	tenant.PullEvents()
-	repo := newFakeTenantRepo(tenant)
-	consumer, _ := newConsumerWith(repo)
+	consumer, pub := newConsumerWith(newFakeTenantRepo(tenant))
 
-	msg := &eventbus.Message{
-		Payload: []byte(`{"tenant_id":"` + tenant.ID().String() + `"}`),
+	msg := &eventbus.Message{Payload: []byte(`{"tenant_id":"` + tenant.ID().String() + `"}`)}
+	if err := consumer.handle(context.Background(), msg); err != nil || len(pub.published) != 0 {
+		t.Fatalf("err=%v events=%d, want silent ack", err, len(pub.published))
 	}
-	err := consumer.handle(context.Background(), msg)
-	if !errors.Is(err, domain.ErrTenantCannotTransition) {
-		t.Fatalf("expected ErrTenantCannotTransition, got %v", err)
+}
+
+// Antes: un tenant activado a mano en test fallaba 5 veces, el mensaje se
+// descartaba y quedaba en test con el KYC aprobado.
+func TestHandle_ActiveInTestMovesToProduction(t *testing.T) {
+	tenant := newPendingTenant(t)
+	_ = tenant.Activate(domain.EnvironmentTest)
+	tenant.PullEvents()
+	consumer, _ := newConsumerWith(newFakeTenantRepo(tenant))
+
+	msg := &eventbus.Message{Payload: []byte(`{"tenant_id":"` + tenant.ID().String() + `"}`)}
+	if err := consumer.handle(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !tenant.CanProcessRealPayments() {
+		t.Error("tenant should be active in production after KYC approval")
 	}
 }
 

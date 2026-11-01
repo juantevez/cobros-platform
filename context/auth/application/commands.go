@@ -30,6 +30,13 @@ type SuspendTenantCmd struct {
 	Reason   string
 }
 
+// ReactivateTenantCmd levanta la suspensión. ByCompliance: lo pide un
+// compliance_officer (las suspensiones por cumplimiento solo las levanta él).
+type ReactivateTenantCmd struct {
+	TenantID     string
+	ByCompliance bool
+}
+
 // ── User ──────────────────────────────────────────────────────────────────────
 
 type RegisterUserCmd struct {

@@ -83,7 +83,7 @@ func TestComplianceHoldUseCases(t *testing.T) {
 
 func TestSuspendForComplianceUseCase(t *testing.T) {
 	newUC := func(repo *fakeTenantRepo, pub *fakePublisher) *SuspendForComplianceUseCase {
-		return NewSuspendForComplianceUseCase(NewSuspendTenantUseCase(repo, fakeTx{}, pub))
+		return NewSuspendForComplianceUseCase(repo, fakeTx{}, pub)
 	}
 
 	t.Run("suspends with the generic reason (anti tipping-off)", func(t *testing.T) {
@@ -103,7 +103,7 @@ func TestSuspendForComplianceUseCase(t *testing.T) {
 		}
 	})
 
-	t.Run("already suspended is a no-op", func(t *testing.T) {
+	t.Run("already suspended by an operator: no event, but marked as compliance", func(t *testing.T) {
 		tenant := newActiveTenant(t, domain.EnvironmentProduction)
 		_ = tenant.Suspend("previa")
 		tenant.PullEvents()
@@ -115,6 +115,11 @@ func TestSuspendForComplianceUseCase(t *testing.T) {
 		}
 		if len(pub.published) != 0 {
 			t.Errorf("no event expected, got %d", len(pub.published))
+		}
+		// Sin la marca, un platform_support podía levantar una suspensión que
+		// cumplimiento confirmó.
+		if !repo.tenants[tenant.ID()].SuspendedForCompliance() {
+			t.Error("suspension must be marked as compliance")
 		}
 	})
 

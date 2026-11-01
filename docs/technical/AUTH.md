@@ -1,7 +1,7 @@
 # Auth & Multi-Tenant — Documentación técnico-funcional
 
 > **Bounded Context:** `context/auth`
-> **Migraciones:** [`000002_auth_init`](../../migrations/000002_auth_init.up.sql), [`000050_auth_rls`](../../migrations/000050_auth_rls.up.sql)
+> **Migraciones:** [`000002_auth_init`](../../migrations/000002_auth_init.up.sql), [`000050_auth_rls`](../../migrations/000050_auth_rls.up.sql), [`000051_tenant_compliance_suspension`](../../migrations/000051_tenant_compliance_suspension.up.sql)
 > **Stream NATS:** `AUTH` (`auth.>`)
 
 ---
@@ -10,7 +10,7 @@
 
 Auth es la **raíz del multi-tenant** de la plataforma. Gestiona:
 
-- El ciclo de vida del **comercio** (`Tenant`): alta, activación y suspensión.
+- El ciclo de vida del **comercio** (`Tenant`): alta, activación, pase a producción, suspensión y reactivación.
 - Los **usuarios** de cada comercio y su **rol** (RBAC).
 - La **autenticación** interactiva (JWT de acceso + refresh token con rotación).
 - Las **API keys** para integraciones server-to-server.
@@ -68,8 +68,8 @@ sequenceDiagram
     N-->>A: auth-onboarding-consumer → ActivateTenant(production)
     A-->>N: auth.tenant.activated.v1
     opt Intervención manual
-        P->>A: POST /tenants/:id/activate | /suspend
-        A-->>N: auth.tenant.activated.v1 | auth.tenant.suspended.v1
+        P->>A: POST /tenants/:id/activate | /suspend | /reactivate
+        A-->>N: auth.tenant.activated.v1 | suspended.v1 | reactivated.v1
     end
 ```
 
@@ -95,19 +95,22 @@ Archivo: [domain/tenant.go](../../context/auth/domain/tenant.go)
 | `id` | UUID generado en el alta. |
 | `legalName` | Obligatorio (`ErrEmptyLegalName`). |
 | `status` | `pending` → `active` / `suspended`. |
-| `environment` | Nace en `test`; se define al activar. |
+| `environment` | Nace en `test`; se define al activar y puede pasar de `test` a `production`. |
+| `suspendedForCompliance` | La suspensión vigente es por cumplimiento: solo la levanta un `compliance_officer`. |
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending: RegisterTenant (env=test)
     pending --> active: Activate(env)
-    pending --> suspended: Suspend(reason)
-    active --> suspended: Suspend(reason)
-    suspended --> [*]
+    active --> active: Activate(production) desde test
+    pending --> suspended: Suspend(reason) / SuspendForCompliance
+    active --> suspended: Suspend(reason) / SuspendForCompliance
+    suspended --> active: Reactivate(byCompliance)
 ```
 
-- `Activate` **solo desde `pending`**. No existe la transición `active(test)` → `active(production)` ni la reactivación de un tenant suspendido.
-- `Suspend` desde cualquier estado excepto `suspended`.
+- `Activate` desde `pending`, o desde `active(test)` con `production` (pase a producción). Activar en el ambiente que ya tiene es un no-op sin evento. `production → test` y `Activate` sobre un suspendido → `ErrTenantCannotTransition`.
+- `Suspend` desde cualquier estado excepto `suspended`. `SuspendForCompliance` suspende con el motivo genérico y marca `suspendedForCompliance`; si ya estaba suspendido, solo marca (sin otro evento).
+- `Reactivate(byCompliance)`: `suspended → active` con el ambiente que tenía (un tenant suspendido estando `pending` queda activo en `test`). La suspensión por cumplimiento solo la levanta cumplimiento (`byCompliance=true`), y la del operador solo el operador. Si no → `ErrReactivationNotAllowed` (403).
 - `IsActive()` = `status == active`. `CanProcessRealPayments()` = `active && production`.
 
 ### 4.2 Agregado `User`
@@ -187,7 +190,8 @@ Directorio: [application/](../../context/auth/application/)
 | Caso de uso | Precondiciones | Efecto | Evento |
 |---|---|---|---|
 | `RegisterTenant` | `legal_name` no vacío; email válido; password de 12 a 128 caracteres | Tenant `pending` / `test` + usuario `admin` inicial con su Membership, en una tx | `auth.tenant.created.v1`, `auth.user.registered.v1` |
-| `ActivateTenant` | Tenant `pending`; env válido | `active` + env | `auth.tenant.activated.v1` |
+| `ActivateTenant` | Tenant `pending`, o `active(test)` → `production`; env válido | `active` + env. Ya activo en ese env: no-op | `auth.tenant.activated.v1` |
+| `ReactivateTenant` | Tenant `suspended`; rol que puede levantar esa suspensión | `active`, mismo env. No libera holds de cumplimiento | `auth.tenant.reactivated.v1` |
 | `SuspendTenant` | Motivo no vacío; tenant no suspendido | `suspended` | `auth.tenant.suspended.v1` |
 | `RegisterUser` | Tenant existe y **no** suspendido (puede estar `pending`); email válido; password de 12 a 128 caracteres; rol válido y asignable por el tenant (no `platform_support` ni `compliance_officer`) | User `active` + Membership | `auth.user.registered.v1` |
 | `AssignRole` | Tenant **activo**; el usuario pertenece al tenant; rol asignable por el tenant (no `platform_support` ni `compliance_officer`) | Crea o actualiza la Membership | `auth.role.assigned.v1` |
@@ -199,7 +203,7 @@ Directorio: [application/](../../context/auth/application/)
 | `ProvisionPlatformUser` | Solo CLI ([cmd/provision](../../cmd/provision/main.go)); rol de **plataforma** (`compliance_officer`/`platform_support`), el inverso de `RegisterUser`; mismas validaciones de tenant, email y password | User `active` + Membership | `auth.user.registered.v1` |
 | `PlaceComplianceHold` | `compliance.sanction.matched.v1` | Hold vigente `(tenant, alerta)`; idempotente | — (anti tipping-off) |
 | `ReleaseComplianceHold` | `compliance.sanction.cleared.v1` | `released_at` del hold; tolera llegar antes que el place | — |
-| `SuspendForCompliance` | `compliance.sanction.confirmed.v1` | `SuspendTenant` con `ComplianceReviewReason` (genérico); ya suspendido = no-op | `auth.tenant.suspended.v1` |
+| `SuspendForCompliance` | `compliance.sanction.confirmed.v1` | Suspende con `ComplianceReviewReason` (genérico) y marca `suspended_for_compliance`. Si ya estaba suspendido, solo marca | `auth.tenant.suspended.v1` (no si ya estaba suspendido) |
 
 Detalles relevantes:
 
@@ -227,11 +231,12 @@ Directorio: [infrastructure/adapters/inbound/http/](../../context/auth/infrastru
 | `DELETE` | `/api/v1/tenants/:tenantID/api-keys/:keyID` | JWT | `admin`, `platform_support` | `204` |
 | `POST` | `/api/v1/tenants/:tenantID/activate` | JWT | `platform_support` | `204` |
 | `POST` | `/api/v1/tenants/:tenantID/suspend` | JWT | `platform_support` | `204` |
+| `POST` | `/api/v1/tenants/:tenantID/reactivate` | JWT | `platform_support`, `compliance_officer` | `204` |
 
 Reglas transversales:
 
 - En las rutas de usuarios y API keys, el handler exige `:tenantID == claims.tid`. Si no coincide → `403`. Esto aplica **también a `platform_support`**, que entonces solo puede gestionar usuarios y keys de su propio tenant.
-- `activate` y `suspend` **no** comparan `:tenantID` con el token: actúan sobre cualquier tenant.
+- `activate`, `suspend` y `reactivate` **no** comparan `:tenantID` con el token: actúan sobre cualquier tenant.
 - Todo request recibe o propaga `X-Correlation-ID` (`CorrelationIDMiddleware`).
 - Un body inválido o al que le falta un campo `required` → `400 {"error":"invalid request body"}`.
 
@@ -299,12 +304,14 @@ Errores particulares:
 - Key de `production` en un tenant `test` → **500**: el error es un `fmt.Errorf` no tipado.
 - Scope inválido → **500**, por el mismo motivo.
 
-### 6.6 Activar / suspender — `POST /api/v1/tenants/:tenantID/activate | /suspend`
+### 6.6 Activar / suspender / reactivar — `POST /api/v1/tenants/:tenantID/activate | /suspend | /reactivate`
 
 ```json
 { "environment": "production" }
 { "reason": "Contracargos por encima del umbral" }
 ```
+
+`activate` también pasa un tenant de `test` a `production`. `reactivate` no lleva body: decide por el rol del token. Un `platform_support` levanta las suspensiones del operador y un `compliance_officer` las de cumplimiento. Si el rol no corresponde → `403 this suspension cannot be lifted by your role`.
 
 ### 6.7 Middlewares para otros BCs
 
@@ -326,7 +333,8 @@ Archivo: [domain/events.go](../../context/auth/domain/events.go). Se publican po
 |---|---|---|
 | `auth.tenant.created.v1` | `tenant_id`, `legal_name` | `RegisterTenant` |
 | `auth.tenant.activated.v1` | `tenant_id`, `environment` | `ActivateTenant` (HTTP o consumer) |
-| `auth.tenant.suspended.v1` | `tenant_id`, `reason` | `SuspendTenant` |
+| `auth.tenant.suspended.v1` | `tenant_id`, `reason` | `SuspendTenant`, `SuspendForCompliance` |
+| `auth.tenant.reactivated.v1` | `tenant_id`, `environment` (sin el motivo de la suspensión) | `ReactivateTenant` |
 | `auth.user.registered.v1` | `tenant_id`, `user_id`, `email` | `RegisterUser` |
 | `auth.user.suspended.v1` | `tenant_id`, `user_id` | **Nunca** (no hay caso de uso) |
 | `auth.user.login.v1` | `tenant_id`, `user_id` | `Authenticate` (login exitoso) |
@@ -358,7 +366,7 @@ cumplimiento usa el motivo genérico `domain.ComplianceReviewReason`. Los gates
 que leen el hold (Payment `StatusGate`, Payout `PayoutGate`) responden con el
 mismo error que para cualquier tenant inhabilitado.
 
-`MaxDeliver: 5`. Si el tenant no está `pending` (por ejemplo, un operador ya lo activó en `test`), `Activate` falla con `ErrTenantCannotTransition` en los 5 intentos y el mensaje se descarta: **el tenant queda en `test` aunque el KYC esté aprobado**, mientras Ledger sí crea sus cuentas.
+`MaxDeliver: 5`. Si un operador ya lo había activado en `test`, la aprobación lo pasa a `production`. Si ya está en `production`, es un no-op (re-entrega). Si está suspendido, falla con `ErrTenantCannotTransition` y el mensaje se descarta tras 5 intentos: la aprobación del KYC no levanta una suspensión.
 
 ---
 
@@ -378,7 +386,8 @@ erDiagram
     tenants { uuid id PK
               text legal_name
               text status
-              text environment }
+              text environment
+              bool suspended_for_compliance }
     users { uuid id PK
             uuid tenant_id FK
             citext email
@@ -406,7 +415,7 @@ erDiagram
 
 | Tabla | RLS | Aislamiento |
 |---|---|---|
-| `tenants` | No | Raíz del sistema. |
+| `tenants` | No | Raíz del sistema. `suspended_for_compliance` (000051) marca quién puede levantar la suspensión. |
 | `users` | Sí (000050: `NULLIF(current_setting('app.current_tenant', true), '')::uuid`) | `UNIQUE(tenant_id, email)` con `CITEXT`. |
 | `memberships` | Sí (ídem) | PK `(user_id, tenant_id)`; `Save` usa `ON CONFLICT DO NOTHING`. |
 | `api_keys` | No | `prefix` único global: el middleware la busca antes de conocer el tenant. El aislamiento se hace en código (`RevokeApiKey` compara el tenant). |
@@ -447,11 +456,10 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Media | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Si un operador activó el tenant en `test`, el consumer de onboarding (§7.2) falla 5 veces con `ErrTenantCannotTransition` y descarta el mensaje: el tenant queda en `test` con el KYC aprobado. |
-| 2 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
-| 3 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
-| 4 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
-| 5 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
+| 1 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
+| 2 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
+| 3 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
+| 4 | Producto | Alcance | Sin sandbox: el entorno (`test`/`production`) de la key y del tenant no cambia nada en los BCs, así que una key `test` en un tenant `production` cobra con dinero real. Separarlos requiere un PSP y un banco de prueba por entorno. Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 
@@ -484,7 +492,7 @@ context/auth/
 │   ├── membership.go      # Membership + matriz de permisos (RequirePermission)
 │   ├── apikey.go          # Agregado ApiKey + ParseRawApiKey
 │   ├── vo.go              # IDs, Email, Role, Environment, Scope
-│   ├── events.go          # 10 eventos
+│   ├── events.go          # 11 eventos
 │   └── errors.go
 ├── application/
 │   ├── ports.go           # Repos, PasswordHasher, TokenIssuer, EventPublisher, Clock

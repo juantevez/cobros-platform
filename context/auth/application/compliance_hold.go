@@ -2,7 +2,6 @@ package application
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -72,28 +71,39 @@ func (uc *ReleaseComplianceHoldUseCase) Execute(ctx context.Context, cmd Complia
 
 // SuspendForComplianceUseCase suspende al comercio cuando cumplimiento
 // confirma la coincidencia con sanciones (compliance.sanction.confirmed.v1).
-// El hold se conserva: la suspensión es definitiva.
+// El hold se conserva. La suspensión queda marcada como de cumplimiento: solo
+// un compliance_officer puede levantarla (ReactivateTenant).
 //
 // Usa ComplianceReviewReason (genérico) porque auth.tenant.suspended.v1 llega
-// al comercio. Es idempotente: un tenant ya suspendido es un no-op.
+// al comercio. Es idempotente; si un operador ya lo había suspendido, no
+// emite otro evento pero marca la suspensión como de cumplimiento.
 type SuspendForComplianceUseCase struct {
-	suspend *SuspendTenantUseCase
+	tenantRepo TenantRepository
+	txManager  TxManager
+	publisher  EventPublisher
 }
 
-func NewSuspendForComplianceUseCase(suspend *SuspendTenantUseCase) *SuspendForComplianceUseCase {
-	return &SuspendForComplianceUseCase{suspend: suspend}
+func NewSuspendForComplianceUseCase(tenantRepo TenantRepository, txManager TxManager, publisher EventPublisher) *SuspendForComplianceUseCase {
+	return &SuspendForComplianceUseCase{tenantRepo: tenantRepo, txManager: txManager, publisher: publisher}
 }
 
 func (uc *SuspendForComplianceUseCase) Execute(ctx context.Context, cmd ComplianceHoldCmd) error {
-	if _, _, err := cmd.parse(); err != nil {
+	tenantID, _, err := cmd.parse()
+	if err != nil {
 		return err
 	}
-	err := uc.suspend.Execute(ctx, SuspendTenantCmd{
-		TenantID: cmd.TenantID,
-		Reason:   domain.ComplianceReviewReason,
-	})
-	if errors.Is(err, domain.ErrTenantCannotTransition) {
-		return nil // ya suspendido → re-entrega o suspensión previa
+	tenant, err := uc.tenantRepo.FindByID(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("find tenant: %w", err)
 	}
-	return err
+	if tenant.Status() == domain.TenantStatusSuspended && tenant.SuspendedForCompliance() {
+		return nil // re-entrega
+	}
+	tenant.SuspendForCompliance()
+	return uc.txManager.RunInTx(ctx, func(ctx context.Context) error {
+		if err := uc.tenantRepo.Update(ctx, tenant); err != nil {
+			return fmt.Errorf("update tenant: %w", err)
+		}
+		return uc.publisher.Publish(ctx, tenant.PullEvents()...)
+	})
 }

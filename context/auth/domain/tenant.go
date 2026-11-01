@@ -17,8 +17,8 @@ const (
 	// El ambiente (test/production) determina si puede mover dinero real.
 	TenantStatusActive TenantStatus = "active"
 
-	// TenantStatusSuspended: el comercio fue suspendido por el operador.
-	// No puede realizar ninguna operación.
+	// TenantStatusSuspended: el comercio fue suspendido por el operador o por
+	// cumplimiento. No puede realizar ninguna operación.
 	TenantStatusSuspended TenantStatus = "suspended"
 )
 
@@ -36,8 +36,11 @@ type Tenant struct {
 	legalName   string
 	status      TenantStatus
 	environment Environment
-	createdAt   time.Time
-	updatedAt   time.Time
+	// suspendedForCompliance: la suspensión vigente es por cumplimiento y solo
+	// la levanta un compliance_officer.
+	suspendedForCompliance bool
+	createdAt              time.Time
+	updatedAt              time.Time
 
 	events []Event
 }
@@ -75,25 +78,38 @@ func ReconstituteTenant(
 	legalName string,
 	status TenantStatus,
 	env Environment,
+	suspendedForCompliance bool,
 	createdAt, updatedAt time.Time,
 ) *Tenant {
 	return &Tenant{
-		id:          id,
-		legalName:   legalName,
-		status:      status,
-		environment: env,
-		createdAt:   createdAt,
-		updatedAt:   updatedAt,
+		suspendedForCompliance: suspendedForCompliance,
+		id:                     id,
+		legalName:              legalName,
+		status:                 status,
+		environment:            env,
+		createdAt:              createdAt,
+		updatedAt:              updatedAt,
 	}
 }
 
 // Activate activa el comercio con el ambiente dado.
 //
-// Transición válida: Pending → Active.
-// Si ya está Active o Suspended, retorna ErrTenantCannotTransition.
+// Transiciones válidas:
+//   - Pending → Active(env).
+//   - Active(test) → Active(production): el pase a producción, p. ej. cuando
+//     se aprueba el KYC de un tenant que un operador ya había activado en test.
+//
+// Activar en el ambiente que ya tiene es un no-op sin evento (el consumer de
+// onboarding puede recibir la aprobación más de una vez). Volver de
+// production a test o activar un Suspended (ver Reactivate) retorna
+// ErrTenantCannotTransition.
 func (t *Tenant) Activate(env Environment) error {
-	if t.status != TenantStatusPending {
-		return fmt.Errorf("%w: cannot activate from status %q", ErrTenantCannotTransition, t.status)
+	switch {
+	case t.status == TenantStatusActive && t.environment == env:
+		return nil
+	case t.status == TenantStatusActive && t.environment == EnvironmentTest && env == EnvironmentProduction:
+	case t.status != TenantStatusPending:
+		return fmt.Errorf("%w: cannot activate %q from status %q (%s)", ErrTenantCannotTransition, env, t.status, t.environment)
 	}
 
 	t.status = TenantStatusActive
@@ -130,6 +146,45 @@ func (t *Tenant) Suspend(reason string) error {
 	return nil
 }
 
+// SuspendForCompliance suspende por cumplimiento con el motivo genérico
+// ComplianceReviewReason. Si ya estaba suspendido (por un operador), no emite
+// otro evento pero marca la suspensión como de cumplimiento: así un
+// platform_support no puede levantarla.
+func (t *Tenant) SuspendForCompliance() {
+	if t.status != TenantStatusSuspended {
+		_ = t.Suspend(ComplianceReviewReason)
+	}
+	if !t.suspendedForCompliance {
+		t.suspendedForCompliance = true
+		t.updatedAt = time.Now().UTC()
+	}
+}
+
+// Reactivate levanta la suspensión: Suspended → Active, con el ambiente que
+// tenía (un tenant suspendido estando pending queda activo en test).
+// byCompliance indica si lo pide un compliance_officer: la suspensión por
+// cumplimiento solo la levanta cumplimiento, y la del operador solo el
+// operador (ErrReactivationNotAllowed).
+func (t *Tenant) Reactivate(byCompliance bool) error {
+	if t.status != TenantStatusSuspended {
+		return fmt.Errorf("%w: cannot reactivate from status %q", ErrTenantCannotTransition, t.status)
+	}
+	if t.suspendedForCompliance != byCompliance {
+		return ErrReactivationNotAllowed
+	}
+
+	t.status = TenantStatusActive
+	t.suspendedForCompliance = false
+	t.updatedAt = time.Now().UTC()
+
+	t.record(TenantReactivatedEvent{
+		baseEvent:   newBase(t.id.String()),
+		TenantID:    t.id.String(),
+		Environment: t.environment.String(),
+	})
+	return nil
+}
+
 // ── Consultas ─────────────────────────────────────────────────────────────────
 
 // IsActive retorna true si el tenant puede realizar operaciones.
@@ -143,12 +198,13 @@ func (t *Tenant) CanProcessRealPayments() bool {
 
 // ── Getters ───────────────────────────────────────────────────────────────────
 
-func (t *Tenant) ID() TenantID           { return t.id }
-func (t *Tenant) LegalName() string      { return t.legalName }
-func (t *Tenant) Status() TenantStatus   { return t.status }
-func (t *Tenant) Environment() Environment { return t.environment }
-func (t *Tenant) CreatedAt() time.Time   { return t.createdAt }
-func (t *Tenant) UpdatedAt() time.Time   { return t.updatedAt }
+func (t *Tenant) ID() TenantID                 { return t.id }
+func (t *Tenant) LegalName() string            { return t.legalName }
+func (t *Tenant) Status() TenantStatus         { return t.status }
+func (t *Tenant) Environment() Environment     { return t.environment }
+func (t *Tenant) SuspendedForCompliance() bool { return t.suspendedForCompliance }
+func (t *Tenant) CreatedAt() time.Time         { return t.createdAt }
+func (t *Tenant) UpdatedAt() time.Time         { return t.updatedAt }
 
 // PullEvents retorna los eventos de dominio pendientes y limpia la lista interna.
 //

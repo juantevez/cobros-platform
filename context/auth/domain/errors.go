@@ -30,6 +30,11 @@ var (
 	// ErrTenantSuspended se retorna cuando se intenta operar sobre un tenant suspendido.
 	ErrTenantSuspended = errors.New("tenant is suspended")
 
+	// ErrReactivationNotAllowed: quien pide levantar la suspensión no es quien
+	// puede hacerlo (la de cumplimiento la levanta un compliance_officer; la
+	// del operador, platform_support).
+	ErrReactivationNotAllowed = errors.New("this suspension cannot be lifted by your role")
+
 	// ErrTenantNotActive se retorna cuando la operación requiere un tenant activo.
 	ErrTenantNotActive = errors.New("tenant is not active")
 

@@ -47,7 +47,8 @@ func respondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrTenantSuspended),
 		errors.Is(err, domain.ErrUserSuspended),
 		errors.Is(err, domain.ErrTenantNotActive),
-		errors.Is(err, domain.ErrRoleNotAssignable):
+		errors.Is(err, domain.ErrRoleNotAssignable),
+		errors.Is(err, domain.ErrReactivationNotAllowed):
 		respondError(c, http.StatusForbidden, err.Error())
 
 	// 404 Not Found

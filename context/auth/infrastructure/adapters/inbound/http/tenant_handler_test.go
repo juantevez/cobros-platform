@@ -82,3 +82,30 @@ func TestSuspendTenant_NotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
+
+// Una suspensión por cumplimiento solo la levanta un compliance_officer; el
+// resto de los roles ni llega al caso de uso.
+func TestReactivateTenant_ByRole(t *testing.T) {
+	tenant := newActiveTenant(t, domain.EnvironmentProduction)
+	tenant.SuspendForCompliance()
+	tenant.PullEvents()
+	env := newTestEnv(newFakeTenantRepo(tenant), newFakeUserRepo(), newFakeMembershipRepo(), newFakeApiKeyRepo(), &fakeHasher{}, &fakeTokenIssuer{})
+	path := "/api/v1/tenants/" + tenant.ID().String() + "/reactivate"
+
+	for _, tc := range []struct {
+		role domain.Role
+		want int
+	}{
+		{domain.RoleAdmin, http.StatusForbidden},           // RequireRole
+		{domain.RolePlatformSupport, http.StatusForbidden}, // ErrReactivationNotAllowed
+		{domain.RoleComplianceOfficer, http.StatusNoContent},
+	} {
+		env.registerToken(tc.role.String(), application.AccessTokenClaims{Role: tc.role, TenantID: domain.NewTenantID()})
+		if rec := env.do(http.MethodPost, path, tc.role.String(), nil); rec.Code != tc.want {
+			t.Errorf("%s: status = %d, want %d (%s)", tc.role, rec.Code, tc.want, rec.Body)
+		}
+	}
+	if tenant.Status() != domain.TenantStatusActive {
+		t.Errorf("status = %q, want active", tenant.Status())
+	}
+}

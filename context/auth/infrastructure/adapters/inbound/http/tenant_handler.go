@@ -6,24 +6,28 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/juantevez/cobros-platform/context/auth/application"
+	"github.com/juantevez/cobros-platform/context/auth/domain"
 )
 
 // TenantHandler gestiona los endpoints de ciclo de vida de tenants.
 type TenantHandler struct {
 	register *application.RegisterTenantUseCase
 	activate *application.ActivateTenantUseCase
-	suspend  *application.SuspendTenantUseCase
+	suspend    *application.SuspendTenantUseCase
+	reactivate *application.ReactivateTenantUseCase
 }
 
 func NewTenantHandler(
 	register *application.RegisterTenantUseCase,
 	activate *application.ActivateTenantUseCase,
 	suspend *application.SuspendTenantUseCase,
+	reactivate *application.ReactivateTenantUseCase,
 ) *TenantHandler {
 	return &TenantHandler{
-		register: register,
-		activate: activate,
-		suspend:  suspend,
+		register:   register,
+		activate:   activate,
+		suspend:    suspend,
+		reactivate: reactivate,
 	}
 }
 
@@ -114,5 +118,27 @@ func (h *TenantHandler) Suspend(c *gin.Context) {
 		return
 	}
 
+	c.Status(http.StatusNoContent)
+}
+
+// ── Reactivate ────────────────────────────────────────────────────────────────
+
+// Reactivate levanta la suspensión de un tenant (platform_support o
+// compliance_officer; el caso de uso decide cuál puede levantar cuál).
+//
+//	POST /api/v1/tenants/:tenantID/reactivate
+func (h *TenantHandler) Reactivate(c *gin.Context) {
+	claims, ok := ClaimsFromContext(c)
+	if !ok {
+		respondError(c, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if err := h.reactivate.Execute(c.Request.Context(), application.ReactivateTenantCmd{
+		TenantID:     c.Param("tenantID"),
+		ByCompliance: claims.Role == domain.RoleComplianceOfficer,
+	}); err != nil {
+		respondDomainError(c, err)
+		return
+	}
 	c.Status(http.StatusNoContent)
 }

@@ -338,7 +338,7 @@ func newTestEnv(
 
 	engine := NewRouter(
 		issuer, apiKeys, hasher, application.NewCachedTenantStatus(tenants, clock, 0),
-		NewTenantHandler(registerTenant, activateTenant, suspendTenant),
+		NewTenantHandler(registerTenant, activateTenant, suspendTenant, application.NewReactivateTenantUseCase(tenants, tx, pub)),
 		NewAuthHandler(authenticate, refreshUC, logoutUC),
 		NewUserHandler(registerUser, assignRole),
 		NewApiKeyHandler(issueApiKey, revokeApiKey),
@@ -381,7 +381,7 @@ func (e *testEnv) registerToken(token string, claims application.AccessTokenClai
 	if _, ok := e.tenants.tenants[claims.TenantID]; !ok && !claims.TenantID.IsZero() {
 		now := time.Now().UTC()
 		e.tenants.tenants[claims.TenantID] = domain.ReconstituteTenant(claims.TenantID, "Token Tenant",
-			domain.TenantStatusActive, domain.EnvironmentProduction, now, now)
+			domain.TenantStatusActive, domain.EnvironmentProduction, false, now, now)
 	}
 }
 

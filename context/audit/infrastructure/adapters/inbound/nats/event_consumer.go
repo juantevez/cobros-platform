@@ -152,16 +152,17 @@ type eventMapping struct {
 // subject sin el sufijo de versión (auth.tenant.created.v1 → auth.tenant.created).
 var mappings = map[string]eventMapping{
 	// ── Auth ──
-	"auth.tenant.created.v1":   {"tenant", "tenant_id", "", nil},
-	"auth.tenant.activated.v1": {"tenant", "tenant_id", "", nil},
-	"auth.tenant.suspended.v1": {"tenant", "tenant_id", "", nil},
-	"auth.user.registered.v1":  {"user", "user_id", "", nil},
-	"auth.user.suspended.v1":   {"user", "user_id", "", nil},
-	"auth.user.login.v1":       {"user", "user_id", "user_id", nil},
-	"auth.user.logout.v1":      {"user", "user_id", "user_id", nil},
-	"auth.apikey.issued.v1":    {"api_key", "api_key_id", "", nil},
-	"auth.apikey.revoked.v1":   {"api_key", "api_key_id", "", nil},
-	"auth.role.assigned.v1":    {"user", "user_id", "assigned_by", nil},
+	"auth.tenant.created.v1":     {"tenant", "tenant_id", "", nil},
+	"auth.tenant.activated.v1":   {"tenant", "tenant_id", "", nil},
+	"auth.tenant.suspended.v1":   {"tenant", "tenant_id", "", nil},
+	"auth.tenant.reactivated.v1": {"tenant", "tenant_id", "", nil},
+	"auth.user.registered.v1":    {"user", "user_id", "", nil},
+	"auth.user.suspended.v1":     {"user", "user_id", "", nil},
+	"auth.user.login.v1":         {"user", "user_id", "user_id", nil},
+	"auth.user.logout.v1":        {"user", "user_id", "user_id", nil},
+	"auth.apikey.issued.v1":      {"api_key", "api_key_id", "", nil},
+	"auth.apikey.revoked.v1":     {"api_key", "api_key_id", "", nil},
+	"auth.role.assigned.v1":      {"user", "user_id", "assigned_by", nil},
 
 	// ── Ledger ──
 	"ledger.account.created.v1": {"ledger_account", "account_id", "", nil},
