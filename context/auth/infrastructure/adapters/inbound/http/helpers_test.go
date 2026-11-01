@@ -334,7 +334,7 @@ func newTestEnv(
 	assignRole := application.NewAssignRoleUseCase(tenants, users, members, tx, pub)
 
 	engine := NewRouter(
-		issuer, apiKeys, hasher,
+		issuer, apiKeys, hasher, application.NewCachedTenantStatus(tenants, clock, 0),
 		NewTenantHandler(registerTenant, activateTenant, suspendTenant),
 		NewAuthHandler(authenticate, refreshUC, logoutUC),
 		NewUserHandler(registerUser, assignRole),
@@ -373,6 +373,13 @@ func (e *testEnv) registerToken(token string, claims application.AccessTokenClai
 		e.issuer.claimsByToken = map[string]application.AccessTokenClaims{}
 	}
 	e.issuer.claimsByToken[token] = claims
+	// Los middlewares verifican que el tenant del token exista y no esté
+	// suspendido: si el test no lo sembró, se siembra activo.
+	if _, ok := e.tenants.tenants[claims.TenantID]; !ok && !claims.TenantID.IsZero() {
+		now := time.Now().UTC()
+		e.tenants.tenants[claims.TenantID] = domain.ReconstituteTenant(claims.TenantID, "Token Tenant",
+			domain.TenantStatusActive, domain.EnvironmentProduction, now, now)
+	}
 }
 
 func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
@@ -389,3 +396,10 @@ func newTestCtx() (*gin.Context, *httptest.ResponseRecorder) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	return c, rec
 }
+
+// fakeTenantStatus responde err a todo chequeo; el valor cero deja pasar.
+type fakeTenantStatus struct{ err error }
+
+func (f fakeTenantStatus) EnsureNotSuspended(context.Context, domain.TenantID) error { return f.err }
+
+var openTenants = fakeTenantStatus{}

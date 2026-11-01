@@ -166,10 +166,12 @@ func main() {
 	userHandler := authttp.NewUserHandler(registerUser, assignRole)
 	apiKeyHandler := authttp.NewApiKeyHandler(issueApiKey, revokeApiKey)
 
-	router := authttp.NewRouter(jwtIssuer, apiKeyRepo, hasher, tenantHandler, authHandler, userHandler, apiKeyHandler)
+	// Una suspensión corta las credenciales vigentes en a lo sumo TenantStatusTTL.
+	tenantStatus := application.NewCachedTenantStatus(tenantRepo, clock, application.TenantStatusTTL)
+	router := authttp.NewRouter(jwtIssuer, apiKeyRepo, hasher, tenantStatus, tenantHandler, authHandler, userHandler, apiKeyHandler)
 
 	protected := router.Group("/api/v1")
-	protected.Use(authttp.JWTMiddleware(jwtIssuer))
+	protected.Use(authttp.JWTMiddleware(jwtIssuer, tenantStatus))
 
 	// ── Ledger ────────────────────────────────────────────────────────────────
 
@@ -264,7 +266,7 @@ func main() {
 	// Payments acepta JWT (panel del comercio) o API key (integraciones
 	// server-to-server), por eso usa su propio grupo y no `protected`.
 	paymentsAPI := router.Group("/api/v1")
-	paymentsAPI.Use(authttp.JWTOrApiKeyMiddleware(jwtIssuer, apiKeyRepo, hasher))
+	paymentsAPI.Use(authttp.JWTOrApiKeyMiddleware(jwtIssuer, apiKeyRepo, hasher, tenantStatus))
 	paymenthttp.RegisterRoutes(paymentsAPI,
 		paymenthttp.NewPaymentHandler(processPayment, refundPayment, getPayment),
 		paymenthttp.RouteGuards{

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -42,8 +43,9 @@ func CorrelationIDMiddleware() gin.HandlerFunc {
 }
 
 // JWTMiddleware valida el Bearer token y puebla el contexto con tenant y actor.
-// Rechaza con 401 si el token es inválido o está expirado.
-func JWTMiddleware(tokenIssuer application.TokenIssuer) gin.HandlerFunc {
+// Rechaza con 401 si el token es inválido o está expirado, y con 403 si el
+// tenant fue suspendido después de emitirlo (ver ensureTenantUsable).
+func JWTMiddleware(tokenIssuer application.TokenIssuer, tenants application.TenantStatusChecker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
@@ -59,6 +61,9 @@ func JWTMiddleware(tokenIssuer application.TokenIssuer) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
 				Error: "invalid or expired token",
 			})
+			return
+		}
+		if !ensureTenantUsable(c, tenants, claims.TenantID) {
 			return
 		}
 
@@ -79,6 +84,7 @@ func JWTMiddleware(tokenIssuer application.TokenIssuer) gin.HandlerFunc {
 func ApiKeyMiddleware(
 	apiKeyRepo application.ApiKeyRepository,
 	hasher application.PasswordHasher,
+	tenants application.TenantStatusChecker,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rawKey := c.GetHeader("X-Api-Key")
@@ -118,6 +124,9 @@ func ApiKeyMiddleware(
 			})
 			return
 		}
+		if !ensureTenantUsable(c, tenants, apiKey.TenantID()) {
+			return
+		}
 
 		// Poblar contexto con el tenant de la API key. El actor identifica la
 		// key para auditoría (no hay usuario detrás).
@@ -145,9 +154,10 @@ func JWTOrApiKeyMiddleware(
 	tokenIssuer application.TokenIssuer,
 	apiKeyRepo application.ApiKeyRepository,
 	hasher application.PasswordHasher,
+	tenants application.TenantStatusChecker,
 ) gin.HandlerFunc {
-	apiKeyMW := ApiKeyMiddleware(apiKeyRepo, hasher)
-	jwtMW := JWTMiddleware(tokenIssuer)
+	apiKeyMW := ApiKeyMiddleware(apiKeyRepo, hasher, tenants)
+	jwtMW := JWTMiddleware(tokenIssuer, tenants)
 	return func(c *gin.Context) {
 		if c.GetHeader("X-Api-Key") != "" {
 			apiKeyMW(c)
@@ -155,6 +165,25 @@ func JWTOrApiKeyMiddleware(
 		}
 		jwtMW(c)
 	}
+}
+
+// ensureTenantUsable corta el request si el tenant de la credencial fue
+// suspendido (403) o ya no existe (401). Las credenciales siguen siendo
+// válidas criptográficamente, así que sin este chequeo un tenant suspendido
+// operaba hasta 15 minutos con su JWT y sin límite con sus API keys.
+func ensureTenantUsable(c *gin.Context, tenants application.TenantStatusChecker, tenantID domain.TenantID) bool {
+	err := tenants.EnsureNotSuspended(c.Request.Context(), tenantID)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, domain.ErrTenantSuspended):
+		c.AbortWithStatusJSON(http.StatusForbidden, ErrorResponse{Error: domain.ErrTenantSuspended.Error()})
+	case errors.Is(err, domain.ErrTenantNotFound):
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid credentials"})
+	default:
+		c.AbortWithStatusJSON(http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
+	}
+	return false
 }
 
 // RequirePermission autoriza según cómo se autenticó el request:

@@ -18,6 +18,7 @@ func NewRouter(
 	tokenIssuer application.TokenIssuer,
 	apiKeyRepo application.ApiKeyRepository,
 	hasher application.PasswordHasher,
+	tenantStatus application.TenantStatusChecker,
 	tenantHandler *TenantHandler,
 	authHandler *AuthHandler,
 	userHandler *UserHandler,
@@ -49,8 +50,8 @@ func NewRouter(
 
 	// ── Rutas protegidas por JWT ──────────────────────────────────────────────
 
-	jwtMW := JWTMiddleware(tokenIssuer)
-	apiKeyMW := ApiKeyMiddleware(apiKeyRepo, hasher)
+	jwtMW := JWTMiddleware(tokenIssuer, tenantStatus)
+	apiKeyMW := ApiKeyMiddleware(apiKeyRepo, hasher, tenantStatus)
 
 	protected := v1.Group("")
 	// Acepta JWT o X-Api-Key (el primero que autentique gana).
