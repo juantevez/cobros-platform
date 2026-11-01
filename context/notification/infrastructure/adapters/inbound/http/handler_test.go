@@ -216,7 +216,11 @@ func TestRegisterRoutes(t *testing.T) {
 		c.Request = c.Request.WithContext(postgres.WithTenantID(c.Request.Context(), tid))
 		c.Next()
 	})
-	RegisterRoutes(engine.Group("/api/v1"), newHandler(&fakeNotifRepo{}, &fakePrefRepo{}))
+	deny := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+	}
+	prefs := &fakePrefRepo{}
+	RegisterRoutes(engine.Group("/api/v1"), newHandler(&fakeNotifRepo{}, prefs), RouteGuards{Manage: deny})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/preferences", nil)
@@ -224,6 +228,25 @@ func TestRegisterRoutes(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET preferences status = %d, want 200", rec.Code)
 	}
+
+	// Las preferencias son del tenant: sin el guard, un read_only podía
+	// apagar los emails de todo el comercio.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/v1/notifications/preferences/payout.failed", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("PUT preference status = %d, want 403", rec.Code)
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuard(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic without Manage guard")
+		}
+	}()
+	RegisterRoutes(gin.New().Group("/api/v1"), &NotificationHandler{}, RouteGuards{})
 }
 
 type realClock struct{}

@@ -213,7 +213,10 @@ func main() {
 	onboardinghttp.RegisterRoutes(protected,
 		onboardinghttp.NewOnboardingHandler(submitApp, uploadDoc, addPerson, setBankAcct, submitForReview, getApp),
 		onboardinghttp.NewReviewHandler(reviewApp),
-		authttp.RequireRole(authdomain.RolePlatformSupport),
+		onboardinghttp.RouteGuards{
+			Manage: authttp.RequirePermission(authdomain.ActionManageOnboarding),
+			Review: authttp.RequireRole(authdomain.RolePlatformSupport),
+		},
 	)
 
 	// ── Billing & Fees ────────────────────────────────────────────────────────
@@ -352,7 +355,9 @@ func main() {
 
 	notificationhttp.RegisterRoutes(protected, notificationhttp.NewNotificationHandler(
 		listNotifs, getPrefs, updatePref,
-	))
+	), notificationhttp.RouteGuards{
+		Manage: authttp.RequirePermission(authdomain.ActionManageNotifications),
+	})
 
 	// ── Disputes & Chargebacks ────────────────────────────────────────────────
 

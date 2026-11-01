@@ -279,13 +279,48 @@ func TestReview_GuardDoesNotAffectMerchantRoutes(t *testing.T) {
 	}
 }
 
-func TestRegisterRoutes_PanicsWithoutReviewGuard(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic when reviewGuard is nil")
+// Sin el guard de gestión (solo admin en producción), un usuario read_only
+// podía fijar la cuenta bancaria a la que después van los payouts.
+func TestManageGuard_BlocksMerchantWritesButNotRead(t *testing.T) {
+	deny := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+	}
+	env := newTestEnvWithGuards(t, RouteGuards{Manage: deny, Review: allow})
+	app := pendingApp(t, env.tenantID)
+	env.repo.byTenant[env.tenantID] = app
+	env.repo.byID[app.ID()] = app
+
+	writes := []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/onboarding"},
+		{http.MethodPost, "/api/v1/onboarding/documents"},
+		{http.MethodPost, "/api/v1/onboarding/persons"},
+		{http.MethodPut, "/api/v1/onboarding/bank-account"},
+		{http.MethodPost, "/api/v1/onboarding/submit"},
+	}
+	for _, w := range writes {
+		if rec := env.do(w.method, w.path, map[string]string{}); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s = %d, want 403", w.method, w.path, rec.Code)
 		}
-	}()
-	RegisterRoutes(gin.New().Group("/api/v1"), &OnboardingHandler{}, &ReviewHandler{}, nil)
+	}
+	if app.BankAccount() != nil {
+		t.Error("bank account must not be set")
+	}
+	if rec := env.do(http.MethodGet, "/api/v1/onboarding", nil); rec.Code != http.StatusOK {
+		t.Errorf("GET = %d, want 200", rec.Code)
+	}
+}
+
+func TestRegisterRoutes_PanicsWithoutGuards(t *testing.T) {
+	for _, g := range []RouteGuards{{Manage: allow}, {Review: allow}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("expected panic with guards %+v", g)
+				}
+			}()
+			RegisterRoutes(gin.New().Group("/api/v1"), &OnboardingHandler{}, &ReviewHandler{}, g)
+		}()
+	}
 }
 
 // ── respondDomainError ────────────────────────────────────────────────────────

@@ -196,13 +196,14 @@ o el default (`enabled=true`, sin override). Tolera filas legacy con sufijo de v
 ## 6. API HTTP
 
 Grupo `protected` (JWT) → `/api/v1/notifications`. El tenant sale del token; sin tenant en el
-contexto → **403**.
+contexto → **403**. Las preferencias son del tenant, no de cada usuario: cambiarlas exige
+`notifications:manage` (solo `admin`, vía `RouteGuards.Manage` desde `cmd/api`). Leer no lleva guard.
 
 | Método | Ruta | Descripción | Respuestas |
 |---|---|---|---|
 | `GET` | `/notifications?limit=50` | Historial del tenant, `created_at DESC` (máx. 200). `{notifications:[…], count}` | 200 · 403 · 500 |
 | `GET` | `/notifications/preferences` | Preferencias completas (defaults incluidos) | 200 · 403 · 500 |
-| `PUT` | `/notifications/preferences/:eventType` | Body `{"enabled":bool,"recipient_email":string?}` | 204 · 400 (body o email inválido) · 403 · 404 (event type sin template) · 500 (sin detalle interno) |
+| `PUT` | `/notifications/preferences/:eventType` | Body `{"enabled":bool,"recipient_email":string?}` | 204 · 400 (body o email inválido) · 403 (sin tenant o sin `notifications:manage`) · 404 (event type sin template) · 500 (sin detalle interno) |
 
 ---
 

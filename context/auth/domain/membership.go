@@ -98,6 +98,12 @@ const (
 	ActionManageDisputes Action = "disputes:manage"
 	// ActionCreatePayout: retirar el saldo del comercio a su banco. Solo admin.
 	ActionCreatePayout Action = "payouts:create"
+	// ActionManageOnboarding: cargar y enviar la solicitud KYC, incluida la
+	// cuenta bancaria a la que van los payouts. Solo admin.
+	ActionManageOnboarding Action = "onboarding:manage"
+	// ActionManageNotifications: cambiar las preferencias de notificación, que
+	// son del tenant (no de cada usuario). Solo admin.
+	ActionManageNotifications Action = "notifications:manage"
 )
 
 type permissionSet []Action
@@ -124,6 +130,8 @@ var rolePermissions = map[Role]permissionSet{
 		ActionManageWebhooks,
 		ActionManageDisputes,
 		ActionCreatePayout,
+		ActionManageOnboarding,
+		ActionManageNotifications,
 	},
 	RoleOperator: {
 		ActionCreatePayment,
