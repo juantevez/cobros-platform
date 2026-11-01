@@ -333,6 +333,14 @@ func TestGet(t *testing.T) {
 		}
 	})
 
+	// Un ID mal formado respondía 500.
+	t.Run("malformed payout id returns 400", func(t *testing.T) {
+		rec := doRequest(newHandler(newRepo(), defaultOpts()).Get, http.MethodGet, "/payouts/abc", "", tid, param("abc"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body)
+		}
+	})
+
 	t.Run("payout of another tenant returns 404", func(t *testing.T) {
 		r := newRepo()
 		p := seedPayout(r, uuid.NewString())
@@ -390,6 +398,14 @@ func TestList(t *testing.T) {
 		})
 	}
 
+	t.Run("huge limit is capped at 100", func(t *testing.T) {
+		r := newRepo()
+		doRequest(newHandler(r, defaultOpts()).List, http.MethodGet, "/payouts?limit=1000000", "", tid, nil)
+		if r.lastLimit != 100 {
+			t.Errorf("limit = %d, want 100", r.lastLimit)
+		}
+	})
+
 	t.Run("empty list returns empty array", func(t *testing.T) {
 		rec := doRequest(newHandler(newRepo(), defaultOpts()).List, http.MethodGet, "/payouts", "", tid, nil)
 		if !strings.Contains(rec.Body.String(), `"payouts":[]`) || !strings.Contains(rec.Body.String(), `"count":0`) {
@@ -420,6 +436,7 @@ func TestRespondDomainError(t *testing.T) {
 		{domain.ErrInvalidTransition, http.StatusUnprocessableEntity},
 		{domain.ErrInvalidAmount, http.StatusBadRequest},
 		{domain.ErrInvalidCurrency, http.StatusBadRequest},
+		{domain.ErrInvalidID, http.StatusBadRequest},
 		{fmt.Errorf("wrapped: %w", domain.ErrPayoutNotFound), http.StatusNotFound},
 		{errBoom, http.StatusInternalServerError},
 	}

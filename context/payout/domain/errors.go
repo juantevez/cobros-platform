@@ -11,6 +11,8 @@ const (
 
 var (
 	ErrPayoutNotFound         = errors.New("payout not found")
+	// ErrInvalidID: un ID (payout, tenant) que no es un UUID.
+	ErrInvalidID = errors.New("invalid id: must be a UUID")
 	ErrInsufficientBalance    = errors.New("insufficient available balance for payout")
 	ErrInvalidAmount          = errors.New("payout amount must be greater than zero")
 	ErrInvalidCurrency        = errors.New("invalid currency code")

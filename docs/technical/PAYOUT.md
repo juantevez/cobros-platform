@@ -115,7 +115,7 @@ Archivo: [domain/errors.go](../../context/payout/domain/errors.go)
 |---|---|
 | `ErrPayoutNotFound` | 404 |
 | `ErrInsufficientBalance`, `ErrNoBankAccount`, `ErrInvalidTransition` | 422 |
-| `ErrInvalidAmount`, `ErrInvalidCurrency`, `ErrIdempotencyKeyRequired` | 400 |
+| `ErrInvalidAmount`, `ErrInvalidCurrency`, `ErrIdempotencyKeyRequired`, `ErrInvalidID` (payout o tenant que no es UUID) | 400 |
 | `ErrPayoutsNotAllowed` (tenant no activo, suspendido o en hold de cumplimiento) | 403, mensaje genérico `payouts are not available for this account` |
 | `ErrIdempotencyKeyConflict` (misma clave, otro monto/moneda), `ErrPayoutAlreadyExists` (carrera perdida contra el UNIQUE) | 409 |
 | `ErrPayoutRejected` (el banco rechazó: su error envuelve `ErrBankRejected`) | **422** con `payout_id` y `status: failed`; el detalle del banco no se expone |
@@ -185,7 +185,7 @@ Archivo: [initiate_payout.go](../../context/payout/application/initiate_payout.g
 
 | Paso | Acción | ¿En tx? | Si falla |
 |---|---|---|---|
-| 1 | Parsear tenant; exigir `IdempotencyKey` no vacía | — | 400/500, sin persistir |
+| 1 | Parsear tenant; exigir `IdempotencyKey` no vacía | — | 400, sin persistir |
 | 1b | `gate.EnsurePayoutsAllowed`: tenant `active` y sin hold de cumplimiento. Va antes del replay: un hold también bloquea reintentos. Moneda default `ARS` | — | 403 `ErrPayoutsNotAllowed`, sin persistir |
 | 2 | `bankProvider.GetBankAccount` (cuenta de solicitud `approved`) | — | 422/500, sin persistir |
 | 3a | `BalanceLocker.LockBalance` — `pg_advisory_xact_lock` keyed por `(tenant, currency)` | Sí | aborta la tx |
@@ -244,7 +244,7 @@ Sin permiso → 403. El tenant sale del token.
 | Método | Ruta | Descripción | Éxito |
 |---|---|---|---|
 | `POST` | `/payouts` | Solicita un desembolso | `201` nuevo / `200` replay idempotente |
-| `GET` | `/payouts?limit=20` | Lista payouts del tenant | `200` |
+| `GET` | `/payouts?limit=20` | Lista payouts del tenant (`limit` por defecto 20, máximo 100; uno mayor se recorta) | `200` |
 | `GET` | `/payouts/:payoutID` | Consulta un payout | `200` |
 
 ### 6.1 Desembolsar — `POST /payouts`
@@ -354,9 +354,8 @@ Tabla `payouts` ([000007](../../migrations/000007_payout_init.up.sql) + [000015]
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Baja | IDs mal formados y `limit` sin tope | `GET /payouts/abc` responde 500; `GET /payouts?limit=1000000` no tiene tope. |
-| 2 | Baja | Código muerto | `ConfirmPayoutCmd`, `FailPayoutCmd`, `ReconstitutePayout` (sin clave), `ErrPayoutAlreadyConfirmed`, `ErrPayoutAlreadyFailed`; `TransferResult.Status` se ignora. |
-| 3 | Producto | Alcance | `bank_acct_num` (CBU) en claro, sin cifrado ni retención. Sin comisión de desembolso. Una sola cuenta por tenant. Desembolsos por API key (hoy solo JWT). El mock de transferencia ignora la clave de idempotencia (un banco real debe honrarla). Los adaptadores reales tienen que envolver `ErrBankRejected` en sus rechazos definitivos. |
+| 1 | Baja | Código muerto | `ConfirmPayoutCmd`, `FailPayoutCmd`, `ReconstitutePayout` (sin clave), `ErrPayoutAlreadyConfirmed`, `ErrPayoutAlreadyFailed`; `TransferResult.Status` se ignora. |
+| 2 | Producto | Alcance | `bank_acct_num` (CBU) en claro, sin cifrado ni retención. Sin comisión de desembolso. Una sola cuenta por tenant. Desembolsos por API key (hoy solo JWT). El mock de transferencia ignora la clave de idempotencia (un banco real debe honrarla). Los adaptadores reales tienen que envolver `ErrBankRejected` en sus rechazos definitivos. |
 
 ---
 

@@ -8,7 +8,10 @@ import (
 	"github.com/juantevez/cobros-platform/context/payout/domain"
 )
 
-const defaultPayoutLimit = 20
+const (
+	defaultPayoutLimit = 20
+	maxPayoutLimit     = 100
+)
 
 // GetPayoutUseCase consulta el estado de un payout.
 type GetPayoutUseCase struct{ repo PayoutRepository }
@@ -52,6 +55,9 @@ func (uc *ListPayoutsUseCase) Execute(ctx context.Context, q ListPayoutsQuery) (
 	limit := q.Limit
 	if limit <= 0 {
 		limit = defaultPayoutLimit
+	}
+	if limit > maxPayoutLimit {
+		limit = maxPayoutLimit
 	}
 
 	payouts, err := uc.repo.ListByTenant(ctx, tenantID, limit)
