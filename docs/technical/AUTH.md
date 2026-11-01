@@ -21,6 +21,7 @@ Todos los demás contextos dependen de Auth para saber "quién es el tenant" de 
 ### Fuera de alcance (hoy)
 
 - Recuperación o cambio de contraseña, verificación de email y MFA.
+- Rate limiting y bloqueo por intentos fallidos (login, refresh, `POST /tenants`): van en el API gateway, un repo aparte con Redis, no en Auth.
 - Gestión de usuarios: listar, suspender o borrar (el dominio tiene `User.Suspend()` pero no hay caso de uso).
 - Usuarios en varios tenants: el modelo de `Membership` lo contempla, pero `users.tenant_id` ata cada usuario a un único tenant.
 
@@ -435,7 +436,7 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 ```
 
 - Los handlers de otros BCs obtienen el tenant con `postgres.TenantIDFromContext(ctx)`.
-- El RLS solo se aplica dentro de `RunInTx` y siempre que el rol de DB no lo saltee. La app conecta como `cobros`, owner de las tablas y sin `FORCE ROW LEVEL SECURITY`, así que **hoy el RLS no filtra nada**. El aislamiento real de Auth depende de que cada query filtre por `tenant_id` (ver §10, punto 3).
+- El RLS solo se aplica dentro de `RunInTx` y siempre que el rol de DB no lo saltee. La app conecta como `cobros`, owner de las tablas y sin `FORCE ROW LEVEL SECURITY`, así que **hoy el RLS no filtra nada**. El aislamiento real de Auth depende de que cada query filtre por `tenant_id` (ver §10, punto 2).
 
 ---
 
@@ -443,18 +444,17 @@ Request ─► CorrelationIDMiddleware ─► JWTMiddleware
 
 | # | Severidad | Tema | Detalle |
 |---|---|---|---|
-| 1 | Alta | Sin límite de intentos | `POST /auth/login`, `/auth/refresh` y `POST /tenants` son públicos y no tienen rate limit ni bloqueo por intentos fallidos. Se puede probar contraseñas sin freno (y no hay política de contraseñas, #6) y dar de alta tenants en masa. |
-| 2 | Alta | Rutas del comercio sin control de rol | En Onboarding, solo revisar exige rol. Cualquier usuario del tenant, incluido `read_only`, puede crear la solicitud KYC, cargar personas y documentos, enviarla a revisión y fijar la cuenta bancaria (`PUT /onboarding/bank-account`), que al aprobarse es la cuenta de destino de los payouts. `/notifications` (preferencias) tampoco tiene guard. |
-| 3 | Media | RLS de Auth no efectiva | Las políticas de `users` y `memberships` (000002) castean `current_setting(...)::uuid` sin `NULLIF`, así que fallan con la variable vacía. Los repos no fijan la sesión del tenant: el login busca el usuario por email sin tenant en el contexto. Con un rol sin `BYPASSRLS`, el login dejaría de funcionar. `api_keys`, `refresh_tokens` y `tenants` no tienen RLS. Los BCs ya revisados corren cada método en la sesión RLS y lo verifican con un rol de prueba. |
-| 4 | Media | Suspensión parcial | Login y refresh rechazan a un tenant suspendido, y Payment y Payout lo bloquean con sus gates. En el resto de los BCs, el JWT vigente sigue valiendo hasta 15 min. `ApiKeyMiddleware` autentica keys de tenants suspendidos, así que webhooks, reportes y consultas siguen respondiendo. |
-| 5 | Media | El entorno de la API key no tiene efecto | `ApiKeyMiddleware` no compara el `<env>` del header con el guardado (la key se busca solo por `prefix`). Ningún BC usa el entorno: no hay sandbox, y una key `test` en un tenant `production` cobra igual que una `production`. Si el entorno tiene que separar dinero real de pruebas, es una decisión de producto. |
-| 6 | Media | Sin política de contraseñas | `RegisterTenant`, `RegisterUser` y `cmd/provision` solo exigen que no sea vacía. |
-| 7 | Media | Refresh sin atomicidad ni detección de reuso | Dos refresh concurrentes con el mismo token pasan ambos el chequeo de `revoked_at` y emiten dos pares: `Revoke` ignora el caso de 0 filas. `Save` del nuevo token y `Revoke` del anterior no son transaccionales. El reuso de un token ya rotado solo se rechaza, sin revocar la familia. El repo devuelve `ErrUserNotFound` como "token no encontrado". |
-| 8 | Media | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Si un operador activó el tenant en `test`, el consumer de onboarding (§7.2) falla 5 veces con `ErrTenantCannotTransition` y descarta el mensaje: el tenant queda en `test` con el KYC aprobado. |
-| 9 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
-| 10 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
-| 11 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
-| 12 | Producto | Alcance | Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
+| 1 | Alta | Rutas del comercio sin control de rol | En Onboarding, solo revisar exige rol. Cualquier usuario del tenant, incluido `read_only`, puede crear la solicitud KYC, cargar personas y documentos, enviarla a revisión y fijar la cuenta bancaria (`PUT /onboarding/bank-account`), que al aprobarse es la cuenta de destino de los payouts. `/notifications` (preferencias) tampoco tiene guard. |
+| 2 | Media | RLS de Auth no efectiva | Las políticas de `users` y `memberships` (000002) castean `current_setting(...)::uuid` sin `NULLIF`, así que fallan con la variable vacía. Los repos no fijan la sesión del tenant: el login busca el usuario por email sin tenant en el contexto. Con un rol sin `BYPASSRLS`, el login dejaría de funcionar. `api_keys`, `refresh_tokens` y `tenants` no tienen RLS. Los BCs ya revisados corren cada método en la sesión RLS y lo verifican con un rol de prueba. |
+| 3 | Media | Suspensión parcial | Login y refresh rechazan a un tenant suspendido, y Payment y Payout lo bloquean con sus gates. En el resto de los BCs, el JWT vigente sigue valiendo hasta 15 min. `ApiKeyMiddleware` autentica keys de tenants suspendidos, así que webhooks, reportes y consultas siguen respondiendo. |
+| 4 | Media | El entorno de la API key no tiene efecto | `ApiKeyMiddleware` no compara el `<env>` del header con el guardado (la key se busca solo por `prefix`). Ningún BC usa el entorno: no hay sandbox, y una key `test` en un tenant `production` cobra igual que una `production`. Si el entorno tiene que separar dinero real de pruebas, es una decisión de producto. |
+| 5 | Media | Sin política de contraseñas | `RegisterTenant`, `RegisterUser` y `cmd/provision` solo exigen que no sea vacía. |
+| 6 | Media | Refresh sin atomicidad ni detección de reuso | Dos refresh concurrentes con el mismo token pasan ambos el chequeo de `revoked_at` y emiten dos pares: `Revoke` ignora el caso de 0 filas. `Save` del nuevo token y `Revoke` del anterior no son transaccionales. El reuso de un token ya rotado solo se rechaza, sin revocar la familia. El repo devuelve `ErrUserNotFound` como "token no encontrado". |
+| 7 | Media | Transiciones de tenant incompletas | No hay `test → production` ni reactivación desde `suspended`. Si un operador activó el tenant en `test`, el consumer de onboarding (§7.2) falla 5 veces con `ErrTenantCannotTransition` y descarta el mensaje: el tenant queda en `test` con el KYC aprobado. |
+| 8 | Baja | Errores no tipados → 500 | En `IssueApiKey`, un scope inválido (`ParseScope` usa `fmt.Errorf`) y una key `production` en un tenant `test` responden 500. |
+| 9 | Baja | Enumeración en login | Un tenant o usuario suspendido devuelve 403 antes de verificar la contraseña. Un email inexistente responde más rápido porque no corre Argon2 (timing). Un usuario sin membership devuelve `404 membership not found` después de validar la contraseña. |
+| 10 | Baja | Rol inicial no auditado | `RegisterTenant` y `RegisterUser` no emiten `auth.role.assigned.v1`: Audit no registra el rol con que nace el usuario. |
+| 11 | Producto | Alcance | Falta gestión de usuarios: listar, suspender, cambiar o recuperar la contraseña. `auth.user.suspended.v1` nunca se emite y `SuspendUserCmd` está sin uso. Tampoco hay verificación de email ni MFA. `POST /tenants` no verifica el email del admin. Usuarios en varios tenants: `users.tenant_id` ata cada usuario a uno. |
 
 ---
 
